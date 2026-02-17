@@ -6,7 +6,7 @@
 
 function initModel(globals){
 
-    var material, material2, geometry, lineGeo;
+    var material, material2, geometry, backsideGeometry, lineGeo;
     var frontside = new THREE.Mesh();//front face of mesh
     var backside = new THREE.Mesh();//back face of mesh (different color)
     backside.visible = false;
@@ -35,14 +35,19 @@ function initModel(globals){
 
         if (geometry) {
             frontside.geometry = null;
-            backside.geometry = null;
             geometry.dispose();
+        }
+        if (backsideGeometry) {
+            backside.geometry = null;
+            backsideGeometry.dispose();
         }
 
         geometry = new THREE.BufferGeometry();
+        backsideGeometry = new THREE.BufferGeometry();
         frontside.geometry = geometry;
-        backside.geometry = geometry;
+        backside.geometry = geometry;//default: shared geometry (overridden per mode)
         geometry.dynamic = true;
+        backsideGeometry.dynamic = true;
 
         _.each(lines, function(line){
             var lineGeometry = line.geometry;
@@ -113,26 +118,95 @@ function initModel(globals){
         return new THREE.Vector3(cx/count, cy/count, cz/count);
     }
 
+    function getFaceCentroid(faceIndex){
+        if (faceIndex < 0 || faceIndex >= faces.length) return null;
+        var face = faces[faceIndex];
+        var cx = 0, cy = 0, cz = 0;
+        for (var v = 0; v < 3; v++){
+            cx += positions[face[v]*3];
+            cy += positions[face[v]*3+1];
+            cz += positions[face[v]*3+2];
+        }
+        return new THREE.Vector3(cx/3, cy/3, cz/3);
+    }
+
+    function getFaceNormal(faceIndex){
+        if (faceIndex < 0 || faceIndex >= faces.length) return null;
+        var face = faces[faceIndex];
+        var a = new THREE.Vector3(positions[face[0]*3], positions[face[0]*3+1], positions[face[0]*3+2]);
+        var b = new THREE.Vector3(positions[face[1]*3], positions[face[1]*3+1], positions[face[1]*3+2]);
+        var c = new THREE.Vector3(positions[face[2]*3], positions[face[2]*3+1], positions[face[2]*3+2]);
+        var edge1 = b.clone().sub(a);
+        var edge2 = c.clone().sub(a);
+        return edge1.cross(edge2).normalize();
+    }
+
     function updateLabels(){
-        var showLabels = globals.colorMode == "faceID" || globals.colorMode == "labelOnly";
-        if (showLabels && globals.highlightedFaceA >= 0 && globals.highlightedFaceA < numPanels){
-            var centroid = getPanelCentroid(globals.highlightedFaceA);
-            if (centroid){
-                labelA.position.copy(centroid);
-                labelA.position.y += 0.08;
-                labelA.visible = true;
-            } else { labelA.visible = false; }
+        var showPanelLabels = globals.colorMode == "faceID";
+        var showTriLabels = globals.colorMode == "faceTriangleID" || globals.colorMode == "labelOnly";
+
+        if (showPanelLabels){
+            if (globals.highlightedFaceA >= 0 && globals.highlightedFaceA < numPanels){
+                var centroid = getPanelCentroid(globals.highlightedFaceA);
+                if (centroid){
+                    labelA.position.copy(centroid);
+                    labelA.position.y += 0.08;
+                    labelA.visible = true;
+                } else { labelA.visible = false; }
+            } else {
+                labelA.visible = false;
+            }
+            if (globals.highlightedFaceB >= 0 && globals.highlightedFaceB < numPanels){
+                var centroid = getPanelCentroid(globals.highlightedFaceB);
+                if (centroid){
+                    labelB.position.copy(centroid);
+                    labelB.position.y += 0.08;
+                    labelB.visible = true;
+                } else { labelB.visible = false; }
+            } else {
+                labelB.visible = false;
+            }
+        } else if (showTriLabels){
+            //for faceTriangleID mode, labels only visible when camera is on the face's side
+            //face IDs 0..N-1 = front (normal side), N..2N-1 = back (opposite of normal)
+            var camera = globals.threeView.camera;
+            var N = faces.length;
+            var highlightA = globals.highlightedTriFaceA;
+            var highlightB = globals.highlightedTriFaceB;
+
+            labelA.visible = false;
+            if (highlightA >= 0 && highlightA < N * 2){
+                var triIdx = highlightA < N ? highlightA : highlightA - N;
+                var isFront = highlightA < N;
+                var centroid = getFaceCentroid(triIdx);
+                var normal = getFaceNormal(triIdx);
+                if (centroid && normal){
+                    //offset along face normal so label sits just above the face surface
+                    var offset = normal.clone().multiplyScalar(isFront ? 0.01 : -0.01);
+                    labelA.position.copy(centroid).add(offset);
+                    var toCamera = camera.position.clone().sub(centroid);
+                    var dot = toCamera.dot(normal);
+                    //front faces visible when dot > 0, back faces when dot < 0
+                    labelA.visible = isFront ? dot > 0 : dot < 0;
+                }
+            }
+
+            labelB.visible = false;
+            if (highlightB >= 0 && highlightB < N * 2){
+                var triIdx = highlightB < N ? highlightB : highlightB - N;
+                var isFront = highlightB < N;
+                var centroid = getFaceCentroid(triIdx);
+                var normal = getFaceNormal(triIdx);
+                if (centroid && normal){
+                    var offset = normal.clone().multiplyScalar(isFront ? 0.01 : -0.01);
+                    labelB.position.copy(centroid).add(offset);
+                    var toCamera = camera.position.clone().sub(centroid);
+                    var dot = toCamera.dot(normal);
+                    labelB.visible = isFront ? dot > 0 : dot < 0;
+                }
+            }
         } else {
             labelA.visible = false;
-        }
-        if (showLabels && globals.highlightedFaceB >= 0 && globals.highlightedFaceB < numPanels){
-            var centroid = getPanelCentroid(globals.highlightedFaceB);
-            if (centroid){
-                labelB.position.copy(centroid);
-                labelB.position.y += 0.08;
-                labelB.visible = true;
-            } else { labelB.visible = false; }
-        } else {
             labelB.visible = false;
         }
     }
@@ -141,7 +215,9 @@ function initModel(globals){
     var colors;//node colors (for strain mode)
     var meshPositions;//per-face vertex positions (non-indexed, for mesh)
     var meshColors;//per-face vertex colors (non-indexed, for mesh)
+    var meshColorsBack;//per-face vertex colors for backside (faceTriangleID mode)
     var panelColorPalette = [];//precomputed color per logical panel
+    var faceColorPalette = [];//precomputed color per individual triangle face
     var faceToPanel = [];//maps triangle index to logical panel index
     var numPanels = 0;
     var indices;
@@ -158,6 +234,10 @@ function initModel(globals){
 
     function setMeshMaterial() {
         var polygonOffset = 0.5;
+        //restore shared geometry for backside (overridden in faceTriangleID)
+        if (globals.colorMode != "faceTriangleID") {
+            backside.geometry = geometry;
+        }
         if (globals.colorMode == "normal") {
             material = new THREE.MeshNormalMaterial({
                 flatShading:true,
@@ -188,6 +268,25 @@ function initModel(globals){
                 polygonOffsetUnits: 1
             });
             backside.visible = false;
+            updateFaceColors();
+        } else if (globals.colorMode == "faceTriangleID"){
+            material = new THREE.MeshBasicMaterial({
+                vertexColors: THREE.VertexColors,
+                side: THREE.FrontSide,
+                polygonOffset: true,
+                polygonOffsetFactor: polygonOffset,
+                polygonOffsetUnits: 1
+            });
+            material2 = new THREE.MeshBasicMaterial({
+                vertexColors: THREE.VertexColors,
+                side: THREE.BackSide,
+                polygonOffset: true,
+                polygonOffsetFactor: polygonOffset,
+                polygonOffsetUnits: 1
+            });
+            //backside uses its own geometry with separate color buffer
+            backside.geometry = backsideGeometry;
+            backside.visible = true;
             updateFaceColors();
         } else if (globals.colorMode == "labelOnly"){
             material = new THREE.MeshPhongMaterial({
@@ -294,27 +393,74 @@ function initModel(globals){
             var hue = (p * 0.618033988749895) % 1.0;
             panelColorPalette.push(new THREE.Color().setHSL(hue, 0.7, 0.6));
         }
+
+        //build color palette for individual triangle faces (2N: front 0..N-1, back N..2N-1)
+        faceColorPalette = [];
+        for (var f = 0; f < faces.length * 2; f++){
+            var hue = (f * 0.618033988749895) % 1.0;
+            faceColorPalette.push(new THREE.Color().setHSL(hue, 0.7, 0.6));
+        }
     }
 
     function updateFaceColors(){
         if (!meshColors || faces.length === 0) return;
         var colorA = new THREE.Color(1.0, 0.2, 0.2);//red for Point A
         var colorB = new THREE.Color(0.2, 0.4, 1.0);//blue for Point B
-        for (var f = 0; f < faces.length; f++){
-            var panel = faceToPanel[f];
-            var color;
-            if (panel === globals.highlightedFaceA){
-                color = colorA;
-            } else if (panel === globals.highlightedFaceB){
-                color = colorB;
-            } else {
-                color = panelColorPalette[panel] || new THREE.Color(0.5, 0.5, 0.5);
+        var N = faces.length;
+
+        if (globals.colorMode == "faceTriangleID"){
+            //per-face (triangle) coloring with separate front/back colors
+            //face IDs 0..N-1 = front side, N..2N-1 = back side
+            var highlightA = globals.highlightedTriFaceA;
+            var highlightB = globals.highlightedTriFaceB;
+            for (var f = 0; f < N; f++){
+                //front side color
+                var frontColor;
+                if (f === highlightA){
+                    frontColor = colorA;
+                } else if (f === highlightB){
+                    frontColor = colorB;
+                } else {
+                    frontColor = faceColorPalette[f] || new THREE.Color(0.5, 0.5, 0.5);
+                }
+                //back side color (index f+N in palette)
+                var backColor;
+                if ((f + N) === highlightA){
+                    backColor = colorA;
+                } else if ((f + N) === highlightB){
+                    backColor = colorB;
+                } else {
+                    backColor = faceColorPalette[f + N] || new THREE.Color(0.5, 0.5, 0.5);
+                }
+                for (var v = 0; v < 3; v++){
+                    var idx = (f * 3 + v) * 3;
+                    meshColors[idx] = frontColor.r;
+                    meshColors[idx + 1] = frontColor.g;
+                    meshColors[idx + 2] = frontColor.b;
+                    meshColorsBack[idx] = backColor.r;
+                    meshColorsBack[idx + 1] = backColor.g;
+                    meshColorsBack[idx + 2] = backColor.b;
+                }
             }
-            for (var v = 0; v < 3; v++){
-                var idx = (f * 3 + v) * 3;
-                meshColors[idx] = color.r;
-                meshColors[idx + 1] = color.g;
-                meshColors[idx + 2] = color.b;
+            if (backsideGeometry.attributes.color) backsideGeometry.attributes.color.needsUpdate = true;
+        } else {
+            //per-panel coloring (faceID mode)
+            for (var f = 0; f < N; f++){
+                var panel = faceToPanel[f];
+                var color;
+                if (panel === globals.highlightedFaceA){
+                    color = colorA;
+                } else if (panel === globals.highlightedFaceB){
+                    color = colorB;
+                } else {
+                    color = panelColorPalette[panel] || new THREE.Color(0.5, 0.5, 0.5);
+                }
+                for (var v = 0; v < 3; v++){
+                    var idx = (f * 3 + v) * 3;
+                    meshColors[idx] = color.r;
+                    meshColors[idx + 1] = color.g;
+                    meshColors[idx + 2] = color.b;
+                }
             }
         }
         if (geometry.attributes.color) geometry.attributes.color.needsUpdate = true;
@@ -346,7 +492,7 @@ function initModel(globals){
 
     function updateMeshVisibility(){
         frontside.visible = globals.meshVisible;
-        backside.visible = (globals.colorMode == "color" || globals.colorMode == "labelOnly") && globals.meshVisible;
+        backside.visible = (globals.colorMode == "color" || globals.colorMode == "labelOnly" || globals.colorMode == "faceTriangleID") && globals.meshVisible;
     }
 
     function getGeometry(){
@@ -397,6 +543,8 @@ function initModel(globals){
         //update mesh positions from node positions
         expandPositionsToMesh();
         geometry.attributes.position.needsUpdate = true;
+        //backsideGeometry shares the same meshPositions buffer
+        if (backsideGeometry.attributes.position) backsideGeometry.attributes.position.needsUpdate = true;
         if (globals.colorMode == "axialStrain"){
             //strain mode: copy per-node colors into per-face-vertex colors
             for (var f = 0; f < faces.length; f++){
@@ -531,6 +679,7 @@ function initModel(globals){
         //per-face-vertex arrays (used by mesh, non-indexed)
         meshPositions = new Float32Array(faces.length*3*3);
         meshColors = new Float32Array(faces.length*3*3);
+        meshColorsBack = new Float32Array(faces.length*3*3);
 
         for (var i=0;i<vertices.length;i++){
             positions[3*i] = vertices[i].x;
@@ -582,6 +731,14 @@ function initModel(globals){
         geometry.computeBoundingSphere();
         geometry.center();
 
+        //backside geometry shares positions but has its own color buffer
+        backsideGeometry.addAttribute('position', new THREE.BufferAttribute(meshPositions, 3));
+        backsideGeometry.addAttribute('color', new THREE.BufferAttribute(meshColorsBack, 3));
+        backsideGeometry.computeVertexNormals();
+        backsideGeometry.computeBoundingBox();
+        backsideGeometry.computeBoundingSphere();
+        backsideGeometry.center();
+
         var scale = 1/geometry.boundingSphere.radius;
         globals.scale = scale;
 
@@ -608,9 +765,14 @@ function initModel(globals){
 
         //group triangles into logical panels and build color palette
         buildPanelMap();
-        if (globals.colorMode == "faceID") updateFaceColors();
+        if (globals.colorMode == "faceID" || globals.colorMode == "faceTriangleID") updateFaceColors();
         $("#totalFaces").html(numPanels);
-        $("#totalFacesLabel").html(numPanels);
+        var totalTriFaces = faces.length * 2;
+        $("#totalFacesLabel").html(totalTriFaces);
+        $("#totalTriFaces").html(totalTriFaces);
+        $("#triFrontMax, #labelFrontMax").html(faces.length - 1);
+        $("#triBackMin, #labelBackMin").html(faces.length);
+        $("#triBackMax, #labelBackMax").html(faces.length * 2 - 1);
 
         updateEdgeVisibility();
         updateMeshVisibility();

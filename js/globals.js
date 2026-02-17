@@ -106,7 +106,10 @@ function initGlobals(){
         shouldAnimateFoldPercent: false,
 
         highlightedFaceA: -1,
-        highlightedFaceB: -1
+        highlightedFaceB: -1,
+
+        highlightedTriFaceA: -1,
+        highlightedTriFaceB: -1
     };
 
     function setCreasePercent(percent){

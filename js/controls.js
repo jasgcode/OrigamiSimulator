@@ -569,6 +569,8 @@ function initControls(globals){
     else $("#axialStrainMaterialOptions").hide();
     if (globals.colorMode == "faceID") $("#faceIDOptions").show();
     else $("#faceIDOptions").hide();
+    if (globals.colorMode == "faceTriangleID") $("#faceTriangleIDOptions").show();
+    else $("#faceTriangleIDOptions").hide();
     if (globals.colorMode == "labelOnly") $("#labelOnlyOptions").show();
     else $("#labelOnlyOptions").hide();
 
@@ -588,6 +590,8 @@ function initControls(globals){
         else $("#axialStrainMaterialOptions").hide();
         if (val == "faceID") $("#faceIDOptions").show();
         else $("#faceIDOptions").hide();
+        if (val == "faceTriangleID") $("#faceTriangleIDOptions").show();
+        else $("#faceTriangleIDOptions").hide();
         if (val == "labelOnly") $("#labelOnlyOptions").show();
         else $("#labelOnlyOptions").hide();
         $(".radio>input[value="+val+"]").prop("checked", true);
@@ -603,22 +607,36 @@ function initControls(globals){
 
     function onHighlightChange(){
         if (globals.colorMode == "faceID") globals.model.updateFaceColors();
+        if (globals.colorMode == "faceTriangleID") globals.model.updateFaceColors();
         if (globals.colorMode == "labelOnly") globals.model.updateFaceColors();
     }
-    $("#highlightFaceA, #labelOnlyFaceA").on("change", function(){
+    $("#highlightFaceA").on("change", function(){
         var val = $(this).val();
         globals.highlightedFaceA = (val === "" || isNaN(parseInt(val))) ? -1 : parseInt(val);
-        //sync both inputs
         $("#highlightFaceA").val(globals.highlightedFaceA >= 0 ? globals.highlightedFaceA : "");
-        $("#labelOnlyFaceA").val(globals.highlightedFaceA >= 0 ? globals.highlightedFaceA : "");
         onHighlightChange();
     });
-    $("#highlightFaceB, #labelOnlyFaceB").on("change", function(){
+    $("#highlightFaceB").on("change", function(){
         var val = $(this).val();
         globals.highlightedFaceB = (val === "" || isNaN(parseInt(val))) ? -1 : parseInt(val);
-        //sync both inputs
         $("#highlightFaceB").val(globals.highlightedFaceB >= 0 ? globals.highlightedFaceB : "");
-        $("#labelOnlyFaceB").val(globals.highlightedFaceB >= 0 ? globals.highlightedFaceB : "");
+        onHighlightChange();
+    });
+
+    $("#highlightTriFaceA, #labelOnlyFaceA").on("change", function(){
+        var val = $(this).val();
+        globals.highlightedTriFaceA = (val === "" || isNaN(parseInt(val))) ? -1 : parseInt(val);
+        //sync both inputs
+        $("#highlightTriFaceA").val(globals.highlightedTriFaceA >= 0 ? globals.highlightedTriFaceA : "");
+        $("#labelOnlyFaceA").val(globals.highlightedTriFaceA >= 0 ? globals.highlightedTriFaceA : "");
+        onHighlightChange();
+    });
+    $("#highlightTriFaceB, #labelOnlyFaceB").on("change", function(){
+        var val = $(this).val();
+        globals.highlightedTriFaceB = (val === "" || isNaN(parseInt(val))) ? -1 : parseInt(val);
+        //sync both inputs
+        $("#highlightTriFaceB").val(globals.highlightedTriFaceB >= 0 ? globals.highlightedTriFaceB : "");
+        $("#labelOnlyFaceB").val(globals.highlightedTriFaceB >= 0 ? globals.highlightedTriFaceB : "");
         onHighlightChange();
     });
 

@@ -1289,7 +1289,7 @@
                     </label>
                     <label class="radio">
                         <input name="colorMode" value="faceID" data-toggle="radio" class="custom-radio" type="radio"><span class="icons"><span class="icon-unchecked"></span><span class="icon-checked"></span></span>
-                        Face ID Colors
+                        Panel ID Colors
                     </label>
                     <div id="faceIDOptions" class="indent" style="display:none;">
                         <label>Point A (Panel): &nbsp;&nbsp;</label>
@@ -1299,17 +1299,30 @@
                         <span class="smallTxt">Total panels: <span id="totalFaces">0</span></span>
                     </div>
                     <label class="radio">
+                        <input name="colorMode" value="faceTriangleID" data-toggle="radio" class="custom-radio" type="radio"><span class="icons"><span class="icon-unchecked"></span><span class="icon-checked"></span></span>
+                        Face (Triangle) ID Colors
+                    </label>
+                    <div id="faceTriangleIDOptions" class="indent" style="display:none;">
+                        <label>Point A (Face): &nbsp;&nbsp;</label>
+                        <input id="highlightTriFaceA" value="" placeholder="none" class="int form-control" type="text" style="width:70px; display:inline-block;"><br/>
+                        <label>Point B (Face): &nbsp;&nbsp;</label>
+                        <input id="highlightTriFaceB" value="" placeholder="none" class="int form-control" type="text" style="width:70px; display:inline-block;"><br/>
+                        <span class="smallTxt">Total faces: <span id="totalTriFaces">0</span> (0&ndash;<span id="triFrontMax"></span> front, <span id="triBackMin"></span>&ndash;<span id="triBackMax"></span> back)</span><br/>
+                        <span class="smallTxt">Labels visible only from the face's side.</span>
+                    </div>
+                    <label class="radio">
                         <input name="colorMode" value="labelOnly" data-toggle="radio" class="custom-radio" type="radio"><span class="icons"><span class="icon-unchecked"></span><span class="icon-checked"></span></span>
                         Label Only
                     </label>
                     <div id="labelOnlyOptions" class="indent" style="display:none;">
                         <label>Color 1 (rgb hex): &nbsp;&nbsp;</label><input id="labelOnlyColor1" value="" placeholder="" class="hexVal form-control" type="text"><br/>
                         <label>Color 2 (rgb hex): &nbsp;&nbsp;</label><input id="labelOnlyColor2" value="" placeholder="" class="hexVal form-control" type="text"><br/>
-                        <label>Point A (Panel): &nbsp;&nbsp;</label>
+                        <label>Point A (Face): &nbsp;&nbsp;</label>
                         <input id="labelOnlyFaceA" value="" placeholder="none" class="int form-control" type="text" style="width:70px; display:inline-block;"><br/>
-                        <label>Point B (Panel): &nbsp;&nbsp;</label>
+                        <label>Point B (Face): &nbsp;&nbsp;</label>
                         <input id="labelOnlyFaceB" value="" placeholder="none" class="int form-control" type="text" style="width:70px; display:inline-block;"><br/>
-                        <span class="smallTxt">Total panels: <span id="totalFacesLabel">0</span></span>
+                        <span class="smallTxt">Total faces: <span id="totalFacesLabel">0</span> (0&ndash;<span id="labelFrontMax"></span> front, <span id="labelBackMin"></span>&ndash;<span id="labelBackMax"></span> back)</span><br/>
+                        <span class="smallTxt">Labels visible only from the face's side.</span>
                     </div>
                 </div>
                 <br/>
