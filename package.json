@@ -1,0 +1,16 @@
+{
+  "name": "origamisimulator",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "scripts":{
+
+    "dev": "bunx serve ."
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}

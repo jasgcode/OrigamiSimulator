@@ -1287,6 +1287,30 @@
                         <input name="colorMode" value="normal" data-toggle="radio" class="custom-radio" type="radio"><span class="icons"><span class="icon-unchecked"></span><span class="icon-checked"></span></span>
                         Face Normals Material
                     </label>
+                    <label class="radio">
+                        <input name="colorMode" value="faceID" data-toggle="radio" class="custom-radio" type="radio"><span class="icons"><span class="icon-unchecked"></span><span class="icon-checked"></span></span>
+                        Face ID Colors
+                    </label>
+                    <div id="faceIDOptions" class="indent" style="display:none;">
+                        <label>Point A (Panel): &nbsp;&nbsp;</label>
+                        <input id="highlightFaceA" value="" placeholder="none" class="int form-control" type="text" style="width:70px; display:inline-block;"><br/>
+                        <label>Point B (Panel): &nbsp;&nbsp;</label>
+                        <input id="highlightFaceB" value="" placeholder="none" class="int form-control" type="text" style="width:70px; display:inline-block;"><br/>
+                        <span class="smallTxt">Total panels: <span id="totalFaces">0</span></span>
+                    </div>
+                    <label class="radio">
+                        <input name="colorMode" value="labelOnly" data-toggle="radio" class="custom-radio" type="radio"><span class="icons"><span class="icon-unchecked"></span><span class="icon-checked"></span></span>
+                        Label Only
+                    </label>
+                    <div id="labelOnlyOptions" class="indent" style="display:none;">
+                        <label>Color 1 (rgb hex): &nbsp;&nbsp;</label><input id="labelOnlyColor1" value="" placeholder="" class="hexVal form-control" type="text"><br/>
+                        <label>Color 2 (rgb hex): &nbsp;&nbsp;</label><input id="labelOnlyColor2" value="" placeholder="" class="hexVal form-control" type="text"><br/>
+                        <label>Point A (Panel): &nbsp;&nbsp;</label>
+                        <input id="labelOnlyFaceA" value="" placeholder="none" class="int form-control" type="text" style="width:70px; display:inline-block;"><br/>
+                        <label>Point B (Panel): &nbsp;&nbsp;</label>
+                        <input id="labelOnlyFaceB" value="" placeholder="none" class="int form-control" type="text" style="width:70px; display:inline-block;"><br/>
+                        <span class="smallTxt">Total panels: <span id="totalFacesLabel">0</span></span>
+                    </div>
                 </div>
                 <br/>
             </div><br/>

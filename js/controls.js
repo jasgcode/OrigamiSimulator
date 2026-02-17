@@ -567,6 +567,10 @@ function initControls(globals){
     else $("#coloredMaterialOptions").hide();
     if (globals.colorMode == "axialStrain") $("#axialStrainMaterialOptions").show();
     else $("#axialStrainMaterialOptions").hide();
+    if (globals.colorMode == "faceID") $("#faceIDOptions").show();
+    else $("#faceIDOptions").hide();
+    if (globals.colorMode == "labelOnly") $("#labelOnlyOptions").show();
+    else $("#labelOnlyOptions").hide();
 
     function setColorMode(val){
         globals.colorMode = val;
@@ -582,6 +586,10 @@ function initControls(globals){
         }
         if (val == "axialStrain") $("#axialStrainMaterialOptions").show();
         else $("#axialStrainMaterialOptions").hide();
+        if (val == "faceID") $("#faceIDOptions").show();
+        else $("#faceIDOptions").hide();
+        if (val == "labelOnly") $("#labelOnlyOptions").show();
+        else $("#labelOnlyOptions").hide();
         $(".radio>input[value="+val+"]").prop("checked", true);
         globals.model.setMeshMaterial();
     }
@@ -591,6 +599,38 @@ function initControls(globals){
     });
     setLink("#strainToggle", function(){
         setColorMode("axialStrain");
+    });
+
+    function onHighlightChange(){
+        if (globals.colorMode == "faceID") globals.model.updateFaceColors();
+        if (globals.colorMode == "labelOnly") globals.model.updateFaceColors();
+    }
+    $("#highlightFaceA, #labelOnlyFaceA").on("change", function(){
+        var val = $(this).val();
+        globals.highlightedFaceA = (val === "" || isNaN(parseInt(val))) ? -1 : parseInt(val);
+        //sync both inputs
+        $("#highlightFaceA").val(globals.highlightedFaceA >= 0 ? globals.highlightedFaceA : "");
+        $("#labelOnlyFaceA").val(globals.highlightedFaceA >= 0 ? globals.highlightedFaceA : "");
+        onHighlightChange();
+    });
+    $("#highlightFaceB, #labelOnlyFaceB").on("change", function(){
+        var val = $(this).val();
+        globals.highlightedFaceB = (val === "" || isNaN(parseInt(val))) ? -1 : parseInt(val);
+        //sync both inputs
+        $("#highlightFaceB").val(globals.highlightedFaceB >= 0 ? globals.highlightedFaceB : "");
+        $("#labelOnlyFaceB").val(globals.highlightedFaceB >= 0 ? globals.highlightedFaceB : "");
+        onHighlightChange();
+    });
+
+    setHexInput("#labelOnlyColor1", globals.color1, function(val){
+        globals.color1 = val;
+        $("#color1").val(val).css({"border-color": "#" + val});
+        globals.model.setMeshMaterial();
+    });
+    setHexInput("#labelOnlyColor2", globals.color2, function(val){
+        globals.color2 = val;
+        $("#color2").val(val).css({"border-color": "#" + val});
+        globals.model.setMeshMaterial();
     });
 
     setHexInput("#color1", globals.color1, function(val){

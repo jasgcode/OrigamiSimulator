@@ -2,6 +2,6 @@ assets/attrib.txt
 .idea/
 todo.rtf
 *.DS_Store
-
+node_modules
 CreasePatternScripts/**/*.pdf
 CreasePatternScripts/**/*.svg

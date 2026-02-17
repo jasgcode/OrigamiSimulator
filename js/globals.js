@@ -103,7 +103,10 @@ function initGlobals(){
         capturerFrames: 0,
         shouldScaleCanvas: false,
         isGif: false,
-        shouldAnimateFoldPercent: false
+        shouldAnimateFoldPercent: false,
+
+        highlightedFaceA: -1,
+        highlightedFaceB: -1
     };
 
     function setCreasePercent(percent){
