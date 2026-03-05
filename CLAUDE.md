@@ -83,11 +83,136 @@ js/
   curvedFolding.js        — Curved crease support
   videoAnimator.js        — GIF/WebM capture
   VRInterface.js          — VR headset support (likely deprecated)
+  benchmark.js            — Benchmark system (presets, run, runAll)
+benchmarks.json           — Benchmark preset definitions
 css/
   main.css, nav.css       — App styles
 dependencies/             — Vendored third-party libs (do NOT npm install these)
 assets/                   — Demo origami patterns (SVG/FOLD) and doc images
 ```
+
+## Benchmark System (`benchmarks.json`)
+
+The benchmark system runs configurable sequences: load a model, apply view/color settings, and either step through fold percentages or run animations. Presets are defined in `benchmarks.json` and can be selected via `?benchmark=<name>` or run in batch with `?runAll=true`.
+
+### Top-level parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `model` | string | Path to demo file (e.g. `/Bases/waterbombBase.svg`). Required for run. |
+| `colorMode` | string | Color mode after load: `color`, `faceTriangleID`, `labelOnly`, `faceID`, `axialStrain`, etc. |
+| `color1` | string | Hex color for front side (labelOnly). E.g. `ec008b`. |
+| `color2` | string | Hex color for back side (labelOnly). E.g. `dddddd`. |
+| `backgroundColor` | string | Hex background color (e.g. `f5f5f5` or `#f5f5f5`). |
+| `fold` | number | Initial fold % (0–100) before any animation. Applied at start. |
+| `pauseDuration` | number | Seconds to wait before starting (animation flow) or at each step (steps flow). Default: 2. |
+| `pointA` | number | Face ID for highlight/point A. |
+| `pointB` | number | Face ID for highlight/point B. |
+| `facePoints` | object \| array | Points on faces. See [Face points](#face-points) below. |
+| `showPointNumbers` | boolean | Show numbers on face points. Default: true. |
+| `autoCapture` | boolean | Capture PNG at each step (steps flow only). |
+| `autoRun` | boolean | Start sequence automatically after load. |
+| `steps` | array | Step-by-step sequence: `[{ fold, pov }, ...]`. See [Steps](#steps). |
+| `previewRotation` | object | Rotate view at fixed fold before fold animation. See [Preview rotation](#preview-rotation). |
+| `foldAnimation` | object | Animate fold over time. See [Fold animation](#fold-animation). |
+
+### Face points
+
+Define points on mesh faces (for `faceTriangleID` / `labelOnly`). Positions are deterministic.
+
+**Counts (object):** `{ "faceId": count, ... }` — N points per face with deterministic layout.
+```json
+"facePoints": { "0": 3, "5": 2 }
+```
+
+**Explicit barycentric (object):** `{ "faceId": [[u,v,w], ...], ... }` — exact barycentric coords.
+```json
+"facePoints": {
+  "0": [[0.33, 0.33, 0.34], [0.5, 0.5, 0]],
+  "5": [[0.5, 0.25, 0.25]]
+}
+```
+
+**Explicit (array):** `[{ faceId, u, v, w }, ...]`.
+```json
+"facePoints": [{ "faceId": 0, "u": 0.33, "v": 0.33, "w": 0.34 }]
+```
+
+### Steps
+
+Step sequence when not using `foldAnimation`. Each step sets fold % and camera POV.
+
+```json
+"steps": [
+  { "fold": 0,   "pov": "iso" },
+  { "fold": 50,  "pov": "z" },
+  { "fold": 100, "pov": "-z" }
+]
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `fold` | number | Fold percentage 0–100. |
+| `pov` | string | Camera POV: `iso`, `x`, `-x`, `y`, `-y`, `z`, `-z`. |
+
+### Preview rotation
+
+Rotate the view around the model at a fixed fold (no folding). Runs before `foldAnimation` when both are present.
+
+```json
+"previewRotation": {
+  "duration": 5,
+  "povKeyframes": [
+    { "progress": 0,  "pov": "iso" },
+    { "progress": 50, "pov": "z" },
+    { "progress": 100, "pov": "iso" }
+  ]
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `duration` | number | Duration in seconds. Default: 2. |
+| `povKeyframes` | array | `[{ progress, pov }, ...]` — progress 0–100. |
+| `fold` | number | Optional override for fold % during preview (otherwise uses top-level `fold`). |
+
+### Fold animation
+
+Animate fold from one % to another over time, with optional POV transition.
+
+```json
+"foldAnimation": {
+  "from": 0,
+  "to": 90,
+  "duration": 5,
+  "delayAfterPreview": 1,
+  "hidePointsDuringAnimation": true,
+  "trackModel": true,
+  "povKeyframes": [
+    { "fold": 0,  "pov": "iso" },
+    { "fold": 50, "pov": "z" },
+    { "fold": 90, "pov": "iso" }
+  ]
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `from` | number | Start fold %. Default: 0 or top-level `fold`. |
+| `to` | number | End fold %. Default: 90. |
+| `duration` | number | Duration in seconds. Default: 4. |
+| `delay` / `delayBeforeAnimation` | number | Seconds to wait before starting (uses `pauseDuration` if omitted). |
+| `delayAfterPreview` | number | Seconds to pause between `previewRotation` and fold animation. |
+| `povKeyframes` | array | `[{ fold, pov }, ...]` — POV at fold %. |
+| `trackModel` | boolean | Rotate model (camera fixed) so points stay in view. |
+| `fitAllPoints` | boolean | Zoom out so entire model stays in view. |
+| `hidePointsDuringAnimation` | boolean | Hide face points during fold. |
+
+### URL parameters
+
+Any JSON parameter can be overridden via URL: `?benchmark=waterbomb-animate&color1=ff0000&pauseDuration=5`. See `js/benchmark.js` for the full URL parameter list.
+
+---
 
 ## Important Conventions
 
