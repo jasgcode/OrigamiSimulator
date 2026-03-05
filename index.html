@@ -782,6 +782,7 @@
     <script type="text/javascript" src="js/beam.js"></script>
     <script type="text/javascript" src="js/crease.js"></script>
     <script type="text/javascript" src="js/model.js"></script>
+    <script type="text/javascript" src="js/facePoints.js"></script>
     <script type="text/javascript" src="js/3dUI.js"></script>
     <script type="text/javascript" src="js/staticSolver.js"></script>
     <script type="text/javascript" src="js/dynamic/dynamicSolver.js"></script>
@@ -796,6 +797,7 @@
     <script type="text/javascript" src="dependencies/cdt2d.js"></script><!-- constrained delaunay triangulation -->
     <script type="text/javascript" src="dependencies/svgpath.js"></script>
     <script type="text/javascript" src="js/curvedFolding.js"></script>
+    <script type="text/javascript" src="js/benchmark.js"></script>
 
     <script type="text/javascript" src="js/main.js"></script>
 </head>
@@ -1303,12 +1305,26 @@
                         Face (Triangle) ID Colors
                     </label>
                     <div id="faceTriangleIDOptions" class="indent" style="display:none;">
-                        <label>Point A (Face): &nbsp;&nbsp;</label>
-                        <input id="highlightTriFaceA" value="" placeholder="none" class="int form-control" type="text" style="width:70px; display:inline-block;"><br/>
-                        <label>Point B (Face): &nbsp;&nbsp;</label>
-                        <input id="highlightTriFaceB" value="" placeholder="none" class="int form-control" type="text" style="width:70px; display:inline-block;"><br/>
+                        <label>Face ID: &nbsp;&nbsp;</label>
+                        <input id="facePointFaceId" value="" placeholder="0" class="int form-control" type="text" style="width:70px; display:inline-block;">
+                        <a href="#" id="addFacePoint" class="btn btn-sm btn-default">Add Point</a><br/>
+                        <span class="smallTxt">Enter a face ID and click Add Point to place at centroid.</span><br/>
+                        <label class="checkbox" for="clickToAddFacePoints">
+                            <input id="clickToAddFacePoints" data-toggle="checkbox" class="custom-checkbox" type="checkbox"><span class="icons"><span class="icon-unchecked"></span><span class="icon-checked"></span></span>
+                            Add points by clicking on face
+                        </label><br/>
+                        <label class="checkbox" for="showFacePointNumbers">
+                            <input id="showFacePointNumbers" data-toggle="checkbox" class="custom-checkbox" type="checkbox"><span class="icons"><span class="icon-unchecked"></span><span class="icon-checked"></span></span>
+                            Show point numbers
+                        </label><br/>
+                        <label class="checkbox" for="facePoints3D">
+                            <input id="facePoints3D" data-toggle="checkbox" class="custom-checkbox" type="checkbox"><span class="icons"><span class="icon-unchecked"></span><span class="icon-checked"></span></span>
+                            3D points (spheres)
+                        </label><br/>
+                        <span class="smallTxt">When enabled, hover shows a preview; click on a face to place a point there. Disabled by default so rotation works without accidental placement. You can rotate (Rotate mode) or grab (Grab mode) while placing and moving points.</span><br/>
+                        <div id="facePointList" class="smallTxt"></div>
                         <span class="smallTxt">Total faces: <span id="totalTriFaces">0</span> (0&ndash;<span id="triFrontMax"></span> front, <span id="triBackMin"></span>&ndash;<span id="triBackMax"></span> back)</span><br/>
-                        <span class="smallTxt">Labels visible only from the face's side.</span>
+                        <span class="smallTxt">Drag points to move them on the face. Remove via × in the list.</span>
                     </div>
                     <label class="radio">
                         <input name="colorMode" value="labelOnly" data-toggle="radio" class="custom-radio" type="radio"><span class="icons"><span class="icon-unchecked"></span><span class="icon-checked"></span></span>
@@ -1317,12 +1333,7 @@
                     <div id="labelOnlyOptions" class="indent" style="display:none;">
                         <label>Color 1 (rgb hex): &nbsp;&nbsp;</label><input id="labelOnlyColor1" value="" placeholder="" class="hexVal form-control" type="text"><br/>
                         <label>Color 2 (rgb hex): &nbsp;&nbsp;</label><input id="labelOnlyColor2" value="" placeholder="" class="hexVal form-control" type="text"><br/>
-                        <label>Point A (Face): &nbsp;&nbsp;</label>
-                        <input id="labelOnlyFaceA" value="" placeholder="none" class="int form-control" type="text" style="width:70px; display:inline-block;"><br/>
-                        <label>Point B (Face): &nbsp;&nbsp;</label>
-                        <input id="labelOnlyFaceB" value="" placeholder="none" class="int form-control" type="text" style="width:70px; display:inline-block;"><br/>
-                        <span class="smallTxt">Total faces: <span id="totalFacesLabel">0</span> (0&ndash;<span id="labelFrontMax"></span> front, <span id="labelBackMin"></span>&ndash;<span id="labelBackMax"></span> back)</span><br/>
-                        <span class="smallTxt">Labels visible only from the face's side.</span>
+                        <span class="smallTxt">Points use the same list as Face (Triangle) ID Colors.</span>
                     </div>
                 </div>
                 <br/>
@@ -1368,6 +1379,14 @@
                     <!--Ambient Occlusion-->
                 <!--</label>-->
             <!--</div>-->
+            <div>
+                <a href="#" class="seeMore closed" data-id="benchmarkSection"><span class="fui-triangle-down"></span>Benchmark:</a>
+            </div>
+            <div id="benchmarkSection" class="hide indent smallTxt">
+                <a href="#" id="runBenchmark" class="btn btn-sm btn-inverse">Run Benchmark</a><br/><br/>
+                <span id="benchmarkStatus">No benchmark configured.</span><br/>
+                <span class="smallTxt">Use URL params or benchmarks.json to configure.</span>
+            </div><br/>
             <div>
                 <a href="#" class="seeMore closed" data-id="virtualReality"><span class="fui-triangle-down"></span>Virtual Reality:</a><a class="about floatRight" href="#" id="aboutVR"><span class="fui-question-circle"></span></a>
             </div>

@@ -55,6 +55,7 @@ $(function() {
     globals.UI3D = init3DUI(globals);
     globals.importer = initImporter(globals);
     globals.model = initModel(globals);
+    globals.facePoints = initFacePoints(globals);
     // globals.staticSolver = initStaticSolver(globals);//still in development
     globals.dynamicSolver = initDynamicSolver(globals);
     // globals.rigidSolver = initRigidSolver(globals);//still in development
@@ -63,14 +64,19 @@ $(function() {
     globals.videoAnimator = initVideoAnimator(globals);
 
     globals.curvedFolding = initCurvedFolding(globals);//for curved folding
+    globals.benchmark = initBenchmark(globals);
 
-    // Load demo model: waterbomb unless model specified in URL via ?model=FILE
-    // where FILE is the data-url attribute of an <a class="demo">.
-    var model = 'Tessellations/huffmanWaterbomb.svg';
-    var match = /[\\?&]model=([^&#]*)/.exec(location.search);
-    if (match) {
-        model = match[1];
-    }
-    model = model.replace(/'/g, ''); // avoid messing up query
-    $(".demo[data-url='"+model+"']").click();
+    // initialize benchmark system (loads JSON presets, applies URL params)
+    // benchmark.init() returns the model to load (from preset or URL),
+    // falling back to the default waterbomb if no benchmark is configured.
+    globals.benchmark.init(function(benchmarkModel) {
+        var model = benchmarkModel || 'Tessellations/huffmanWaterbomb.svg';
+        var match = /[\\?&]model=([^&#]*)/.exec(location.search);
+        if (match) {
+            model = match[1];
+        }
+        model = model.replace(/'/g, '');
+        globals.loadedModel = model;
+        $(".demo[data-url='"+model+"']").click();
+    });
 });

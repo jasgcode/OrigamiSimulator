@@ -68,20 +68,102 @@ function initModel(globals){
         globals.threeView.sceneAddModel(line);
     });
 
-    //3D label sprites for Point A and Point B
-    var labelA = createLabelSprite("A", "#ff3333");//matches colorA in updateFaceColors
-    var labelB = createLabelSprite("B", "#3366ff");//matches colorB in updateFaceColors
+    //3D label sprites for panel mode (Point A and B)
+    var labelA = createLabelSprite("A", "#ff3333");
+    var labelB = createLabelSprite("B", "#3366ff");
     labelA.visible = false;
     labelB.visible = false;
     globals.threeView.sceneAddModel(labelA);
     globals.threeView.sceneAddModel(labelB);
+
+    // Pool of 2D point discs (horizontal, locked orientation) and textures
+    var MAX_POINT_SPRITES = 50;
+    var pointDiscGeo = new THREE.CircleGeometry(0.025, 16);
+    var pointDiscs = [];
+    var pointDiscNumberedMaps = [];
+    var blankPointTexture = null;
+    (function(){
+        var c = document.createElement('canvas');
+        c.width = 64; c.height = 64;
+        var ctx = c.getContext('2d');
+        ctx.beginPath();
+        ctx.arc(32, 32, 28, 0, 2 * Math.PI);
+        ctx.fillStyle = "#000000";
+        ctx.fill();
+        blankPointTexture = new THREE.CanvasTexture(c);
+    })();
+    for (var i = 0; i < MAX_POINT_SPRITES; i++) {
+        var tex = createNumberedPointTexture(i + 1);
+        pointDiscNumberedMaps.push(tex);
+        var mat = new THREE.MeshBasicMaterial({map: tex, side: THREE.DoubleSide, depthTest: true});
+        var disc = new THREE.Mesh(pointDiscGeo, mat);
+        disc.visible = false;
+        globals.threeView.sceneAddModel(disc);
+        pointDiscs.push(disc);
+    }
+    function createNumberedPointTexture(num){
+        var c = document.createElement('canvas');
+        c.width = 64; c.height = 64;
+        var ctx = c.getContext('2d');
+        ctx.beginPath();
+        ctx.arc(32, 32, 28, 0, 2 * Math.PI);
+        ctx.fillStyle = "#000000";
+        ctx.fill();
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "bold 32px Arial";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(String(num), 32, 34);
+        return new THREE.CanvasTexture(c);
+    }
+
+    var pointSphereGeo = new THREE.SphereGeometry(0.015, 12, 8);
+    var pointSphereMat = new THREE.MeshBasicMaterial({color: 0x000000});
+    var pointSpheres = [];
+    for (var i = 0; i < MAX_POINT_SPRITES; i++) {
+        var sph = new THREE.Mesh(pointSphereGeo, pointSphereMat.clone());
+        sph.visible = false;
+        globals.threeView.sceneAddModel(sph);
+        pointSpheres.push(sph);
+    }
+
+    var facePointPreviewSprite = createFacePointPreviewSprite();
+    facePointPreviewSprite.visible = false;
+    globals.threeView.sceneAddModel(facePointPreviewSprite);
+
+    function createFacePointPreviewSprite(){
+        var canvas = document.createElement('canvas');
+        canvas.width = 64;
+        canvas.height = 64;
+        var ctx = canvas.getContext('2d');
+        ctx.beginPath();
+        ctx.arc(32, 32, 26, 0, 2 * Math.PI);
+        ctx.strokeStyle = "rgba(0, 0, 0, 0.6)";
+        ctx.lineWidth = 4;
+        ctx.setLineDash([6, 4]);
+        ctx.stroke();
+        var texture = new THREE.CanvasTexture(canvas);
+        var mat = new THREE.SpriteMaterial({map: texture, depthTest: false, transparent: true, opacity: 0.9});
+        var sprite = new THREE.Sprite(mat);
+        sprite.scale.set(0.035, 0.035, 0.035);
+        return sprite;
+    }
+
+    function updateFacePointPreview(worldPosition, visible){
+        facePointPreviewSprite.visible = visible && worldPosition;
+        if (visible && worldPosition){
+            var toCam = globals.threeView.camera.position.clone().sub(worldPosition);
+            var dist = toCam.length();
+            if (dist > 1e-6) toCam.multiplyScalar(0.02 / dist);
+            facePointPreviewSprite.position.copy(worldPosition).add(toCam);
+        }
+    }
 
     function createLabelSprite(text, bgColor){
         var canvas = document.createElement('canvas');
         canvas.width = 128;
         canvas.height = 128;
         var ctx = canvas.getContext('2d');
-        //circle background
         ctx.beginPath();
         ctx.arc(64, 64, 56, 0, 2 * Math.PI);
         ctx.fillStyle = bgColor;
@@ -89,7 +171,6 @@ function initModel(globals){
         ctx.strokeStyle = "#000000";
         ctx.lineWidth = 4;
         ctx.stroke();
-        //text
         ctx.fillStyle = "#000000";
         ctx.font = "bold 72px Arial";
         ctx.textAlign = "center";
@@ -100,6 +181,15 @@ function initModel(globals){
         var sprite = new THREE.Sprite(spriteMaterial);
         sprite.scale.set(0.08, 0.08, 0.08);
         return sprite;
+    }
+
+    function getPointOnFace(faceIndex, u, v, w){
+        if (faceIndex < 0 || faceIndex >= faces.length) return null;
+        var face = faces[faceIndex];
+        var vA = new THREE.Vector3(positions[face[0]*3], positions[face[0]*3+1], positions[face[0]*3+2]);
+        var vB = new THREE.Vector3(positions[face[1]*3], positions[face[1]*3+1], positions[face[1]*3+2]);
+        var vC = new THREE.Vector3(positions[face[2]*3], positions[face[2]*3+1], positions[face[2]*3+2]);
+        return vA.clone().multiplyScalar(u).add(vB.clone().multiplyScalar(v)).add(vC.clone().multiplyScalar(w));
     }
 
     function getPanelCentroid(panelIndex){
@@ -167,47 +257,59 @@ function initModel(globals){
                 labelB.visible = false;
             }
         } else if (showTriLabels){
-            //for faceTriangleID mode, labels only visible when camera is on the face's side
-            //face IDs 0..N-1 = front (normal side), N..2N-1 = back (opposite of normal)
+            //faceTriangleID / labelOnly: use numbered point sprites from facePoints
             var camera = globals.threeView.camera;
             var N = faces.length;
-            var highlightA = globals.highlightedTriFaceA;
-            var highlightB = globals.highlightedTriFaceB;
+            var pts = (globals.facePoints && globals.facePoints.getPoints) ? globals.facePoints.getPoints() : [];
 
             labelA.visible = false;
-            if (highlightA >= 0 && highlightA < N * 2){
-                var triIdx = highlightA < N ? highlightA : highlightA - N;
-                var isFront = highlightA < N;
-                var centroid = getFaceCentroid(triIdx);
-                var normal = getFaceNormal(triIdx);
-                if (centroid && normal){
-                    //offset along face normal so label sits just above the face surface
-                    var offset = normal.clone().multiplyScalar(isFront ? 0.01 : -0.01);
-                    labelA.position.copy(centroid).add(offset);
-                    var toCamera = camera.position.clone().sub(centroid);
-                    var dot = toCamera.dot(normal);
-                    //front faces visible when dot > 0, back faces when dot < 0
-                    labelA.visible = isFront ? dot > 0 : dot < 0;
-                }
-            }
-
             labelB.visible = false;
-            if (highlightB >= 0 && highlightB < N * 2){
-                var triIdx = highlightB < N ? highlightB : highlightB - N;
-                var isFront = highlightB < N;
-                var centroid = getFaceCentroid(triIdx);
+            for (var si = 0; si < pointDiscs.length; si++){
+                pointDiscs[si].visible = false;
+                pointSpheres[si].visible = false;
+            }
+            if (facePointPreviewSprite.visible){
+                var pulse = 0.032 + 0.008 * Math.sin(Date.now() / 100);
+                facePointPreviewSprite.scale.set(pulse, pulse, pulse);
+            }
+            var use3D = globals.facePoints3D === true;
+            var showNums = globals.showFacePointNumbers !== false;
+            for (var pi = 0; pi < pointDiscs.length; pi++){
+                pointDiscs[pi].visible = false;
+                pointSpheres[pi].visible = false;
+                pointDiscs[pi].material.map = showNums ? pointDiscNumberedMaps[pi] : blankPointTexture;
+            }
+            for (var pi = 0; pi < pts.length && pi < pointDiscs.length; pi++){
+                var pt = pts[pi];
+                if (pt.faceId < 0 || pt.faceId >= N * 2) continue;
+                var triIdx = pt.faceId < N ? pt.faceId : pt.faceId - N;
+                var isFront = pt.faceId < N;
+                var pos = getPointOnFace(triIdx, pt.u, pt.v, pt.w);
                 var normal = getFaceNormal(triIdx);
-                if (centroid && normal){
-                    var offset = normal.clone().multiplyScalar(isFront ? 0.01 : -0.01);
-                    labelB.position.copy(centroid).add(offset);
-                    var toCamera = camera.position.clone().sub(centroid);
+                if (pos && normal){
+                    var offset = normal.clone().multiplyScalar(isFront ? 0.003 : -0.003);
+                    var ptPos = pos.clone().add(offset);
+                    var toCamera = camera.position.clone().sub(pos);
                     var dot = toCamera.dot(normal);
-                    labelB.visible = isFront ? dot > 0 : dot < 0;
+                    var visible = isFront ? dot > 0 : dot < 0;
+                    if (use3D){
+                        pointSpheres[pi].position.copy(ptPos);
+                        pointSpheres[pi].visible = visible;
+                    } else {
+                        pointDiscs[pi].position.copy(ptPos);
+                        pointDiscs[pi].lookAt(ptPos.clone().sub(normal));
+                        pointDiscs[pi].visible = visible;
+                    }
                 }
             }
         } else {
             labelA.visible = false;
             labelB.visible = false;
+            for (var si = 0; si < pointDiscs.length; si++){
+                pointDiscs[si].visible = false;
+                pointSpheres[si].visible = false;
+            }
+            facePointPreviewSprite.visible = false;
         }
     }
 
@@ -409,29 +511,15 @@ function initModel(globals){
         var N = faces.length;
 
         if (globals.colorMode == "faceTriangleID"){
-            //per-face (triangle) coloring with separate front/back colors
-            //face IDs 0..N-1 = front side, N..2N-1 = back side
-            var highlightA = globals.highlightedTriFaceA;
-            var highlightB = globals.highlightedTriFaceB;
+            //per-face coloring: highlight faces that have at least one point
+            var pts = (globals.facePoints && globals.facePoints.getPoints) ? globals.facePoints.getPoints() : [];
+            var highlightedFaceIds = {};
+            for (var pi = 0; pi < pts.length; pi++){
+                highlightedFaceIds[pts[pi].faceId] = true;
+            }
             for (var f = 0; f < N; f++){
-                //front side color
-                var frontColor;
-                if (f === highlightA){
-                    frontColor = colorA;
-                } else if (f === highlightB){
-                    frontColor = colorB;
-                } else {
-                    frontColor = faceColorPalette[f] || new THREE.Color(0.5, 0.5, 0.5);
-                }
-                //back side color (index f+N in palette)
-                var backColor;
-                if ((f + N) === highlightA){
-                    backColor = colorA;
-                } else if ((f + N) === highlightB){
-                    backColor = colorB;
-                } else {
-                    backColor = faceColorPalette[f + N] || new THREE.Color(0.5, 0.5, 0.5);
-                }
+                var frontColor = highlightedFaceIds[f] ? colorA : (faceColorPalette[f] || new THREE.Color(0.5, 0.5, 0.5));
+                var backColor = highlightedFaceIds[f + N] ? colorA : (faceColorPalette[f + N] || new THREE.Color(0.5, 0.5, 0.5));
                 for (var v = 0; v < 3; v++){
                     var idx = (f * 3 + v) * 3;
                     meshColors[idx] = frontColor.r;
@@ -611,6 +699,7 @@ function initModel(globals){
 
 
     function sync(){
+        if (globals.facePoints && globals.facePoints.clearPoints) globals.facePoints.clearPoints();
 
         for (var i=0;i<nodes.length;i++){
             nodes[i].destroy();
@@ -765,7 +854,7 @@ function initModel(globals){
 
         //group triangles into logical panels and build color palette
         buildPanelMap();
-        if (globals.colorMode == "faceID" || globals.colorMode == "faceTriangleID") updateFaceColors();
+        if (globals.colorMode == "faceID" || globals.colorMode == "faceTriangleID" || globals.colorMode == "labelOnly") updateFaceColors();
         $("#totalFaces").html(numPanels);
         var totalTriFaces = faces.length * 2;
         $("#totalFacesLabel").html(totalTriFaces);
@@ -834,6 +923,8 @@ function initModel(globals){
         updateMeshVisibility: updateMeshVisibility,
         updateFaceColors: updateFaceColors,
 
-        getDimensions: getDimensions//for save stl
+        getDimensions: getDimensions,//for save stl
+        getPointOnFace: getPointOnFace,
+        updateFacePointPreview: updateFacePointPreview
     }
 }

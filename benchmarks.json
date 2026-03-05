@@ -1,0 +1,30 @@
+{
+    "waterbomb-test": {
+        "model": "Tessellations/huffmanWaterbomb.svg",
+        "colorMode": "faceTriangleID",
+        "pointA": 5,
+        "pointB": 42,
+        "steps": [
+            { "fold": 0,   "pov": "iso" },
+            { "fold": 50,  "pov": "z" },
+            { "fold": 100, "pov": "-z" }
+        ],
+        "pauseDuration": 2,
+        "autoCapture": false
+    },
+    "crane-fold": {
+        "model": "Origami/crane.svg",
+        "colorMode": "labelOnly",
+        "pointA": 3,
+        "pointB": 10,
+        "steps": [
+            { "fold": 0,   "pov": "iso" },
+            { "fold": 25,  "pov": "x" },
+            { "fold": 50,  "pov": "y" },
+            { "fold": 75,  "pov": "-x" },
+            { "fold": 100, "pov": "iso" }
+        ],
+        "pauseDuration": 3,
+        "autoCapture": true
+    }
+}
