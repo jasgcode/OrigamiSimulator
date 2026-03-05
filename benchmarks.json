@@ -1,9 +1,11 @@
 {
     "waterbomb-test": {
-        "model": "Tessellations/huffmanWaterbomb.svg",
+        "model": "/Bases/waterbombBase.svg",
         "colorMode": "faceTriangleID",
         "pointA": 5,
         "pointB": 42,
+        "facePoints": { "0": 3, "5": 2 },
+        "showPointNumbers": false,
         "steps": [
             { "fold": 0,   "pov": "iso" },
             { "fold": 50,  "pov": "z" },
@@ -12,17 +14,27 @@
         "pauseDuration": 2,
         "autoCapture": false
     },
+    "waterbomb-animate": {
+        "model": "/Bases/waterbombBase.svg",
+        "colorMode": "faceTriangleID",
+        "pointA": 5,
+        "pointB": 42,
+        "facePoints": { "0": 3, "5": 2 },
+        "showPointNumbers": false,
+        "foldAnimation": { "from": 0, "to": 90, "duration": 4 }
+    },
     "crane-fold": {
-        "model": "Origami/crane.svg",
+        "model": "/Bases/birdBase.svg",
         "colorMode": "labelOnly",
         "pointA": 3,
         "pointB": 10,
+        "showPointNumbers": false,
         "steps": [
             { "fold": 0,   "pov": "iso" },
             { "fold": 25,  "pov": "x" },
             { "fold": 50,  "pov": "y" },
             { "fold": 75,  "pov": "-x" },
-            { "fold": 100, "pov": "iso" }
+            { "fold": 95, "pov": "iso" }
         ],
         "pauseDuration": 3,
         "autoCapture": true

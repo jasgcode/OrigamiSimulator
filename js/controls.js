@@ -722,6 +722,10 @@ function initControls(globals){
     setLink("#runBenchmark", function(){
         if (globals.benchmark) globals.benchmark.run();
     });
+    $("#benchmarkPresetSelect").on("change", function(){
+        var val = $(this).val();
+        if (globals.benchmark && globals.benchmark.selectPreset) globals.benchmark.selectPreset(val || null);
+    });
 
     setLink("#aboutError", function(){
         $("#aboutErrorModal").modal("show");

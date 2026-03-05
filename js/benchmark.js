@@ -11,6 +11,7 @@
  *   colorMode    — color mode to apply after load
  *   pointA       — face ID for highlight point A
  *   pointB       — face ID for highlight point B
+ *   facePoints   — JSON object mapping face IDs to point counts, e.g. {"0":3,"5":2} for 3 random points on face 0, 2 on face 5. URL: facePoints={"0":3,"5":2}
  *   foldStart    — fold % for first step  (0-100)
  *   foldMid      — fold % for middle step (0-100)
  *   foldEnd      — fold % for last step   (0-100)
@@ -20,11 +21,15 @@
  *   pauseDuration — seconds to wait at each step (default 2)
  *   autoCapture  — "true" to capture PNG at each step
  *   autoRun      — "true" to start sequence automatically after load
+ *   foldAnimation — "true" to animate fold 0→90 over 4s (or use foldAnimFrom/foldAnimTo/foldAnimDuration)
+ *   showPointNumbers — "false" to hide numbers on face points
  */
 
 function initBenchmark(globals) {
 
     var config = null;
+    var presets = null;
+    var loadModelCallback = null;
     var running = false;
     var currentStep = 0;
 
@@ -114,6 +119,18 @@ function initBenchmark(globals) {
                 globals.model.updateFaceColors();
             }
         }
+
+        if (cfg.facePoints && globals.facePoints && (globals.colorMode === "faceTriangleID" || globals.colorMode === "labelOnly")) {
+            globals.facePoints.initFromConfig(cfg.facePoints);
+            if (globals.controls && globals.controls.refreshFacePointList) globals.controls.refreshFacePointList();
+            globals.model.updateFaceColors();
+        }
+
+        if (cfg.showPointNumbers !== undefined) {
+            globals.showFacePointNumbers = cfg.showPointNumbers !== false;
+            if ($("#showFacePointNumbers").length) $("#showFacePointNumbers").prop("checked", globals.showFacePointNumbers);
+            globals.model.updateFaceColors();
+        }
     }
 
     // ── Screenshot capture ──
@@ -130,6 +147,38 @@ function initBenchmark(globals) {
                 if (callback) callback();
             }
         }, 50);
+    }
+
+    // ── Fold animation (0→90 over 4s etc) ──
+
+    function runFoldAnimation(opts, callback) {
+        var from = opts.from != null ? opts.from : 0;
+        var to = opts.to != null ? opts.to : 90;
+        var durationSec = opts.duration != null ? opts.duration : 4;
+
+        globals.setCreasePercent(from / 100);
+        globals.shouldChangeCreasePercent = true;
+
+        var startTime = performance.now();
+
+        function tick(t) {
+            var elapsed = (t - startTime) / 1000;
+            if (elapsed >= durationSec) {
+                globals.setCreasePercent(to / 100);
+                globals.shouldChangeCreasePercent = true;
+                updateStatus("Fold animation complete (0→" + to + "%).");
+                if (callback) callback();
+                return;
+            }
+            var tNorm = elapsed / durationSec;
+            var pct = from + (to - from) * tNorm;
+            globals.setCreasePercent(pct / 100);
+            globals.shouldChangeCreasePercent = true;
+            updateStatus("Fold animation: " + Math.round(pct) + "% (" + Math.round(elapsed * 10) / 10 + "s / " + durationSec + "s)");
+            requestAnimationFrame(tick);
+        }
+        updateStatus("Fold animation: " + from + "% → " + to + "% over " + durationSec + "s");
+        requestAnimationFrame(tick);
     }
 
     // ── Step runner ──
@@ -205,11 +254,40 @@ function initBenchmark(globals) {
         var pointB = getParamInt("pointB");
         if (pointB !== null) cfg.pointB = pointB;
 
+        var facePointsConfig = getParam("facePoints");
+        if (facePointsConfig) {
+            try {
+                cfg.facePoints = JSON.parse(facePointsConfig);
+            } catch (e) {
+                var parsed = {};
+                facePointsConfig.split(",").forEach(function(pair) {
+                    var m = pair.match(/^\s*(\d+)\s*:\s*(\d+)\s*$/);
+                    if (m) parsed[m[1]] = parseInt(m[2], 10);
+                });
+                if (Object.keys(parsed).length) cfg.facePoints = parsed;
+            }
+        }
+
         var pauseDuration = getParamFloat("pauseDuration");
         if (pauseDuration !== null) cfg.pauseDuration = pauseDuration;
 
         if (getParam("autoCapture") !== null) cfg.autoCapture = getParamBool("autoCapture");
         if (getParam("autoRun") !== null) cfg.autoRun = getParamBool("autoRun");
+        if (getParam("showPointNumbers") !== null) cfg.showPointNumbers = getParamBool("showPointNumbers");
+
+        // fold animation: 0→90 over 4s (preset or URL)
+        var foldAnimFrom = getParamFloat("foldAnimFrom");
+        var foldAnimTo = getParamFloat("foldAnimTo");
+        var foldAnimDuration = getParamFloat("foldAnimDuration");
+        if (foldAnimFrom !== null || foldAnimTo !== null || foldAnimDuration !== null || getParam("foldAnimation") === "true") {
+            cfg.foldAnimation = cfg.foldAnimation || {};
+            if (foldAnimFrom !== null) cfg.foldAnimation.from = foldAnimFrom;
+            if (foldAnimTo !== null) cfg.foldAnimation.to = foldAnimTo;
+            if (foldAnimDuration !== null) cfg.foldAnimation.duration = foldAnimDuration;
+            if (Object.keys(cfg.foldAnimation).length === 0 && getParam("foldAnimation") === "true") {
+                cfg.foldAnimation = { from: 0, to: 90, duration: 4 };
+            }
+        }
 
         // ad-hoc steps from foldStart/foldMid/foldEnd
         var foldStart = getParamFloat("foldStart");
@@ -255,11 +333,27 @@ function initBenchmark(globals) {
 
     function run(cfg) {
         if (!cfg) cfg = config;
-        if (!cfg || !cfg.steps || cfg.steps.length === 0) {
+        if (!cfg) {
             console.warn("benchmark: no valid config to run");
             return;
         }
         applySettings(cfg);
+
+        if (cfg.foldAnimation) {
+            running = true;
+            currentStep = 0;
+            setPOV(cfg.foldAnimation.pov || "iso");
+            runFoldAnimation(cfg.foldAnimation, function () {
+                running = false;
+                console.log("benchmark: fold animation complete");
+            });
+            return;
+        }
+
+        if (!cfg.steps || cfg.steps.length === 0) {
+            console.warn("benchmark: no steps and no foldAnimation");
+            return;
+        }
         runStep(cfg.steps, 0, cfg.pauseDuration, cfg.autoCapture);
     }
 
@@ -267,33 +361,69 @@ function initBenchmark(globals) {
     // loadModelCallback(modelPath) is called once config is parsed,
     // passing the model path to load (from benchmark preset, URL, or null for default).
 
-    function init(loadModelCallback) {
-        // try to load JSON presets, then build config
+    function init(cb) {
+        loadModelCallback = cb;
         $.getJSON("benchmarks.json")
-            .done(function (presets) {
+            .done(function (loaded) {
+                presets = loaded;
                 config = buildConfig(presets);
-                onConfigReady(loadModelCallback);
+                populatePresetDropdown();
+                onConfigReady(cb);
             })
             .fail(function () {
-                // no benchmarks.json — use URL params only
+                presets = null;
                 config = buildConfig(null);
-                onConfigReady(loadModelCallback);
+                updateStatus("No benchmarks.json found.");
+                onConfigReady(cb);
             });
     }
 
-    function onConfigReady(loadModelCallback) {
-        // tell main.js which model to load (benchmark model or null for default)
+    function populatePresetDropdown() {
+        var $sel = $("#benchmarkPresetSelect");
+        $sel.find("option:not(:first)").remove();
+        if (!presets) return;
+        var names = Object.keys(presets).sort();
+        names.forEach(function (name) {
+            $sel.append($("<option></option>").attr("value", name).text(name));
+        });
+    }
+
+    function selectPreset(name) {
+        if (!presets || !name || !presets[name]) {
+            config = null;
+            updateStatus("Select a preset or use URL params to configure.");
+            return;
+        }
+        config = $.extend(true, {}, presets[name]);
+        if (!config.pauseDuration) config.pauseDuration = 2;
+        if (!config.steps) config.steps = [{ fold: 0, pov: "iso" }];
+        if (config.model) {
+            globals.loadedModel = config.model.replace(/'/g, '');
+            globals.importer.importDemoFile(globals.loadedModel);
+            waitForModelLoad(function () {
+                applySettings(config);
+                updateStatus("Preset \"" + name + "\" ready. " + config.steps.length + " steps.");
+            });
+        } else {
+            applySettings(config);
+            updateStatus("Preset \"" + name + "\" applied. " + config.steps.length + " steps.");
+        }
+    }
+
+    function onConfigReady(cb) {
+        var benchmarkName = getParam("benchmark");
+        if (benchmarkName && $("#benchmarkPresetSelect").length) {
+            $("#benchmarkPresetSelect").val(benchmarkName);
+        }
         var benchmarkModel = config ? config.model : null;
-        if (loadModelCallback) loadModelCallback(benchmarkModel);
+        if (cb) cb(benchmarkModel);
 
-        if (!config) return; // no benchmark requested
+        if (!config) return;
 
-        // wait for model load, then apply settings and optionally auto-run
         waitForModelLoad(function () {
             applySettings(config);
             updateStatus("Benchmark ready: " + config.steps.length + " steps.");
             if (config.autoRun) {
-                // small delay to let the UI finish settling
                 setTimeout(function () { run(config); }, 500);
             }
         });
@@ -302,7 +432,9 @@ function initBenchmark(globals) {
     return {
         init: init,
         run: run,
+        selectPreset: selectPreset,
         getConfig: function () { return config; },
+        getPresets: function () { return presets; },
         isRunning: function () { return running; },
         setPOV: setPOV
     };

@@ -131,6 +131,45 @@ function initFacePoints(globals) {
         points.length = 0;
     }
 
+    function randomBarycentric() {
+        var r1 = Math.random();
+        var r2 = Math.random();
+        var u = 1 - Math.sqrt(r1);
+        var v = Math.sqrt(r1) * (1 - r2);
+        var w = Math.sqrt(r1) * r2;
+        return { u: u, v: v, w: w };
+    }
+
+    function initFromConfig(config) {
+        clearPoints();
+        var faces = globals.model.getFaces();
+        var N = faces ? faces.length : 0;
+        var maxFaceId = N * 2 - 1;
+        if (!config || N === 0) return;
+        if (typeof config === "object" && !Array.isArray(config)) {
+            for (var key in config) {
+                var faceId = parseInt(key, 10);
+                var count = parseInt(config[key], 10);
+                if (isNaN(faceId) || isNaN(count) || faceId < 0 || faceId > maxFaceId) continue;
+                for (var i = 0; i < count; i++) {
+                    var bary = randomBarycentric();
+                    addPoint(faceId, bary.u, bary.v, bary.w);
+                }
+            }
+        } else if (Array.isArray(config)) {
+            for (var i = 0; i < config.length; i++) {
+                var entry = config[i];
+                var faceId = parseInt(entry.faceId != null ? entry.faceId : entry.face, 10);
+                var count = parseInt(entry.count != null ? entry.count : 1, 10);
+                if (isNaN(faceId) || isNaN(count) || faceId < 0 || faceId > maxFaceId) continue;
+                for (var j = 0; j < count; j++) {
+                    var bary = randomBarycentric();
+                    addPoint(faceId, bary.u, bary.v, bary.w);
+                }
+            }
+        }
+    }
+
     return {
         getPoints: getPoints,
         addPoint: addPoint,
@@ -141,6 +180,7 @@ function initFacePoints(globals) {
         barycentricToWorld: barycentricToWorld,
         worldToBarycentric: worldToBarycentric,
         clampBarycentric: clampBarycentric,
-        clearPoints: clearPoints
+        clearPoints: clearPoints,
+        initFromConfig: initFromConfig
     };
 }
