@@ -722,6 +722,12 @@ function initControls(globals){
     setLink("#runBenchmark", function(){
         if (globals.benchmark) globals.benchmark.run();
     });
+    setLink("#runAllBenchmarks", function(){
+        if (globals.benchmark && globals.benchmark.runAll) {
+            var path = $("#benchmarkJsonPath").length ? $("#benchmarkJsonPath").val() || "benchmarks.json" : "benchmarks.json";
+            globals.benchmark.runAll(path);
+        }
+    });
     $("#benchmarkPresetSelect").on("change", function(){
         var val = $(this).val();
         if (globals.benchmark && globals.benchmark.selectPreset) globals.benchmark.selectPreset(val || null);

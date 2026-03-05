@@ -284,14 +284,14 @@ function initModel(globals){
                 if (pt.faceId < 0 || pt.faceId >= N * 2) continue;
                 var triIdx = pt.faceId < N ? pt.faceId : pt.faceId - N;
                 var isFront = pt.faceId < N;
-                var pos = getPointOnFace(triIdx, pt.u, pt.v, pt.w);
+                var pos = globals.facePoints.getPointPosition(pi);
                 var normal = getFaceNormal(triIdx);
                 if (pos && normal){
                     var offset = normal.clone().multiplyScalar(isFront ? 0.003 : -0.003);
                     var ptPos = pos.clone().add(offset);
                     var toCamera = camera.position.clone().sub(pos);
                     var dot = toCamera.dot(normal);
-                    var visible = isFront ? dot > 0 : dot < 0;
+                    var visible = (isFront ? dot > 0 : dot < 0) && !globals.hideFacePointsDuringAnimation;
                     if (use3D){
                         pointSpheres[pi].position.copy(ptPos);
                         pointSpheres[pi].visible = visible;

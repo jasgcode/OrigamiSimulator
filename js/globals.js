@@ -110,7 +110,8 @@ function initGlobals(){
 
         clickToAddFacePoints: false,
         showFacePointNumbers: true,
-        facePoints3D: false
+        facePoints3D: false,
+        hideFacePointsDuringAnimation: false
     };
 
     function setCreasePercent(percent){

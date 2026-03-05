@@ -111,6 +111,7 @@ function init3DUI(globals) {
                             var bary = globals.facePoints.worldToBarycentric(triIdx, dragPoint);
                             if (bary){
                                 bary = globals.facePoints.clampBarycentric(bary);
+                                bary = globals.facePoints.insetBarycentric(bary.u, bary.v, bary.w);
                                 globals.facePoints.updatePointPosition(draggingFacePointIndex, pt.faceId, bary.u, bary.v, bary.w);
                                 globals.model.updateFaceColors();
                             }
@@ -133,7 +134,8 @@ function init3DUI(globals) {
                     } else if (globals.clickToAddFacePoints){
                         var newPt = globals.facePoints.pointFromRayIntersection(inter, meshArray);
                         if (newPt){
-                            globals.facePoints.addPoint(newPt.faceId, newPt.u, newPt.v, newPt.w);
+                            var inset = globals.facePoints.insetBarycentric(newPt.u, newPt.v, newPt.w);
+                            globals.facePoints.addPoint(newPt.faceId, inset.u, inset.v, inset.w);
                             draggingFacePointIndex = globals.facePoints.getPoints().length - 1;
                             globals.model.updateFaceColors();
                             if (globals.controls && globals.controls.refreshFacePointList) globals.controls.refreshFacePointList();

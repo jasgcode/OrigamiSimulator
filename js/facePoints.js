@@ -44,6 +44,8 @@ function initFacePoints(globals) {
         return { u: u, v: v, w: w };
     }
 
+    var BARYCENTRIC_INSET = 0.08;
+
     function clampBarycentric(uvw) {
         var u = Math.max(0, Math.min(1, uvw.u));
         var v = Math.max(0, Math.min(1, uvw.v));
@@ -53,6 +55,28 @@ function initFacePoints(globals) {
             u = Math.max(0, u - excess / 2);
             v = Math.max(0, v - excess / 2);
             w = 1 - u - v;
+        }
+        return { u: u, v: v, w: w };
+    }
+
+    function insetBarycentric(u, v, w, margin) {
+        margin = margin != null ? margin : BARYCENTRIC_INSET;
+        var m = margin;
+        for (var iter = 0; iter < 6; iter++) {
+            u = Math.max(m, Math.min(1 - 2 * m, u));
+            v = Math.max(m, Math.min(1 - 2 * m, v));
+            w = 1 - u - v;
+            if (w < m) {
+                w = m;
+                var s = u + v;
+                if (s > 1e-10) {
+                    var r = (1 - m) / s;
+                    u = u * r;
+                    v = v * r;
+                } else {
+                    u = v = (1 - m) / 2;
+                }
+            }
         }
         return { u: u, v: v, w: w };
     }
@@ -91,7 +115,8 @@ function initFacePoints(globals) {
         var p = points[index];
         var N = globals.model.getFaces().length;
         var triIdx = p.faceId < N ? p.faceId : p.faceId - N;
-        return barycentricToWorld(triIdx, p.u, p.v, p.w);
+        var inset = insetBarycentric(p.u, p.v, p.w);
+        return barycentricToWorld(triIdx, inset.u, inset.v, inset.w);
     }
 
     function getFaceNormal(faceIndex) {
@@ -140,30 +165,68 @@ function initFacePoints(globals) {
         return { u: u, v: v, w: w };
     }
 
+    function deterministicBarycentric(index) {
+        var m = 2147483647;
+        var r1 = ((index * 2654435761 + 1013904223) % m) / m;
+        var r2 = ((index * 2246822519 + 1013904223) % m) / m;
+        if (r1 <= 0) r1 = 1e-10;
+        var u = 1 - Math.sqrt(r1);
+        var v = Math.sqrt(r1) * (1 - r2);
+        var w = Math.sqrt(r1) * r2;
+        return { u: u, v: v, w: w };
+    }
+
+    function parseBarycentric(val) {
+        if (Array.isArray(val) && val.length >= 3) return { u: val[0], v: val[1], w: val[2] };
+        if (typeof val === "object" && val !== null && "u" in val && "v" in val && "w" in val) return { u: val.u, v: val.v, w: val.w };
+        return null;
+    }
+
     function initFromConfig(config) {
         clearPoints();
         var faces = globals.model.getFaces();
         var N = faces ? faces.length : 0;
         var maxFaceId = N * 2 - 1;
         if (!config || N === 0) return;
-        if (typeof config === "object" && !Array.isArray(config)) {
-            for (var key in config) {
-                var faceId = parseInt(key, 10);
-                var count = parseInt(config[key], 10);
-                if (isNaN(faceId) || isNaN(count) || faceId < 0 || faceId > maxFaceId) continue;
-                for (var i = 0; i < count; i++) {
-                    var bary = randomBarycentric();
-                    addPoint(faceId, bary.u, bary.v, bary.w);
-                }
-            }
-        } else if (Array.isArray(config)) {
+        var globalIndex = 0;
+        if (Array.isArray(config)) {
             for (var i = 0; i < config.length; i++) {
                 var entry = config[i];
                 var faceId = parseInt(entry.faceId != null ? entry.faceId : entry.face, 10);
-                var count = parseInt(entry.count != null ? entry.count : 1, 10);
-                if (isNaN(faceId) || isNaN(count) || faceId < 0 || faceId > maxFaceId) continue;
+                if (isNaN(faceId) || faceId < 0 || faceId > maxFaceId) continue;
+                var bary = parseBarycentric(entry);
+                if (bary) {
+                    addPoint(faceId, bary.u, bary.v, bary.w);
+                } else {
+                    var count = parseInt(entry.count != null ? entry.count : 1, 10);
+                    for (var j = 0; j < count; j++) {
+                        bary = deterministicBarycentric(globalIndex++);
+                        addPoint(faceId, bary.u, bary.v, bary.w);
+                    }
+                }
+            }
+            return;
+        }
+        if (typeof config !== "object") return;
+        for (var key in config) {
+            var faceId = parseInt(key, 10);
+            if (isNaN(faceId) || faceId < 0 || faceId > maxFaceId) continue;
+            var val = config[key];
+            if (Array.isArray(val) && val.length > 0) {
+                for (var k = 0; k < val.length; k++) {
+                    var bary = parseBarycentric(val[k]);
+                    if (bary) {
+                        addPoint(faceId, bary.u, bary.v, bary.w);
+                    } else {
+                        bary = deterministicBarycentric(globalIndex++);
+                        addPoint(faceId, bary.u, bary.v, bary.w);
+                    }
+                }
+            } else {
+                var count = parseInt(val, 10);
+                if (isNaN(count) || count < 1) continue;
                 for (var j = 0; j < count; j++) {
-                    var bary = randomBarycentric();
+                    var bary = deterministicBarycentric(globalIndex++);
                     addPoint(faceId, bary.u, bary.v, bary.w);
                 }
             }
@@ -180,6 +243,7 @@ function initFacePoints(globals) {
         barycentricToWorld: barycentricToWorld,
         worldToBarycentric: worldToBarycentric,
         clampBarycentric: clampBarycentric,
+        insetBarycentric: insetBarycentric,
         clearPoints: clearPoints,
         initFromConfig: initFromConfig
     };

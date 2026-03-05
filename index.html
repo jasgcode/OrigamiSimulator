@@ -1383,11 +1383,15 @@
                 <a href="#" class="seeMore closed" data-id="benchmarkSection"><span class="fui-triangle-down"></span>Benchmark:</a>
             </div>
             <div id="benchmarkSection" class="hide indent smallTxt">
+                <label>JSON: &nbsp;</label>
+                <input id="benchmarkJsonPath" type="text" class="form-control" value="benchmarks.json" style="width:12em; display:inline-block;" placeholder="benchmarks.json"/>
+                <br/><br/>
                 <label>Preset: &nbsp;</label>
                 <select id="benchmarkPresetSelect" class="form-control" style="width:auto; display:inline-block;">
                     <option value="">— Select preset —</option>
                 </select><br/><br/>
-                <a href="#" id="runBenchmark" class="btn btn-sm btn-inverse">Run Benchmark</a><br/><br/>
+                <a href="#" id="runBenchmark" class="btn btn-sm btn-inverse">Run</a>
+                <a href="#" id="runAllBenchmarks" class="btn btn-sm btn-inverse">Run All</a><br/><br/>
                 <span id="benchmarkStatus">Select a preset or use URL params to configure.</span><br/>
                 <span class="smallTxt">Use URL params or benchmarks.json to configure.</span>
             </div><br/>
