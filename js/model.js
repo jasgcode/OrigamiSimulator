@@ -297,7 +297,24 @@ function initModel(globals){
                         pointSpheres[pi].visible = visible;
                     } else {
                         pointDiscs[pi].position.copy(ptPos);
-                        pointDiscs[pi].lookAt(ptPos.clone().sub(normal));
+                        // Orient disc flat on the face (Z = face-facing direction) while
+                        // rotating within that plane so the number's up tracks the camera's
+                        // screen-up. This keeps the disc coplanar with the face and the
+                        // label readable from any camera angle.
+                        var faceDir = isFront ? normal.clone() : normal.clone().negate();
+                        var camUp = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+                        // Project camUp onto the face plane
+                        var discUp = camUp.clone().sub(faceDir.clone().multiplyScalar(camUp.dot(faceDir)));
+                        if (discUp.lengthSq() < 0.0001) {
+                            // Camera looking straight along normal — fall back to world Z then X
+                            discUp.set(0, 0, 1).sub(faceDir.clone().multiplyScalar(faceDir.z));
+                            if (discUp.lengthSq() < 0.0001) discUp.set(1, 0, 0);
+                        }
+                        discUp.normalize();
+                        var discRight = new THREE.Vector3().crossVectors(discUp, faceDir).normalize();
+                        pointDiscs[pi].quaternion.setFromRotationMatrix(
+                            new THREE.Matrix4().makeBasis(discRight, discUp, faceDir)
+                        );
                         pointDiscs[pi].visible = visible;
                     }
                 }

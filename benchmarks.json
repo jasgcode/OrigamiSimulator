@@ -1,95 +1,88 @@
 {
-    "waterbomb-test": {
-        "model": "/Bases/waterbombBase.svg",
-        "colorMode": "faceTriangleID",
-        "pointA": 5,
-        "pointB": 42,
-        "facePoints": { "0": 3, "5": 2 },
-        "showPointNumbers": false,
-        "steps": [
-            { "fold": 0,   "pov": "iso" },
-            { "fold": 50,  "pov": "z" },
-            { "fold": 100, "pov": "-z" }
-        ],
-        "pauseDuration": 2,
-        "autoCapture": false
-    },
-    "waterbomb-animate": {
+    "test-waterbomb": {
         "model": "/Bases/waterbombBase.svg",
         "colorMode": "labelOnly",
         "color1": "ec008b",
         "color2": "dddddd",
         "backgroundColor": "f5f5f5",
-        "pointA": 5,
-        "pointB": 42,
-        "facePoints": {
-            "0": [{ "u": 0.33, "v": 0.33, "w": 0.34 }, { "u": 0.5, "v": 0.5, "w": 0 }],
-            "5": [{ "u": 0.5, "v": 0.25, "w": 0.25 }]
-        },
+        "fold": 0,
+        "pauseDuration": 2,
         "showPointNumbers": true,
-        "fold": 10,
-        "pauseDuration": 3,
-        "previewRotation": {
-            "duration": 5,
-            "povKeyframes": [
-                { "progress": 0, "pov": "iso" },
-                { "progress": 25, "pov": "z" },
-                { "progress": 50, "pov": "x" },
-                { "progress": 75, "pov": "-y" },
-                { "progress": 100, "pov": "iso" }
-            ]
+        "autoCapture": true,
+        "facePoints": {
+            "0": [{ "u": 0.33, "v": 0.33, "w": 0.34 }, { "u": 0.6, "v": 0.2, "w": 0.2 }],
+            "3": [{ "u": 0.5, "v": 0.25, "w": 0.25 }]
         },
-        "foldAnimation": {
-            "from": 0,
-            "to": 90,
-            "duration": 5,
-            "delayAfterPreview": 1,
-            "povKeyframes": [
-                { "fold": 0, "pov": "iso" },
-                { "fold": 33, "pov": "z" },
-                { "fold": 66, "pov": "y" },
-                { "fold": 90, "pov": "iso" }
-            ],
-            "hidePointsDuringAnimation": true
-        }
+        "steps": [
+            { "fold": 0,  "pov": "y" },
+            { "fold": 30, "pov": "z" },
+            { "fold": 60, "pov": "x" },
+            { "fold": 90, "pov": "iso" }
+        ]
     },
-    "waterbomb-animate-fit": {
-        "model": "/Bases/waterbombBase.svg",
-        "colorMode": "faceTriangleID",
-        "backgroundColor": "f5f5f5",
-        "pointA": 5,
-        "pointB": 42,
-        "facePoints": { "0": 3, "5": 2 },
-        "showPointNumbers": false,
-        "foldAnimation": {
-            "from": 0,
-            "to": 90,
-            "duration": 4,
-            "trackModel": true,
-            "povKeyframes": [
-                { "fold": 0, "pov": "iso" },
-                { "fold": 33, "pov": "z" },
-                { "fold": 90, "pov": "iso" }
-            ],
-            "hidePointsDuringAnimation": true
-        }
-    },
-    "crane-fold": {
+    "test-bird": {
         "model": "/Bases/birdBase.svg",
         "colorMode": "labelOnly",
-        "color1": "ec008b",
-        "color2": "dddddd",
-        "pointA": 3,
-        "pointB": 10,
-        "showPointNumbers": false,
+        "color1": "0077cc",
+        "color2": "eeeeee",
+        "backgroundColor": "f0f0f0",
+        "fold": 0,
+        "pauseDuration": 2,
+        "showPointNumbers": true,
+        "autoCapture": true,
+        "facePoints": {
+            "2": [{ "u": 0.5, "v": 0.5, "w": 0.0 }, { "u": 0.2, "v": 0.4, "w": 0.4 }],
+            "7": [{ "u": 0.33, "v": 0.33, "w": 0.34 }],
+            "12": [{ "u": 0.6, "v": 0.2, "w": 0.2 }]
+        },
         "steps": [
-            { "fold": 0,   "pov": "iso" },
-            { "fold": 25,  "pov": "x" },
-            { "fold": 50,  "pov": "y" },
-            { "fold": 75,  "pov": "-x" },
-            { "fold": 95, "pov": "iso" }
-        ],
-        "pauseDuration": 3,
-        "autoCapture": true
+            { "fold": 0,  "pov": "y" },
+            { "fold": 30, "pov": "z" },
+            { "fold": 60, "pov": "y" },
+            { "fold": 90, "pov": "iso" }
+        ]
+    },
+    "test-square": {
+        "model": "/Bases/squareBase.svg",
+        "colorMode": "labelOnly",
+        "color1": "f39200",
+        "color2": "ffffff",
+        "backgroundColor": "fafafa",
+        "fold": 0,
+        "pauseDuration": 2,
+        "showPointNumbers": true,
+        "autoCapture": true,
+        "facePoints": {
+            "1": [{ "u": 0.5, "v": 0.25, "w": 0.25 }],
+            "4": [{ "u": 0.33, "v": 0.33, "w": 0.34 }, { "u": 0.7, "v": 0.15, "w": 0.15 }]
+        },
+        "steps": [
+            { "fold": 0,  "pov": "y" },
+            { "fold": 30, "pov": "z" },
+            { "fold": 60, "pov": "-y" },
+            { "fold": 90, "pov": "iso" }
+        ]
+    },
+    "test-frog": {
+        "model": "/Bases/frogBase.svg",
+        "colorMode": "labelOnly",
+        "color1": "4caf50",
+        "color2": "cccccc",
+        "backgroundColor": "f5f5f5",
+        "fold": 0,
+        "pauseDuration": 2,
+        "showPointNumbers": true,
+        "autoCapture": true,
+        "facePoints": {
+            "0": [{ "u": 0.5, "v": 0.5, "w": 0.0 }],
+            "6": [{ "u": 0.33, "v": 0.33, "w": 0.34 }, { "u": 0.5, "v": 0.25, "w": 0.25 }],
+            "10": [{ "u": 0.6, "v": 0.2, "w": 0.2 }]
+        },
+        "steps": [
+            { "fold": 0,  "pov": "y" },
+            { "fold": 30, "pov": "z" },
+            { "fold": 60, "pov": "x" },
+            { "fold": 90, "pov": "iso" }
+        ]
     }
 }

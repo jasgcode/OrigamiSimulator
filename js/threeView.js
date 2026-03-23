@@ -167,12 +167,18 @@ function initThreeView(globals) {
         if (globals.capturer) {
             if (globals.capturer == "png"){
                 var canvas = globals.threeView.renderer.domElement;
-                canvas.toBlob(function(blob) {
-                    saveAs(blob, globals.screenRecordFilename + ".png");
-                }, "image/png");
+                var _captureCallback = globals.captureCallback || null;
                 globals.capturer = null;
+                globals.captureCallback = null;
                 globals.shouldScaleCanvas = false;
                 globals.shouldAnimateFoldPercent = false;
+                canvas.toBlob(function(blob) {
+                    if (_captureCallback) {
+                        _captureCallback(blob);
+                    } else {
+                        saveAs(blob, globals.screenRecordFilename + ".png");
+                    }
+                }, "image/png");
                 globals.threeView.onWindowResize();
                 return;
             }

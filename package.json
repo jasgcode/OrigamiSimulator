@@ -8,7 +8,7 @@
   },
   "scripts":{
 
-    "dev": "bunx serve ."
+    "dev": "bun server.js"
   },
   "peerDependencies": {
     "typescript": "^5"

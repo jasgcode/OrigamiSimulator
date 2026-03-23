@@ -44,6 +44,7 @@ function initBenchmark(globals) {
     var loadModelCallback = null;
     var running = false;
     var currentStep = 0;
+    var currentBenchmarkName = null;
 
     // ── URL parameter helpers ──
 
@@ -182,20 +183,49 @@ function initBenchmark(globals) {
         }
     }
 
-    // ── Screenshot capture ──
+    // ── Filename helpers ──
 
-    function captureScreenshot(stepIndex, callback) {
-        var baseName = globals.filename || "benchmark";
-        globals.screenRecordFilename = baseName + "_step" + stepIndex;
-        // trigger PNG capture on next render frame
+    // Zero-pad n to `len` digits, e.g. padNum(30, 3) → "030"
+    function padNum(n, len) {
+        var s = String(Math.round(n));
+        while (s.length < len) s = "0" + s;
+        return s;
+    }
+
+    // Canonical label for a captured state: fold{NNN}_pov-{pov}
+    // e.g. "fold000_pov-y", "fold090_pov-iso"
+    function stepLabel(fold, pov) {
+        return "fold" + padNum(fold != null ? fold : 0, 3) + "_pov-" + (pov || "iso");
+    }
+
+    // ── Screenshot capture ──
+    // label: descriptive string, e.g. "start", "end", "step0"
+    // Files are saved to screenshots/{benchmarkName}_{label}.png via the
+    // local Bun dev server (/api/screenshot). Falls back to browser saveAs
+    // if the endpoint is unavailable (e.g. opening index.html directly).
+
+    function captureScreenshot(label, callback) {
+        var name = currentBenchmarkName || globals.filename || "benchmark";
+        var filename = name + "_" + label + ".png";
+        // Set a callback that fires inside the render loop after renderer.render(),
+        // so the WebGL canvas buffer is guaranteed to have fresh content.
+        globals.screenRecordFilename = name + "_" + label;
+        globals.captureCallback = function (blob) {
+            var formData = new FormData();
+            formData.append("file", blob, filename);
+            fetch("/api/screenshot", { method: "POST", body: formData })
+                .then(function (res) {
+                    if (!res.ok) throw new Error("server error");
+                    console.log("benchmark: saved screenshots/" + filename);
+                    if (callback) callback();
+                })
+                .catch(function () {
+                    // fallback: browser download
+                    saveAs(blob, filename);
+                    if (callback) callback();
+                });
+        };
         globals.capturer = "png";
-        // wait for the render loop to consume the capture flag
-        var poll = setInterval(function () {
-            if (globals.capturer !== "png") {
-                clearInterval(poll);
-                if (callback) callback();
-            }
-        }, 50);
     }
 
     // ── Interpolate POV between keyframes (fold % → POV) ──
@@ -381,7 +411,7 @@ function initBenchmark(globals) {
         var settleMs = Math.max(pauseSec * 1000, 500);
             setTimeout(function () {
             if (autoCapture) {
-                captureScreenshot(index, function () {
+                captureScreenshot(stepLabel(step.fold, step.pov), function () {
                     // small delay after capture before next step
                     setTimeout(function () {
                         runStep(steps, index + 1, pauseSec, autoCapture, onComplete);
@@ -564,11 +594,43 @@ function initBenchmark(globals) {
                 } else {
                     setPOV(anim.pov || "iso");
                 }
-                runFoldAnimation(cfg.foldAnimation, function () {
-                    running = false;
-                    console.log("benchmark: fold animation complete");
-                    if (onComplete) onComplete();
-                });
+
+                function doAnimation() {
+                    runFoldAnimation(cfg.foldAnimation, function () {
+                        running = false;
+                        // points are re-shown by runFoldAnimation before this callback
+                        if (cfg.autoCapture) {
+                            var endPov = (Array.isArray(kf) && kf.length > 0) ? kf[kf.length - 1].pov : (anim.pov || "iso");
+                            updateStatus("Capturing end state…");
+                            captureScreenshot(stepLabel(anim.to != null ? anim.to : 90, endPov), function () {
+                                console.log("benchmark: fold animation complete");
+                                if (onComplete) onComplete();
+                            });
+                        } else {
+                            console.log("benchmark: fold animation complete");
+                            if (onComplete) onComplete();
+                        }
+                    });
+                }
+
+                if (cfg.autoCapture) {
+                    // Wait for the simulation and renderer to settle on the start state
+                    // before capturing. Uses captureSettleDelay (seconds) if set,
+                    // otherwise falls back to pauseDuration, with a 1.5s minimum.
+                    var settleMs = cfg.captureSettleDelay != null
+                        ? cfg.captureSettleDelay * 1000
+                        : Math.max((cfg.pauseDuration || 0) * 1000, 1500);
+                    updateStatus("Settling " + (settleMs / 1000) + "s before start capture…");
+                    setTimeout(function () {
+                        var startPov = (Array.isArray(kf) && kf.length > 0) ? kf[0].pov : (anim.pov || "iso");
+                        updateStatus("Capturing start state…");
+                        captureScreenshot(stepLabel(foldFrom, startPov), function () {
+                            doAnimation();
+                        });
+                    }, settleMs);
+                } else {
+                    doAnimation();
+                }
             }
 
             function afterPreviewRotation() {
@@ -646,6 +708,7 @@ function initBenchmark(globals) {
                         return;
                     }
                     running = true;
+                    currentBenchmarkName = name;
                     updateStatus("Run-all: " + (idx + 1) + "/" + names.length + " — " + name);
                     selectPresetFromConfig(name, cfg, function () {
                         run(cfg, function () {
@@ -714,6 +777,7 @@ function initBenchmark(globals) {
             updateStatus("Select a preset or use URL params to configure.");
             return;
         }
+        currentBenchmarkName = name;
         config = $.extend(true, {}, presets[name]);
         if (!config.pauseDuration) config.pauseDuration = 2;
         if (!config.steps) config.steps = [{ fold: 0, pov: "iso" }];
