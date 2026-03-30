@@ -728,6 +728,10 @@ function initControls(globals){
             globals.benchmark.runAll(path);
         }
     });
+    $("#benchmarkJsonPath").on("change", function(){
+        var path = $(this).val();
+        if (globals.benchmark && globals.benchmark.loadJson) globals.benchmark.loadJson(path);
+    });
     $("#benchmarkPresetSelect").on("change", function(){
         var val = $(this).val();
         if (globals.benchmark && globals.benchmark.selectPreset) globals.benchmark.selectPreset(val || null);

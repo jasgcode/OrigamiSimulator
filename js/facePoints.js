@@ -182,6 +182,57 @@ function initFacePoints(globals) {
         return null;
     }
 
+    // Returns true if point[index] is both camera-facing AND unoccluded.
+    // Step 1 — face-normal test: dot(toCamera, normal) > 0 for front-side points.
+    // Step 2 — occlusion test: ray from point position toward camera must not hit
+    //           another mesh face before reaching the camera.
+    function isPointVisible(index) {
+        if (index < 0 || index >= points.length) return false;
+        var p = points[index];
+        var faces = globals.model.getFaces();
+        var N = faces ? faces.length : 0;
+        if (N === 0) return false;
+        var isFront = p.faceId < N;
+        var triIdx = isFront ? p.faceId : p.faceId - N;
+        var pos = getPointPosition(index);
+        var normal = getFaceNormal(triIdx);
+        if (!pos || !normal) return false;
+        var camera = globals.threeView && globals.threeView.camera;
+        if (!camera) return false;
+        var toCamera = camera.position.clone().sub(pos);
+        var dot = toCamera.dot(normal);
+        var facingCamera = isFront ? dot > 0 : dot < 0;
+        if (!facingCamera) return false;
+
+        // Occlusion test — raw ray-triangle, no material.side culling
+        var positions = globals.model.getPositionsArray();
+        if (!faces || !positions) return true; // can't test, assume visible
+        var distToCamera = toCamera.length();
+        var dir = toCamera.divideScalar(distToCamera);
+        var origin = pos.clone().addScaledVector(dir, OCCL_EPSILON);
+        return !isOccluded(origin, dir, distToCamera, faces, positions);
+    }
+
+    // Returns points array enriched with world position and camera-facing visibility.
+    function getPointsWithVisibility() {
+        return points.map(function (p, i) {
+            var faces = globals.model.getFaces();
+            var N = faces ? faces.length : 0;
+            var isFront = p.faceId < N;
+            var pos = getPointPosition(i);
+            return {
+                index: i,
+                faceId: p.faceId,
+                isFront: isFront,
+                u: p.u,
+                v: p.v,
+                w: p.w,
+                position: pos ? { x: pos.x, y: pos.y, z: pos.z } : null,
+                visible: isPointVisible(i)
+            };
+        });
+    }
+
     function initFromConfig(config) {
         clearPoints();
         var faces = globals.model.getFaces();
@@ -233,6 +284,89 @@ function initFacePoints(globals) {
         }
     }
 
+    // Raw ray-triangle occlusion test (no Raycaster — bypasses material.side culling).
+    // Returns true if any triangle in the mesh blocks the segment [origin → origin+dir*maxDist].
+    var _occRay  = new THREE.Ray();
+    var _occVA   = new THREE.Vector3();
+    var _occVB   = new THREE.Vector3();
+    var _occVC   = new THREE.Vector3();
+    var _occHit  = new THREE.Vector3();
+    var OCCL_EPSILON = 0.002;
+    function isOccluded(origin, dir, maxDist, faces, positions) {
+        _occRay.set(origin, dir);
+        for (var j = 0; j < faces.length; j++) {
+            var f = faces[j];
+            _occVA.set(positions[f[0]*3], positions[f[0]*3+1], positions[f[0]*3+2]);
+            _occVB.set(positions[f[1]*3], positions[f[1]*3+1], positions[f[1]*3+2]);
+            _occVC.set(positions[f[2]*3], positions[f[2]*3+1], positions[f[2]*3+2]);
+            // backfaceCulling = false so we catch panels folded over from either side
+            if (_occRay.intersectTriangle(_occVA, _occVB, _occVC, false, _occHit)) {
+                var d = origin.distanceTo(_occHit);
+                if (d > OCCL_EPSILON && d < maxDist - OCCL_EPSILON) return true;
+            }
+        }
+        return false;
+    }
+
+    // Returns face IDs (0..N-1) that are both camera-facing AND unoccluded.
+    // Step 1 — backface cull: dot(camera - centroid, outwardNormal) > 0
+    // Step 2 — occlusion: raw ray-triangle test from centroid toward camera.
+    function getVisibleFaceIds() {
+        var faces = globals.model.getFaces();
+        var positions = globals.model.getPositionsArray();
+        var camera = globals.threeView && globals.threeView.camera;
+        if (!faces || !positions || !camera) return [];
+        var N = faces.length;
+        var result = [];
+        for (var i = 0; i < N; i++) {
+            var normal = getFaceNormal(i);
+            if (!normal) continue;
+            var face = faces[i];
+            var centroid = new THREE.Vector3(
+                (positions[face[0]*3]   + positions[face[1]*3]   + positions[face[2]*3])   / 3,
+                (positions[face[0]*3+1] + positions[face[1]*3+1] + positions[face[2]*3+1]) / 3,
+                (positions[face[0]*3+2] + positions[face[1]*3+2] + positions[face[2]*3+2]) / 3
+            );
+            var toCamera = camera.position.clone().sub(centroid);
+            var dot = toCamera.dot(normal);
+            if (dot <= 0) continue; // back-facing, skip
+
+            var distToCamera = toCamera.length();
+            var dir = toCamera.divideScalar(distToCamera);
+            var origin = centroid.clone().addScaledVector(dir, OCCL_EPSILON);
+            if (!isOccluded(origin, dir, distToCamera, faces, positions)) result.push(i);
+        }
+        return result;
+    }
+
+    // Returns a quality score (0–1) for each face in faceIds: quality = dot(normalise(toCamera), normal).
+    // 1.0 = squarely facing camera, ~0 = grazing angle.
+    // Only front-facing faces (id < N) are scored; others get 0.
+    function getFaceViewQualities(faceIds) {
+        var faces = globals.model.getFaces();
+        var positions = globals.model.getPositionsArray();
+        var camera = globals.threeView && globals.threeView.camera;
+        if (!faces || !positions || !camera) return {};
+        var N = faces.length;
+        var result = {};
+        for (var i = 0; i < faceIds.length; i++) {
+            var id = faceIds[i];
+            if (id < 0 || id >= N) { result[id] = 0; continue; }
+            var normal = getFaceNormal(id);
+            if (!normal) { result[id] = 0; continue; }
+            var face = faces[id];
+            var centroid = new THREE.Vector3(
+                (positions[face[0]*3]   + positions[face[1]*3]   + positions[face[2]*3])   / 3,
+                (positions[face[0]*3+1] + positions[face[1]*3+1] + positions[face[2]*3+1]) / 3,
+                (positions[face[0]*3+2] + positions[face[1]*3+2] + positions[face[2]*3+2]) / 3
+            );
+            var toCamera = camera.position.clone().sub(centroid);
+            var dist = toCamera.length();
+            result[id] = dist > 0 ? Math.max(0, toCamera.dot(normal) / dist) : 0;
+        }
+        return result;
+    }
+
     return {
         getPoints: getPoints,
         addPoint: addPoint,
@@ -245,6 +379,10 @@ function initFacePoints(globals) {
         clampBarycentric: clampBarycentric,
         insetBarycentric: insetBarycentric,
         clearPoints: clearPoints,
-        initFromConfig: initFromConfig
+        initFromConfig: initFromConfig,
+        isPointVisible: isPointVisible,
+        getPointsWithVisibility: getPointsWithVisibility,
+        getVisibleFaceIds: getVisibleFaceIds,
+        getFaceViewQualities: getFaceViewQualities
     };
 }

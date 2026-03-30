@@ -45,6 +45,9 @@ function initBenchmark(globals) {
     var running = false;
     var currentStep = 0;
     var currentBenchmarkName = null;
+    var stateAccumulator = [];   // collects { fold, pov, visiblePoints } per captured step
+    var capturedFiles = [];      // ordered PNG filenames saved this run (for dataset JSON)
+    var datasetSampleCounter = 0; // monotonic integer ID across all benchmark runs in session
 
     // ── URL parameter helpers ──
 
@@ -193,9 +196,15 @@ function initBenchmark(globals) {
     }
 
     // Canonical label for a captured state: fold{NNN}_pov-{pov}
-    // e.g. "fold000_pov-y", "fold090_pov-iso"
+    // e.g. "fold000_pov-y", "fold090_pov-iso"  — used internally for ground truth only
     function stepLabel(fold, pov) {
         return "fold" + padNum(fold != null ? fold : 0, 3) + "_pov-" + (pov || "iso");
+    }
+
+    // Opaque step filename for PNGs — hides POV from VLM evaluators
+    // e.g. index 0 → "step01", index 4 → "step05"
+    function stepFilename(index) {
+        return "step" + padNum(index + 1, 2);
     }
 
     // ── Screenshot capture ──
@@ -203,25 +212,148 @@ function initBenchmark(globals) {
     // Files are saved to screenshots/{benchmarkName}_{label}.png via the
     // local Bun dev server (/api/screenshot). Falls back to browser saveAs
     // if the endpoint is unavailable (e.g. opening index.html directly).
+    // After all steps, a single {benchmarkName}_summary.json is saved.
 
-    function captureScreenshot(label, callback) {
+    // Records visibility state for the current step into stateAccumulator.
+    // Called after each screenshot capture.
+    function recordStateVisibility(label) {
+        if (!globals.facePoints || !globals.facePoints.getPointsWithVisibility) return;
+        var pts = globals.facePoints.getPointsWithVisibility();
+        if (!pts || pts.length === 0) return;
+
+        var fold = null, pov = null;
+        var m = label.match(/^fold(\d+)_pov-(.+)$/);
+        if (m) { fold = parseInt(m[1], 10); pov = m[2]; }
+
+        var visiblePoints = [];
+        for (var i = 0; i < pts.length; i++) {
+            if (pts[i].visible) visiblePoints.push(i);
+        }
+
+        var visibleFaceIds = globals.facePoints.getVisibleFaceIds ? globals.facePoints.getVisibleFaceIds() : [];
+
+        stateAccumulator.push({ fold: fold, pov: pov, visiblePoints: visiblePoints, visibleFaceIds: visibleFaceIds });
+    }
+
+    // Saves one JSON file per benchmark summarising visibility across all states.
+    // Format: { benchmark, totalPoints, states: [{fold, pov, visiblePoints}], alwaysVisible }
+    function saveBenchmarkSummary(name) {
+        if (!globals.facePoints || !globals.facePoints.getPointsWithVisibility) return;
+        if (stateAccumulator.length === 0) return;
+
+        var pts = globals.facePoints.getPointsWithVisibility();
+        var totalPoints = pts ? pts.length : 0;
+
+        // alwaysVisible = intersection of visiblePoints across all states
+        var alwaysVisible = stateAccumulator[0].visiblePoints.slice();
+        for (var s = 1; s < stateAccumulator.length; s++) {
+            var stateSet = stateAccumulator[s].visiblePoints;
+            alwaysVisible = alwaysVisible.filter(function (idx) {
+                return stateSet.indexOf(idx) !== -1;
+            });
+        }
+
+        // alwaysVisibleFaceIds = intersection of visibleFaceIds across all states
+        var alwaysVisibleFaceIds = (stateAccumulator[0].visibleFaceIds || []).slice();
+        for (var sf = 1; sf < stateAccumulator.length; sf++) {
+            var faceSet = stateAccumulator[sf].visibleFaceIds || [];
+            alwaysVisibleFaceIds = alwaysVisibleFaceIds.filter(function (id) {
+                return faceSet.indexOf(id) !== -1;
+            });
+        }
+
+        var summary = {
+            benchmark:             name,
+            totalPoints:           totalPoints,
+            states:                stateAccumulator.slice(),
+            alwaysVisible:         alwaysVisible,
+            alwaysVisibleFaceIds:  alwaysVisibleFaceIds
+        };
+
+        var blob = new Blob([JSON.stringify(summary, null, 2)], { type: "application/json" });
+        var formData = new FormData();
+        formData.append("file", blob, "summary.json");
+        fetch("/api/screenshot?folder=" + encodeURIComponent(name), { method: "POST", body: formData })
+            .then(function (res) {
+                if (!res.ok) throw new Error("server error");
+                console.log("benchmark: saved screenshots/" + name + "/summary.json");
+            })
+            .catch(function () {
+                console.warn("benchmark: could not save summary (server unavailable)");
+            });
+
+        saveDatasetJson(name, summary);
+    }
+
+    // Generates a DESIGN_PROTOCOL-compliant dataset JSON alongside the summary.
+    // One sample per point: "Is labeled point N visible in every image shown?" (yes/no).
+    // IDs are opaque monotonic integers — no benchmark name or answer info is embedded.
+    function saveDatasetJson(name, summary) {
+        if (capturedFiles.length === 0) return;
+        var samples = [];
+        var images = capturedFiles.slice();
+        var task = "order_origami_tracking";
+
+        for (var i = 0; i < summary.totalPoints; i++) {
+            var pointNum = i + 1;  // 1-based to match on-screen label numbers
+            var isAlways = summary.alwaysVisible.indexOf(i) !== -1;
+            samples.push({
+                id:            datasetSampleCounter++,
+                question:      "Is labeled point " + pointNum + " visible in every image shown?",
+                answer:        isAlways ? "yes" : "no",
+                images:        images,
+                task:          task,
+                category:      "order",
+                level:         "perception",
+                question_type: "point_always_visible",
+                answer_type:   "yes_no",
+                metadata: {
+                    benchmark:           name,
+                    point_index:         i,
+                    alwaysVisiblePoints: summary.alwaysVisible
+                }
+            });
+        }
+
+        var blob = new Blob([JSON.stringify(samples, null, 2)], { type: "application/json" });
+        var formData = new FormData();
+        formData.append("file", blob, "dataset.json");
+        fetch("/api/screenshot?folder=" + encodeURIComponent(name), { method: "POST", body: formData })
+            .then(function (res) {
+                if (!res.ok) throw new Error("server error");
+                console.log("benchmark: saved screenshots/" + name + "/dataset.json");
+            })
+            .catch(function () {
+                console.warn("benchmark: could not save dataset JSON (server unavailable)");
+            });
+    }
+
+
+    // filenameLabel — used in the PNG filename (e.g. "step01"); hides POV from evaluators
+    // recordLabel  — passed to recordStateVisibility for fold/pov ground truth parsing
+    //                (e.g. "fold000_pov-y"); if omitted, filenameLabel is used for both
+    // Files are saved to screenshots/{benchmarkName}/{filenameLabel}.png
+    function captureScreenshot(filenameLabel, recordLabel, callback) {
+        if (typeof recordLabel === "function") { callback = recordLabel; recordLabel = filenameLabel; }
         var name = currentBenchmarkName || globals.filename || "benchmark";
-        var filename = name + "_" + label + ".png";
-        // Set a callback that fires inside the render loop after renderer.render(),
-        // so the WebGL canvas buffer is guaranteed to have fresh content.
-        globals.screenRecordFilename = name + "_" + label;
+        var filename = filenameLabel + ".png";
+        var relativePath = name + "/" + filename;
+        globals.screenRecordFilename = name + "_" + filenameLabel;
         globals.captureCallback = function (blob) {
             var formData = new FormData();
             formData.append("file", blob, filename);
-            fetch("/api/screenshot", { method: "POST", body: formData })
+            fetch("/api/screenshot?folder=" + encodeURIComponent(name), { method: "POST", body: formData })
                 .then(function (res) {
                     if (!res.ok) throw new Error("server error");
-                    console.log("benchmark: saved screenshots/" + filename);
+                    console.log("benchmark: saved screenshots/" + relativePath);
+                    recordStateVisibility(recordLabel);
+                    capturedFiles.push(relativePath);
                     if (callback) callback();
                 })
                 .catch(function () {
                     // fallback: browser download
                     saveAs(blob, filename);
+                    capturedFiles.push(relativePath);
                     if (callback) callback();
                 });
         };
@@ -388,6 +520,7 @@ function initBenchmark(globals) {
             running = false;
             updateStatus("Benchmark complete (" + steps.length + " steps).");
             console.log("benchmark: sequence complete");
+            saveBenchmarkSummary(currentBenchmarkName || globals.filename || "benchmark");
             if (onComplete) onComplete();
             return;
         }
@@ -411,7 +544,7 @@ function initBenchmark(globals) {
         var settleMs = Math.max(pauseSec * 1000, 500);
             setTimeout(function () {
             if (autoCapture) {
-                captureScreenshot(stepLabel(step.fold, step.pov), function () {
+                captureScreenshot(stepFilename(index), stepLabel(step.fold, step.pov), function () {
                     // small delay after capture before next step
                     setTimeout(function () {
                         runStep(steps, index + 1, pauseSec, autoCapture, onComplete);
@@ -533,6 +666,233 @@ function initBenchmark(globals) {
         return cfg;
     }
 
+    // ── Scan mode: dense fold × POV face-visibility discovery (no screenshots) ──
+
+    function runScan(cfg, onComplete) {
+        var foldSteps = cfg.scanFoldSteps || [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
+        var povs      = cfg.scanPovs      || ["y", "-y", "z", "-z", "x", "-x", "iso"];
+        var settleMs  = cfg.scanSettleMs  != null ? cfg.scanSettleMs : 300;
+        var name      = currentBenchmarkName || globals.filename || "scan";
+
+        // Build flat list of {fold, pov} combinations
+        var combinations = [];
+        for (var fi = 0; fi < foldSteps.length; fi++) {
+            for (var pi = 0; pi < povs.length; pi++) {
+                combinations.push({ fold: foldSteps[fi], pov: povs[pi] });
+            }
+        }
+
+        var faces = globals.model ? globals.model.getFaces() : null;
+        var totalFaces = faces ? faces.length : 0;
+        var scanStates = [];
+
+        function runCombination(index) {
+            if (index >= combinations.length) {
+                // Build per-POV analysis: for each POV, which faces are visible at every fold step?
+                var povAnalysis = {};
+                for (var pi = 0; pi < povs.length; pi++) {
+                    var pov = povs[pi];
+                    var povStates = scanStates.filter(function (s) { return s.pov === pov; });
+
+                    // Intersect visibleFaceIds across all fold steps for this POV
+                    var alwaysIds = povStates.length > 0 ? povStates[0].visibleFaceIds.slice() : [];
+                    for (var si = 1; si < povStates.length; si++) {
+                        var fset = povStates[si].visibleFaceIds;
+                        alwaysIds = alwaysIds.filter(function (id) { return fset.indexOf(id) !== -1; });
+                    }
+
+                    // Compute average minimum quality across states for ranking
+                    var avgMinQuality = 0;
+                    if (alwaysIds.length > 0 && povStates.length > 0) {
+                        var totalMinQ = 0;
+                        for (var si2 = 0; si2 < povStates.length; si2++) {
+                            var sq = povStates[si2].faceQualities || {};
+                            var minQ = alwaysIds.reduce(function (mn, id) { return Math.min(mn, sq[id] || 0); }, Infinity);
+                            totalMinQ += (minQ === Infinity ? 0 : minQ);
+                        }
+                        avgMinQuality = Math.round((totalMinQ / povStates.length) * 1000) / 1000;
+                    }
+
+                    povAnalysis[pov] = {
+                        alwaysVisibleFaceIds: alwaysIds,
+                        faceCount:            alwaysIds.length,
+                        avgMinQuality:        avgMinQuality,
+                        states:               povStates.map(function (s) {
+                            return { fold: s.fold, visibleFaceIds: s.visibleFaceIds, faceQualities: s.faceQualities || {} };
+                        })
+                    };
+                }
+
+                // Rank POVs by average minimum quality (primary), then face count (tiebreaker)
+                var recommendedPovs = povs.slice()
+                    .filter(function (p) { return povAnalysis[p].faceCount > 0; })
+                    .sort(function (a, b) {
+                        var qDiff = povAnalysis[b].avgMinQuality - povAnalysis[a].avgMinQuality;
+                        if (Math.abs(qDiff) > 1e-6) return qDiff;
+                        return povAnalysis[b].faceCount - povAnalysis[a].faceCount;
+                    });
+
+                // Pick 5 evenly-spaced fold steps from scanFoldSteps to use as sequence frames.
+                // If there are ≤5 steps use all of them; otherwise sample evenly across the range.
+                function pickFrames(steps, n) {
+                    if (steps.length <= n) return steps.slice();
+                    var picked = [];
+                    for (var i = 0; i < n; i++) {
+                        picked.push(steps[Math.round(i * (steps.length - 1) / (n - 1))]);
+                    }
+                    return picked;
+                }
+                var frameSteps = pickFrames(foldSteps, 5);
+
+                // Build a lookup of visibleFaceIds and faceQualities for every {fold, pov} combination.
+                var visLookup = {};
+                var visQualityLookup = {};
+                for (var li = 0; li < scanStates.length; li++) {
+                    var ls = scanStates[li];
+                    var key = ls.fold + '_' + ls.pov;
+                    visLookup[key] = ls.visibleFaceIds;
+                    visQualityLookup[key] = ls.faceQualities || {};
+                }
+
+                // Build a multi-POV sequence using only qualifying POVs (those with always-visible faces).
+                // Frame 0 is always fold=0 pov="y" — flat paper top-down is the fixed anchor frame
+                // so the viewer has a reference before folding begins. Remaining frames vary the POV.
+                // candidatePovs: ordered list to try for frames 1-N; first entry is preferred.
+                function buildMultiPovSequence(frames, candidatePovs) {
+                    if (candidatePovs.length < 2) return null;
+
+                    // Fixed first frame: fold=0, pov="y"
+                    var firstFold = frames[0];
+                    var firstFaceIds = visLookup[firstFold + '_y'] || [];
+                    var firstQualities = visQualityLookup[firstFold + '_y'] || {};
+                    var firstMinQuality = firstFaceIds.length > 0
+                        ? firstFaceIds.reduce(function (mn, id) { return Math.min(mn, firstQualities[id] || 0); }, Infinity)
+                        : 0;
+                    var sequence = [{ fold: firstFold, pov: "y", minQuality: Math.round(firstMinQuality * 1000) / 1000 }];
+                    var intersection = firstFaceIds.slice();
+                    var lastPov = "y";
+
+                    for (var fi = 1; fi < frames.length; fi++) {
+                        var fold = frames[fi];
+                        var bestPov = null, bestIntersection = null, bestMinQuality = -1, bestCount = -1;
+
+                        for (var pi2 = 0; pi2 < candidatePovs.length; pi2++) {
+                            var candidate = candidatePovs[pi2];
+                            if (candidate === lastPov) continue; // no adjacent repeat
+                            var faceIds = visLookup[fold + '_' + candidate] || [];
+                            var newIntersection = intersection.filter(function (id) { return faceIds.indexOf(id) !== -1; });
+                            if (newIntersection.length === 0) continue;
+                            // Quality = minimum dot-product score across all tracked faces at this step
+                            var qualities = visQualityLookup[fold + '_' + candidate] || {};
+                            var minQ = newIntersection.reduce(function (mn, id) { return Math.min(mn, qualities[id] || 0); }, Infinity);
+                            // Primary criterion: maximise minimum quality; tiebreak by count
+                            if (minQ > bestMinQuality || (minQ === bestMinQuality && newIntersection.length > bestCount)) {
+                                bestMinQuality = minQ;
+                                bestCount = newIntersection.length;
+                                bestPov = candidate;
+                                bestIntersection = newIntersection;
+                            }
+                        }
+
+                        if (!bestPov) break; // no valid candidate found
+                        lastPov = bestPov;
+                        sequence.push({ fold: fold, pov: bestPov, minQuality: Math.round(bestMinQuality * 1000) / 1000 });
+                        intersection = bestIntersection || [];
+                    }
+
+                    if (!intersection || intersection.length === 0) return null;
+                    return { steps: sequence, alwaysVisibleFaceIds: intersection, faceCount: intersection.length };
+                }
+
+                // Generate several multi-POV sequences by rotating which qualifying POV comes first.
+                // This produces variants with different angle progressions for dataset diversity.
+                // Candidates are restricted to qualifying POVs only — these are proven to keep
+                // faces visible across all fold states, so mixing them stays tractable.
+                var suggestedSequences = [];
+                if (recommendedPovs.length >= 2) {
+                    for (var seqi = 0; seqi < recommendedPovs.length; seqi++) {
+                        // Rotate the candidate list so a different POV leads each variant
+                        var rotated = recommendedPovs.slice(seqi).concat(recommendedPovs.slice(0, seqi));
+                        var seq = buildMultiPovSequence(frameSteps, rotated);
+                        if (seq) {
+                            suggestedSequences.push({
+                                alwaysVisibleFaceIds: seq.alwaysVisibleFaceIds,
+                                faceCount:            seq.faceCount,
+                                steps:                seq.steps
+                            });
+                        }
+                    }
+                    // Deduplicate sequences with identical step arrays
+                    suggestedSequences = suggestedSequences.filter(function (s, idx) {
+                        var key = s.steps.map(function (st) { return st.fold + '_' + st.pov; }).join(',');
+                        for (var prev = 0; prev < idx; prev++) {
+                            var pk = suggestedSequences[prev].steps.map(function (st) { return st.fold + '_' + st.pov; }).join(',');
+                            if (pk === key) return false;
+                        }
+                        return true;
+                    });
+                }
+
+                var result = {
+                    benchmark:          name,
+                    model:              cfg.model || null,
+                    totalFaces:         totalFaces,
+                    scanPovs:           povs,
+                    scanFoldSteps:      foldSteps,
+                    suggestedSequences: suggestedSequences,
+                    povAnalysis:        povAnalysis
+                };
+
+                var blob = new Blob([JSON.stringify(result, null, 2)], { type: "application/json" });
+                var formData = new FormData();
+                formData.append("file", blob, "scan.json");
+                fetch("/api/screenshot?folder=" + encodeURIComponent(name), { method: "POST", body: formData })
+                    .then(function (res) {
+                        if (!res.ok) throw new Error("server error");
+                        console.log("benchmark: saved screenshots/" + name + "/scan.json");
+                    })
+                    .catch(function () {
+                        console.warn("benchmark: could not save scan (server unavailable)");
+                    });
+
+                var topPovs = suggestedSequences.map(function (s) { return s.pov; });
+                updateStatus("Scan complete. Suggested POVs: " + topPovs.join(", "));
+                console.log("benchmark: scan complete, suggestedSequences:", suggestedSequences);
+                if (onComplete) onComplete();
+                return;
+            }
+
+            var combo = combinations[index];
+            globals.setCreasePercent(combo.fold / 100);
+            globals.shouldChangeCreasePercent = true;
+            setPOV(combo.pov);
+            globals.model.step();
+
+            updateStatus("Scan: fold " + combo.fold + "% pov " + combo.pov +
+                         " (" + (index + 1) + "/" + combinations.length + ")");
+
+            setTimeout(function () {
+                var minFaceQuality = cfg.minFaceQuality != null ? cfg.minFaceQuality : 0.25;
+                var allVisibleFaceIds = globals.facePoints && globals.facePoints.getVisibleFaceIds
+                    ? globals.facePoints.getVisibleFaceIds()
+                    : [];
+                var faceQualities = globals.facePoints && globals.facePoints.getFaceViewQualities
+                    ? globals.facePoints.getFaceViewQualities(allVisibleFaceIds)
+                    : {};
+                // Filter to faces meeting the quality threshold
+                var visibleFaceIds = allVisibleFaceIds.filter(function (id) {
+                    return (faceQualities[id] || 0) >= minFaceQuality;
+                });
+                scanStates.push({ fold: combo.fold, pov: combo.pov, visibleFaceIds: visibleFaceIds, faceQualities: faceQualities });
+                runCombination(index + 1);
+            }, settleMs);
+        }
+
+        running = true;
+        updateStatus("Scan started (" + combinations.length + " combinations, " + settleMs + "ms settle)…");
+        runCombination(0);
+    }
+
     // ── Wait for model to finish loading ──
 
     function waitForModelLoad(callback) {
@@ -562,6 +922,12 @@ function initBenchmark(globals) {
             if (onComplete) onComplete();
             return;
         }
+        if (cfg.scanMode) {
+            runScan(cfg, onComplete);
+            return;
+        }
+        stateAccumulator = [];
+        capturedFiles = [];
         applySettings(cfg);
 
         // Apply initial fold state (top-level fold) before any animations
@@ -823,10 +1189,26 @@ function initBenchmark(globals) {
         });
     }
 
+    function loadJson(path) {
+        if (!path) return;
+        $.getJSON(path)
+            .done(function (loaded) {
+                presets = loaded;
+                populatePresetDropdown();
+                updateStatus("Loaded " + Object.keys(loaded).length + " presets from " + path);
+            })
+            .fail(function () {
+                presets = null;
+                populatePresetDropdown();
+                updateStatus("Could not load " + path);
+            });
+    }
+
     return {
         init: init,
         run: run,
         runAll: runAll,
+        loadJson: loadJson,
         selectPreset: selectPreset,
         getConfig: function () { return config; },
         getPresets: function () { return presets; },

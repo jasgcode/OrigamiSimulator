@@ -1,5 +1,8 @@
 {
     "test-waterbomb": {
+        "task": "order_origami_tracking",
+        "category": "order",
+        "level": "perception",
         "model": "/Bases/waterbombBase.svg",
         "colorMode": "labelOnly",
         "color1": "ec008b",
@@ -21,6 +24,9 @@
         ]
     },
     "test-bird": {
+        "task": "order_origami_tracking",
+        "category": "order",
+        "level": "perception",
         "model": "/Bases/birdBase.svg",
         "colorMode": "labelOnly",
         "color1": "0077cc",
@@ -31,8 +37,8 @@
         "showPointNumbers": true,
         "autoCapture": true,
         "facePoints": {
-            "2": [{ "u": 0.5, "v": 0.5, "w": 0.0 }, { "u": 0.2, "v": 0.4, "w": 0.4 }],
-            "7": [{ "u": 0.33, "v": 0.33, "w": 0.34 }],
+            "10": [{ "u": 0.5, "v": 0.5, "w": 0.0 }, { "u": 0.2, "v": 0.4, "w": 0.4 }],
+            "13": [{ "u": 0.33, "v": 0.33, "w": 0.34 }],
             "12": [{ "u": 0.6, "v": 0.2, "w": 0.2 }]
         },
         "steps": [
@@ -43,6 +49,9 @@
         ]
     },
     "test-square": {
+        "task": "order_origami_tracking",
+        "category": "order",
+        "level": "perception",
         "model": "/Bases/squareBase.svg",
         "colorMode": "labelOnly",
         "color1": "f39200",
@@ -63,7 +72,148 @@
             { "fold": 90, "pov": "iso" }
         ]
     },
+    "bird-track-1": {
+        "model": "/Bases/birdBase.svg",
+        "colorMode": "labelOnly",
+        "color1": "0077cc",
+        "color2": "eeeeee",
+        "backgroundColor": "f0f0f0",
+        "fold": 0,
+        "pauseDuration": 2,
+        "showPointNumbers": true,
+        "autoCapture": true,
+        "facePoints": {
+            "9":  [{ "u": 0.33, "v": 0.33, "w": 0.34 }, { "u": 0.6, "v": 0.2, "w": 0.2 }],
+            "10": [{ "u": 0.5, "v": 0.25, "w": 0.25 }],
+            "13": [{ "u": 0.4, "v": 0.4, "w": 0.2 }],
+            "14": [{ "u": 0.33, "v": 0.33, "w": 0.34 }]
+        },
+        "steps": [
+            { "fold": 0,  "pov": "y"   },
+            { "fold": 25, "pov": "iso" },
+            { "fold": 50, "pov": "y"   },
+            { "fold": 75, "pov": "z"   },
+            { "fold": 90, "pov": "y"   }
+        ]
+    },
+    "bird-track-2": {
+        "model": "/Bases/birdBase.svg",
+        "colorMode": "labelOnly",
+        "color1": "0077cc",
+        "color2": "eeeeee",
+        "backgroundColor": "f0f0f0",
+        "fold": 0,
+        "pauseDuration": 2,
+        "showPointNumbers": true,
+        "autoCapture": true,
+        "facePoints": {
+            "9":  [{ "u": 0.5, "v": 0.25, "w": 0.25 }],
+            "10": [{ "u": 0.33, "v": 0.33, "w": 0.34 }, { "u": 0.2, "v": 0.5, "w": 0.3 }],
+            "13": [{ "u": 0.6, "v": 0.2, "w": 0.2 }],
+            "14": [{ "u": 0.5, "v": 0.25, "w": 0.25 }]
+        },
+        "steps": [
+            { "fold": 0,  "pov": "y"   },
+            { "fold": 25, "pov": "iso" },
+            { "fold": 50, "pov": "z"   },
+            { "fold": 75, "pov": "y"   },
+            { "fold": 90, "pov": "z"   }
+        ]
+    },
+    "bird-track-3": {
+        "model": "/Bases/birdBase.svg",
+        "colorMode": "labelOnly",
+        "color1": "0077cc",
+        "color2": "eeeeee",
+        "backgroundColor": "f0f0f0",
+        "fold": 0,
+        "pauseDuration": 2,
+        "showPointNumbers": true,
+        "autoCapture": true,
+        "facePoints": {
+            "1": [{ "u": 0.33, "v": 0.33, "w": 0.34 }],
+            "2": [{ "u": 0.5, "v": 0.25, "w": 0.25 }, { "u": 0.6, "v": 0.2, "w": 0.2 }],
+            "5": [{ "u": 0.4, "v": 0.4, "w": 0.2 }],
+            "6": [{ "u": 0.33, "v": 0.33, "w": 0.34 }]
+        },
+        "steps": [
+            { "fold": 0,  "pov": "y"   },
+            { "fold": 25, "pov": "iso" },
+            { "fold": 50, "pov": "-z"  },
+            { "fold": 75, "pov": "y"   },
+            { "fold": 90, "pov": "-z"  }
+        ]
+    },
+    "bird-track-4": {
+        "model": "/Bases/birdBase.svg",
+        "colorMode": "labelOnly",
+        "color1": "0077cc",
+        "color2": "eeeeee",
+        "backgroundColor": "f0f0f0",
+        "fold": 0,
+        "pauseDuration": 2,
+        "showPointNumbers": true,
+        "autoCapture": true,
+        "facePoints": {
+            "10": [{ "u": 0.33, "v": 0.33, "w": 0.34 }, { "u": 0.6, "v": 0.2, "w": 0.2 }],
+            "13": [{ "u": 0.5, "v": 0.25, "w": 0.25 }, { "u": 0.2, "v": 0.5, "w": 0.3 }]
+        },
+        "steps": [
+            { "fold": 0,  "pov": "y"   },
+            { "fold": 25, "pov": "iso" },
+            { "fold": 50, "pov": "z"   },
+            { "fold": 75, "pov": "iso" },
+            { "fold": 90, "pov": "z"   }
+        ]
+    },
+    "bird-track-5": {
+        "model": "/Bases/birdBase.svg",
+        "colorMode": "labelOnly",
+        "color1": "0077cc",
+        "color2": "eeeeee",
+        "backgroundColor": "f0f0f0",
+        "fold": 0,
+        "pauseDuration": 2,
+        "showPointNumbers": true,
+        "autoCapture": true,
+        "facePoints": {
+            "2": [{ "u": 0.33, "v": 0.33, "w": 0.34 }, { "u": 0.6, "v": 0.2, "w": 0.2 }],
+            "5": [{ "u": 0.5, "v": 0.25, "w": 0.25 }, { "u": 0.2, "v": 0.5, "w": 0.3 }]
+        },
+        "steps": [
+            { "fold": 0,  "pov": "y"   },
+            { "fold": 25, "pov": "iso" },
+            { "fold": 50, "pov": "-z"  },
+            { "fold": 75, "pov": "y"   },
+            { "fold": 90, "pov": "-z"  }
+        ]
+    },
+    "bird-track-6": {
+        "model": "/Bases/birdBase.svg",
+        "colorMode": "labelOnly",
+        "color1": "0077cc",
+        "color2": "eeeeee",
+        "backgroundColor": "f0f0f0",
+        "fold": 0,
+        "pauseDuration": 2,
+        "showPointNumbers": true,
+        "autoCapture": true,
+        "facePoints": {
+            "6": [{ "u": 0.33, "v": 0.33, "w": 0.34 }, { "u": 0.6, "v": 0.2, "w": 0.2 }],
+            "9": [{ "u": 0.5, "v": 0.25, "w": 0.25 }, { "u": 0.2, "v": 0.5, "w": 0.3 }]
+        },
+        "steps": [
+            { "fold": 0,  "pov": "y"   },
+            { "fold": 25, "pov": "iso" },
+            { "fold": 50, "pov": "x"   },
+            { "fold": 75, "pov": "y"   },
+            { "fold": 90, "pov": "x"   }
+        ]
+    },
     "test-frog": {
+        "task": "order_origami_tracking",
+        "category": "order",
+        "level": "perception",
         "model": "/Bases/frogBase.svg",
         "colorMode": "labelOnly",
         "color1": "4caf50",

@@ -1,0 +1,222 @@
+{
+    "bird-track-7": {
+        "model": "/Bases/birdBase.svg",
+        "colorMode": "labelOnly",
+        "color1": "0077cc",
+        "color2": "eeeeee",
+        "backgroundColor": "f0f0f0",
+        "fold": 0,
+        "pauseDuration": 2,
+        "showPointNumbers": true,
+        "autoCapture": true,
+        "facePoints": {
+            "10": [{ "u": 0.5,  "v": 0.25, "w": 0.25 }],
+            "8":  [{ "u": 0.33, "v": 0.33, "w": 0.34 }]
+        },
+        "steps": [
+            { "fold": 0,  "pov": "y"   },
+            { "fold": 25, "pov": "iso" },
+            { "fold": 50, "pov": "z"   },
+            { "fold": 75, "pov": "z"   },
+            { "fold": 90, "pov": "z"   }
+        ]
+    },
+    "bird-track-8": {
+        "model": "/Bases/birdBase.svg",
+        "colorMode": "labelOnly",
+        "color1": "0077cc",
+        "color2": "eeeeee",
+        "backgroundColor": "f0f0f0",
+        "fold": 0,
+        "pauseDuration": 2,
+        "showPointNumbers": true,
+        "autoCapture": true,
+        "facePoints": {
+            "9":  [{ "u": 0.5,  "v": 0.25, "w": 0.25 }],
+            "4":  [{ "u": 0.6,  "v": 0.2,  "w": 0.2  }]
+        },
+        "steps": [
+            { "fold": 0,  "pov": "y"   },
+            { "fold": 25, "pov": "iso" },
+            { "fold": 50, "pov": "x"   },
+            { "fold": 75, "pov": "iso" },
+            { "fold": 90, "pov": "iso" }
+        ]
+    },
+    "bird-track-9": {
+        "model": "/Bases/birdBase.svg",
+        "colorMode": "labelOnly",
+        "color1": "0077cc",
+        "color2": "eeeeee",
+        "backgroundColor": "f0f0f0",
+        "fold": 0,
+        "pauseDuration": 2,
+        "showPointNumbers": true,
+        "autoCapture": true,
+        "facePoints": {
+            "13": [{ "u": 0.5,  "v": 0.25, "w": 0.25 }],
+            "0":  [{ "u": 0.33, "v": 0.33, "w": 0.34 }]
+        },
+        "steps": [
+            { "fold": 0,  "pov": "y"  },
+            { "fold": 25, "pov": "y"  },
+            { "fold": 50, "pov": "z"  },
+            { "fold": 75, "pov": "z"  },
+            { "fold": 90, "pov": "z"  }
+        ]
+    },
+    "bird-track-10": {
+        "model": "/Bases/birdBase.svg",
+        "colorMode": "labelOnly",
+        "color1": "0077cc",
+        "color2": "eeeeee",
+        "backgroundColor": "f0f0f0",
+        "fold": 0,
+        "pauseDuration": 2,
+        "showPointNumbers": true,
+        "autoCapture": true,
+        "facePoints": {
+            "2":  [{ "u": 0.5,  "v": 0.25, "w": 0.25 }],
+            "3":  [{ "u": 0.33, "v": 0.33, "w": 0.34 }]
+        },
+        "steps": [
+            { "fold": 0,  "pov": "y"  },
+            { "fold": 25, "pov": "y"  },
+            { "fold": 50, "pov": "-z" },
+            { "fold": 75, "pov": "-z" },
+            { "fold": 90, "pov": "-z" }
+        ]
+    },
+    "bird-track-11": {
+        "model": "/Bases/birdBase.svg",
+        "colorMode": "labelOnly",
+        "color1": "0077cc",
+        "color2": "eeeeee",
+        "backgroundColor": "f0f0f0",
+        "fold": 0,
+        "pauseDuration": 2,
+        "showPointNumbers": true,
+        "autoCapture": true,
+        "facePoints": {
+            "6":  [{ "u": 0.5,  "v": 0.25, "w": 0.25 }],
+            "12": [{ "u": 0.6,  "v": 0.2,  "w": 0.2  }]
+        },
+        "steps": [
+            { "fold": 0,  "pov": "y" },
+            { "fold": 25, "pov": "y" },
+            { "fold": 50, "pov": "x" },
+            { "fold": 75, "pov": "x" },
+            { "fold": 90, "pov": "x" }
+        ]
+    },
+    "bird-track-12": {
+        "model": "/Bases/birdBase.svg",
+        "colorMode": "labelOnly",
+        "color1": "0077cc",
+        "color2": "eeeeee",
+        "backgroundColor": "f0f0f0",
+        "fold": 0,
+        "pauseDuration": 2,
+        "showPointNumbers": true,
+        "autoCapture": true,
+        "facePoints": {
+            "1":  [{ "u": 0.5,  "v": 0.25, "w": 0.25 }],
+            "7":  [{ "u": 0.33, "v": 0.33, "w": 0.34 }]
+        },
+        "steps": [
+            { "fold": 0,  "pov": "y"  },
+            { "fold": 25, "pov": "y"  },
+            { "fold": 50, "pov": "-x" },
+            { "fold": 75, "pov": "-x" },
+            { "fold": 90, "pov": "-x" }
+        ]
+    },
+    "bird-track-13": {
+        "model": "/Bases/birdBase.svg",
+        "colorMode": "labelOnly",
+        "color1": "0077cc",
+        "color2": "eeeeee",
+        "backgroundColor": "f0f0f0",
+        "fold": 0,
+        "pauseDuration": 2,
+        "showPointNumbers": true,
+        "autoCapture": true,
+        "facePoints": {
+            "14": [{ "u": 0.5,  "v": 0.25, "w": 0.25 }],
+            "11": [{ "u": 0.6,  "v": 0.2,  "w": 0.2  }]
+        },
+        "steps": [
+            { "fold": 0,  "pov": "y"   },
+            { "fold": 25, "pov": "iso" },
+            { "fold": 50, "pov": "-x"  },
+            { "fold": 75, "pov": "-x"  },
+            { "fold": 90, "pov": "-x"  }
+        ]
+    },
+    "bird-track-14": {
+        "model": "/Bases/birdBase.svg",
+        "colorMode": "labelOnly",
+        "color1": "0077cc",
+        "color2": "eeeeee",
+        "backgroundColor": "f0f0f0",
+        "fold": 0,
+        "pauseDuration": 2,
+        "showPointNumbers": true,
+        "autoCapture": true,
+        "facePoints": {
+            "5":  [{ "u": 0.5,  "v": 0.25, "w": 0.25 }],
+            "15": [{ "u": 0.33, "v": 0.33, "w": 0.34 }]
+        },
+        "steps": [
+            { "fold": 0,  "pov": "y"   },
+            { "fold": 25, "pov": "iso" },
+            { "fold": 50, "pov": "-z"  },
+            { "fold": 75, "pov": "-z"  },
+            { "fold": 90, "pov": "-z"  }
+        ]
+    },
+    "bird-track-15": {
+        "model": "/Bases/birdBase.svg",
+        "colorMode": "labelOnly",
+        "color1": "0077cc",
+        "color2": "eeeeee",
+        "backgroundColor": "f0f0f0",
+        "fold": 0,
+        "pauseDuration": 2,
+        "showPointNumbers": true,
+        "autoCapture": true,
+        "facePoints": {
+            "9":  [{ "u": 0.5,  "v": 0.25, "w": 0.25 }],
+            "15": [{ "u": 0.6,  "v": 0.2,  "w": 0.2  }]
+        },
+        "steps": [
+            { "fold": 0,  "pov": "y"   },
+            { "fold": 25, "pov": "iso" },
+            { "fold": 50, "pov": "iso" },
+            { "fold": 75, "pov": "x"   },
+            { "fold": 90, "pov": "x"   }
+        ]
+    },
+    "bird-track-16": {
+        "model": "/Bases/birdBase.svg",
+        "colorMode": "labelOnly",
+        "color1": "0077cc",
+        "color2": "eeeeee",
+        "backgroundColor": "f0f0f0",
+        "fold": 0,
+        "pauseDuration": 2,
+        "showPointNumbers": true,
+        "autoCapture": true,
+        "facePoints": {
+            "10": [{ "u": 0.5,  "v": 0.25, "w": 0.25 }],
+            "4":  [{ "u": 0.33, "v": 0.33, "w": 0.34 }]
+        },
+        "steps": [
+            { "fold": 0,  "pov": "y"   },
+            { "fold": 25, "pov": "iso" },
+            { "fold": 50, "pov": "iso" },
+            { "fold": 75, "pov": "z"   },
+            { "fold": 90, "pov": "z"   }
+        ]
+    }
+}

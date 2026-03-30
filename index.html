@@ -1384,7 +1384,12 @@
             </div>
             <div id="benchmarkSection" class="hide indent smallTxt">
                 <label>JSON: &nbsp;</label>
-                <input id="benchmarkJsonPath" type="text" class="form-control" value="benchmarks.json" style="width:12em; display:inline-block;" placeholder="benchmarks.json"/>
+                <select id="benchmarkJsonPath" class="form-control" style="width:auto; display:inline-block;">
+                    <option value="benchmarks.json">benchmarks.json</option>
+                    <option value="bird-partial.json">bird-partial.json</option>
+                    <option value="scan.json">scan.json</option>
+                    <option value="benchmarks copy.json">benchmarks copy.json</option>
+                </select>
                 <br/><br/>
                 <label>Preset: &nbsp;</label>
                 <select id="benchmarkPresetSelect" class="form-control" style="width:auto; display:inline-block;">

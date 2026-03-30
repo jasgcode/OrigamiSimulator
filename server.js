@@ -52,9 +52,13 @@ Bun.serve({
                 if (!file || !(file instanceof File)) {
                     return new Response("Missing file field", { status: 400 });
                 }
-                // Sanitise filename: strip path separators
+                // Optional ?folder= query param — creates screenshots/{folder}/ subdirectory
+                const rawFolder = url.searchParams.get("folder");
+                const safeFolder = rawFolder ? rawFolder.replace(/[/\\]/g, "_") : null;
+                const dir = safeFolder ? join(SCREENSHOTS_DIR, safeFolder) : SCREENSHOTS_DIR;
+                await mkdir(dir, { recursive: true });
                 const safeName = file.name.replace(/[/\\]/g, "_");
-                const dest = join(SCREENSHOTS_DIR, safeName);
+                const dest = join(dir, safeName);
                 await Bun.write(dest, file);
                 console.log("  saved:", dest);
                 return new Response(JSON.stringify({ ok: true, path: dest }), {
