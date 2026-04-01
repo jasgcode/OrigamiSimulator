@@ -262,9 +262,12 @@ function initBenchmark(globals) {
             });
         }
 
+        var hiddenPoints = globals.facePoints.getHiddenIndices ? globals.facePoints.getHiddenIndices() : [];
+
         var summary = {
             benchmark:             name,
             totalPoints:           totalPoints,
+            hiddenPoints:          hiddenPoints,
             states:                stateAccumulator.slice(),
             alwaysVisible:         alwaysVisible,
             alwaysVisibleFaceIds:  alwaysVisibleFaceIds
@@ -310,7 +313,9 @@ function initBenchmark(globals) {
                 metadata: {
                     benchmark:           name,
                     point_index:         i,
-                    alwaysVisiblePoints: summary.alwaysVisible
+                    alwaysVisiblePoints: summary.alwaysVisible,
+                    hiddenPoints:        summary.hiddenPoints,
+                    isHiddenPoint:       summary.hiddenPoints.indexOf(i) !== -1
                 }
             });
         }
@@ -491,6 +496,7 @@ function initBenchmark(globals) {
                     }
                 }
                 if (hidePoints) globals.hideFacePointsDuringAnimation = false;
+                globals.revealHiddenPoints = true;
                 globals.model.updateFaceColors();
                 updateStatus("Fold animation complete (0→" + to + "%).");
                 if (callback) callback();
@@ -532,6 +538,9 @@ function initBenchmark(globals) {
         updateStatus("Step " + (index + 1) + "/" + steps.length +
                      " — fold " + step.fold + "%" +
                      (step.pov ? ", POV " + step.pov : ""));
+
+        // reveal hidden points only on the last step
+        globals.revealHiddenPoints = (index === steps.length - 1);
 
         // set fold percent
         globals.setCreasePercent(step.fold / 100);

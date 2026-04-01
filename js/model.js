@@ -291,7 +291,10 @@ function initModel(globals){
                     var ptPos = pos.clone().add(offset);
                     var toCamera = camera.position.clone().sub(pos);
                     var dot = toCamera.dot(normal);
-                    var visible = (isFront ? dot > 0 : dot < 0) && !globals.hideFacePointsDuringAnimation;
+                    var pointHidden = globals.facePoints.isPointHidden && globals.facePoints.isPointHidden(pi);
+                    var visible = (isFront ? dot > 0 : dot < 0)
+                        && !globals.hideFacePointsDuringAnimation
+                        && (!pointHidden || globals.revealHiddenPoints);
                     if (use3D){
                         pointSpheres[pi].position.copy(ptPos);
                         pointSpheres[pi].visible = visible;

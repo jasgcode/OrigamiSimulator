@@ -111,7 +111,8 @@ function initGlobals(){
         clickToAddFacePoints: false,
         showFacePointNumbers: true,
         facePoints3D: false,
-        hideFacePointsDuringAnimation: false
+        hideFacePointsDuringAnimation: false,
+        revealHiddenPoints: false
     };
 
     function setCreasePercent(percent){

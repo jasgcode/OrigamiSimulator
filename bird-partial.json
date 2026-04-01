@@ -7,7 +7,7 @@
         "backgroundColor": "f0f0f0",
         "fold": 0,
         "pauseDuration": 2,
-        "showPointNumbers": true,
+        "showPointNumbers": false,
         "autoCapture": true,
         "facePoints": {
             "10": [{ "u": 0.5,  "v": 0.25, "w": 0.25 }],

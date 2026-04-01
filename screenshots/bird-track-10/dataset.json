@@ -1,0 +1,54 @@
+[
+  {
+    "id": 20,
+    "question": "Is labeled point 1 visible in every image shown?",
+    "answer": "yes",
+    "images": [
+      "bird-track-10/step01.png",
+      "bird-track-10/step02.png",
+      "bird-track-10/step03.png",
+      "bird-track-10/step04.png",
+      "bird-track-10/step05.png"
+    ],
+    "task": "order_origami_tracking",
+    "category": "order",
+    "level": "perception",
+    "question_type": "point_always_visible",
+    "answer_type": "yes_no",
+    "metadata": {
+      "benchmark": "bird-track-10",
+      "point_index": 0,
+      "alwaysVisiblePoints": [
+        0
+      ],
+      "hiddenPoints": [],
+      "isHiddenPoint": false
+    }
+  },
+  {
+    "id": 21,
+    "question": "Is labeled point 2 visible in every image shown?",
+    "answer": "no",
+    "images": [
+      "bird-track-10/step01.png",
+      "bird-track-10/step02.png",
+      "bird-track-10/step03.png",
+      "bird-track-10/step04.png",
+      "bird-track-10/step05.png"
+    ],
+    "task": "order_origami_tracking",
+    "category": "order",
+    "level": "perception",
+    "question_type": "point_always_visible",
+    "answer_type": "yes_no",
+    "metadata": {
+      "benchmark": "bird-track-10",
+      "point_index": 1,
+      "alwaysVisiblePoints": [
+        0
+      ],
+      "hiddenPoints": [],
+      "isHiddenPoint": false
+    }
+  }
+]

@@ -85,15 +85,28 @@ function initFacePoints(globals) {
         return points;
     }
 
-    function addPoint(faceId, u, v, w) {
+    function addPoint(faceId, u, v, w, hidden) {
         if (u === undefined) u = 1 / 3;
         if (v === undefined) v = 1 / 3;
         if (w === undefined) w = 1 / 3;
         var faces = globals.model.getFaces();
         var N = faces ? faces.length : 0;
         if (faceId < 0 || faceId >= N * 2) return -1;
-        points.push({ faceId: faceId, u: u, v: v, w: w });
+        points.push({ faceId: faceId, u: u, v: v, w: w, hidden: !!hidden });
         return points.length - 1;
+    }
+
+    function isPointHidden(index) {
+        if (index < 0 || index >= points.length) return false;
+        return !!points[index].hidden;
+    }
+
+    function getHiddenIndices() {
+        var result = [];
+        for (var i = 0; i < points.length; i++) {
+            if (points[i].hidden) result.push(i);
+        }
+        return result;
     }
 
     function removePoint(index) {
@@ -246,13 +259,14 @@ function initFacePoints(globals) {
                 var faceId = parseInt(entry.faceId != null ? entry.faceId : entry.face, 10);
                 if (isNaN(faceId) || faceId < 0 || faceId > maxFaceId) continue;
                 var bary = parseBarycentric(entry);
+                var isHidden = !!entry.hidden;
                 if (bary) {
-                    addPoint(faceId, bary.u, bary.v, bary.w);
+                    addPoint(faceId, bary.u, bary.v, bary.w, isHidden);
                 } else {
                     var count = parseInt(entry.count != null ? entry.count : 1, 10);
                     for (var j = 0; j < count; j++) {
                         bary = deterministicBarycentric(globalIndex++);
-                        addPoint(faceId, bary.u, bary.v, bary.w);
+                        addPoint(faceId, bary.u, bary.v, bary.w, isHidden);
                     }
                 }
             }
@@ -266,11 +280,12 @@ function initFacePoints(globals) {
             if (Array.isArray(val) && val.length > 0) {
                 for (var k = 0; k < val.length; k++) {
                     var bary = parseBarycentric(val[k]);
+                    var isHidden = !!(val[k] && val[k].hidden);
                     if (bary) {
-                        addPoint(faceId, bary.u, bary.v, bary.w);
+                        addPoint(faceId, bary.u, bary.v, bary.w, isHidden);
                     } else {
                         bary = deterministicBarycentric(globalIndex++);
-                        addPoint(faceId, bary.u, bary.v, bary.w);
+                        addPoint(faceId, bary.u, bary.v, bary.w, isHidden);
                     }
                 }
             } else {
@@ -383,6 +398,8 @@ function initFacePoints(globals) {
         isPointVisible: isPointVisible,
         getPointsWithVisibility: getPointsWithVisibility,
         getVisibleFaceIds: getVisibleFaceIds,
-        getFaceViewQualities: getFaceViewQualities
+        getFaceViewQualities: getFaceViewQualities,
+        isPointHidden: isPointHidden,
+        getHiddenIndices: getHiddenIndices
     };
 }

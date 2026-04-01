@@ -138,6 +138,14 @@ Define points on mesh faces (for `faceTriangleID` / `labelOnly`). Positions are 
 "facePoints": [{ "faceId": 0, "u": 0.33, "v": 0.33, "w": 0.34 }]
 ```
 
+**Hidden points:** Any point can have `"hidden": true` to make it invisible until the last step (or after fold animation completes). Hidden points keep their number in the continuous 1..N sequence but don't render until revealed. Use this to show initial points on a flat model, then reveal additional points on the folded result.
+```json
+"facePoints": {
+  "0": [{ "u": 0.33, "v": 0.33, "w": 0.34 }],
+  "3": [{ "u": 0.5, "v": 0.25, "w": 0.25, "hidden": true }]
+}
+```
+
 ### Steps
 
 Step sequence when not using `foldAnimation`. Each step sets fold % and camera POV.
