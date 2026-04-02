@@ -263,11 +263,17 @@ function initBenchmark(globals) {
         }
 
         var hiddenPoints = globals.facePoints.getHiddenIndices ? globals.facePoints.getHiddenIndices() : [];
+        // Map hidden point indices to their letter labels (A, B, C, ...)
+        var hiddenPointLabels = {};
+        for (var hi = 0; hi < hiddenPoints.length; hi++) {
+            hiddenPointLabels[hiddenPoints[hi]] = String.fromCharCode(65 + (hi % 26));
+        }
 
         var summary = {
             benchmark:             name,
             totalPoints:           totalPoints,
             hiddenPoints:          hiddenPoints,
+            hiddenPointLabels:     hiddenPointLabels,
             states:                stateAccumulator.slice(),
             alwaysVisible:         alwaysVisible,
             alwaysVisibleFaceIds:  alwaysVisibleFaceIds
@@ -289,36 +295,58 @@ function initBenchmark(globals) {
     }
 
     // Generates a DESIGN_PROTOCOL-compliant dataset JSON alongside the summary.
-    // One sample per point: "Is labeled point N visible in every image shown?" (yes/no).
-    // IDs are opaque monotonic integers — no benchmark name or answer info is embedded.
+    // One sample per benchmark: asks which lettered points in the final folded state
+    // correspond to the original unmarked dots on the flat paper.
     function saveDatasetJson(name, summary) {
         if (capturedFiles.length === 0) return;
         var samples = [];
         var images = capturedFiles.slice();
         var task = "order_origami_tracking";
 
+        // Build the list of ALL letter labels in the final state (A, B, C, ...)
+        // and identify which are the "initial" (non-hidden) points.
+        var allLabels = [];
+        var initialLabels = [];
+        var letterIndex = 0;
         for (var i = 0; i < summary.totalPoints; i++) {
-            var pointNum = i + 1;  // 1-based to match on-screen label numbers
-            var isAlways = summary.alwaysVisible.indexOf(i) !== -1;
-            samples.push({
-                id:            datasetSampleCounter++,
-                question:      "Is labeled point " + pointNum + " visible in every image shown?",
-                answer:        isAlways ? "yes" : "no",
-                images:        images,
-                task:          task,
-                category:      "order",
-                level:         "perception",
-                question_type: "point_always_visible",
-                answer_type:   "yes_no",
-                metadata: {
-                    benchmark:           name,
-                    point_index:         i,
-                    alwaysVisiblePoints: summary.alwaysVisible,
-                    hiddenPoints:        summary.hiddenPoints,
-                    isHiddenPoint:       summary.hiddenPoints.indexOf(i) !== -1
-                }
-            });
+            var letter = String.fromCharCode(65 + (letterIndex % 26));
+            allLabels.push(letter);
+            letterIndex++;
+            var isHidden = summary.hiddenPoints.indexOf(i) !== -1;
+            if (!isHidden) {
+                initialLabels.push(letter);
+            }
         }
+
+        var optionsList = allLabels.slice().sort();
+        var answerSorted = initialLabels.slice().sort();
+        var numInitial = initialLabels.length;
+
+        samples.push({
+            id:            datasetSampleCounter++,
+            question:      "The first images show an unfolded paper with " + numInitial +
+                           " unmarked dot(s). The paper is then folded through a sequence of steps." +
+                           " The last image shows the folded result with all points labeled " +
+                           optionsList.join(", ") + "." +
+                           " Which lettered point(s) correspond to the original unmarked dot(s)?" +
+                           " List the letter(s) separated by commas.",
+            answer:        answerSorted.join(", "),
+            images:        images,
+            task:          task,
+            category:      "order",
+            level:         "perception",
+            question_type: "origami_point_tracking",
+            answer_type:   "list",
+            options:       optionsList,
+            metadata: {
+                benchmark:         name,
+                totalPoints:       summary.totalPoints,
+                initialPoints:     initialLabels,
+                hiddenPoints:      summary.hiddenPoints,
+                allLabels:         allLabels,
+                hiddenPointLabels: summary.hiddenPointLabels
+            }
+        });
 
         var blob = new Blob([JSON.stringify(samples, null, 2)], { type: "application/json" });
         var formData = new FormData();

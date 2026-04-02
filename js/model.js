@@ -81,6 +81,7 @@ function initModel(globals){
     var pointDiscGeo = new THREE.CircleGeometry(0.025, 16);
     var pointDiscs = [];
     var pointDiscNumberedMaps = [];
+    var pointDiscLetterMaps = [];
     var blankPointTexture = null;
     (function(){
         var c = document.createElement('canvas');
@@ -95,6 +96,8 @@ function initModel(globals){
     for (var i = 0; i < MAX_POINT_SPRITES; i++) {
         var tex = createNumberedPointTexture(i + 1);
         pointDiscNumberedMaps.push(tex);
+        var letterTex = createLabelledPointTexture(String.fromCharCode(65 + (i % 26)));
+        pointDiscLetterMaps.push(letterTex);
         var mat = new THREE.MeshBasicMaterial({map: tex, side: THREE.DoubleSide, depthTest: true});
         var disc = new THREE.Mesh(pointDiscGeo, mat);
         disc.visible = false;
@@ -114,6 +117,21 @@ function initModel(globals){
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         ctx.fillText(String(num), 32, 34);
+        return new THREE.CanvasTexture(c);
+    }
+    function createLabelledPointTexture(label){
+        var c = document.createElement('canvas');
+        c.width = 64; c.height = 64;
+        var ctx = c.getContext('2d');
+        ctx.beginPath();
+        ctx.arc(32, 32, 28, 0, 2 * Math.PI);
+        ctx.fillStyle = "#000000";
+        ctx.fill();
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "bold 32px Arial";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(label, 32, 34);
         return new THREE.CanvasTexture(c);
     }
 
@@ -274,10 +292,20 @@ function initModel(globals){
             }
             var use3D = globals.facePoints3D === true;
             var showNums = globals.showFacePointNumbers !== false;
+            // Before reveal: visible (non-hidden) points show as blank dots (no label).
+            // After reveal (last step): ALL points get letter labels (A,B,C,...).
+            // The task: "which lettered points were the original unmarked dots?"
+            var allLetters = globals.revealHiddenPoints;
+            var letterIndex = 0;
             for (var pi = 0; pi < pointDiscs.length; pi++){
                 pointDiscs[pi].visible = false;
                 pointSpheres[pi].visible = false;
-                pointDiscs[pi].material.map = showNums ? pointDiscNumberedMaps[pi] : blankPointTexture;
+                if (allLetters) {
+                    pointDiscs[pi].material.map = pointDiscLetterMaps[letterIndex];
+                    letterIndex++;
+                } else {
+                    pointDiscs[pi].material.map = blankPointTexture;
+                }
             }
             for (var pi = 0; pi < pts.length && pi < pointDiscs.length; pi++){
                 var pt = pts[pi];
