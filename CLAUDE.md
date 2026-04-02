@@ -161,7 +161,7 @@ Step sequence when not using `foldAnimation`. Each step sets fold % and camera P
 | Field | Type | Description |
 |-------|------|-------------|
 | `fold` | number | Fold percentage 0–100. |
-| `pov` | string | Camera POV: `iso`, `x`, `-x`, `y`, `-y`, `z`, `-z`. |
+| `pov` | string \| array | Camera POV: `iso`, `x`, `-x`, `y`, `-y`, `z`, `-z`, or a continuous direction as `[x, y, z]` array or `"x,y,z"` string (e.g. `[1, 0.5, 0.3]` or `"1,0.5,0.3"`). |
 
 ### Preview rotation
 
