@@ -23,9 +23,9 @@
         "steps": [
             { "fold": 0,  "pov": "iso" },
             { "fold": 25, "pov": "iso" },
-            { "fold": 50, "pov": [1,0.5,0.3] },
-            { "fold": 75, "pov": [1,0.5,0.3]},
-            { "fold": 90, "pov": [1,0.5,0.3] }
+            { "fold": 50, "pov": "z" },
+            { "fold": 75, "pov": "z" },
+            { "fold": 90, "pov": "z" }
         ]
     },
     "bird-track-21": {

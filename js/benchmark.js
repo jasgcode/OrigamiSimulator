@@ -73,8 +73,23 @@ function initBenchmark(globals) {
 
     // ── Camera POV ──
 
+    function parsePOVVector(pov) {
+        if (Array.isArray(pov) && pov.length === 3) {
+            return new THREE.Vector3(pov[0], pov[1], pov[2]);
+        }
+        if (typeof pov === "string" && pov.indexOf(",") !== -1) {
+            var parts = pov.split(",").map(Number);
+            if (parts.length === 3 && parts.every(function(n) { return !isNaN(n); })) {
+                return new THREE.Vector3(parts[0], parts[1], parts[2]);
+            }
+        }
+        return null;
+    }
+
     function getPOVDirection(pov) {
         if (!pov) return null;
+        var vec = parsePOVVector(pov);
+        if (vec) return vec;
         switch (pov) {
             case "iso":  return new THREE.Vector3(1, 1, 1);
             case "x":    return new THREE.Vector3(1, 0, 0);
@@ -89,6 +104,11 @@ function initBenchmark(globals) {
 
     function setPOV(pov) {
         if (!pov) return;
+        var vec = parsePOVVector(pov);
+        if (vec) {
+            globals.threeView.setCameraToPosition(vec);
+            return;
+        }
         globals.threeView.resetModel();
         switch (pov) {
             case "iso":  globals.threeView.setCameraIso(); break;

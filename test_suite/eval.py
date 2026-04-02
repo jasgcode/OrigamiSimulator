@@ -73,15 +73,13 @@ async def query_vlm(
         resp = await client.chat.completions.create(
             model=VLM_MODEL,
             messages=[{"role": "user", "content": content}],
-            max_tokens=4096,
+            max_tokens=16384,
             temperature=0.0,
         )
         choice = resp.choices[0]
         msg = choice.message
         text = msg.content or ""
         reasoning = getattr(msg, "reasoning_content", None) or ""
-        if not text and reasoning:
-            text = reasoning
         if not text:
             print(f"  DEBUG: empty content. finish_reason={choice.finish_reason}, "
                   f"usage={resp.usage}, raw_message={msg}", file=sys.stderr)
