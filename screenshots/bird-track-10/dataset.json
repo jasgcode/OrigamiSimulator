@@ -1,8 +1,8 @@
 [
   {
-    "id": 20,
-    "question": "Is labeled point 1 visible in every image shown?",
-    "answer": "yes",
+    "id": 3,
+    "question": "The first images show an unfolded paper with 2 unmarked dot(s). The paper is then folded through a sequence of steps. The last image shows the folded result with all points labeled A, B, C, D, E. Which lettered point(s) correspond to the original unmarked dot(s)? List the letter(s) separated by commas.",
+    "answer": "A, B",
     "images": [
       "bird-track-10/step01.png",
       "bird-track-10/step02.png",
@@ -13,42 +13,39 @@
     "task": "order_origami_tracking",
     "category": "order",
     "level": "perception",
-    "question_type": "point_always_visible",
-    "answer_type": "yes_no",
-    "metadata": {
-      "benchmark": "bird-track-10",
-      "point_index": 0,
-      "alwaysVisiblePoints": [
-        0
-      ],
-      "hiddenPoints": [],
-      "isHiddenPoint": false
-    }
-  },
-  {
-    "id": 21,
-    "question": "Is labeled point 2 visible in every image shown?",
-    "answer": "no",
-    "images": [
-      "bird-track-10/step01.png",
-      "bird-track-10/step02.png",
-      "bird-track-10/step03.png",
-      "bird-track-10/step04.png",
-      "bird-track-10/step05.png"
+    "question_type": "origami_point_tracking",
+    "answer_type": "list",
+    "options": [
+      "A",
+      "B",
+      "C",
+      "D",
+      "E"
     ],
-    "task": "order_origami_tracking",
-    "category": "order",
-    "level": "perception",
-    "question_type": "point_always_visible",
-    "answer_type": "yes_no",
     "metadata": {
       "benchmark": "bird-track-10",
-      "point_index": 1,
-      "alwaysVisiblePoints": [
-        0
+      "totalPoints": 5,
+      "initialPoints": [
+        "A",
+        "B"
       ],
-      "hiddenPoints": [],
-      "isHiddenPoint": false
+      "hiddenPoints": [
+        2,
+        3,
+        4
+      ],
+      "allLabels": [
+        "A",
+        "B",
+        "C",
+        "D",
+        "E"
+      ],
+      "hiddenPointLabels": {
+        "2": "A",
+        "3": "B",
+        "4": "C"
+      }
     }
   }
 ]
