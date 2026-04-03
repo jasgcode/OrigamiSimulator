@@ -28,7 +28,7 @@
  *                   povKeyframes: [{fold, pov}, ...] for smooth POV change.
  *                   trackModel: "true" to rotate the model (camera fixed) so all points stay in view.
  *                   fitAllPoints: "true" to zoom out so entire model stays in view when camera orbits.
- *                   hidePointsDuringAnimation: "true" to hide face points during fold animation.
+ *                   hidePointsDuringAnimation: "true" to hide face points during fold animation (and intermediate steps in steps mode).
  *                   delay / delayBeforeAnimation: seconds to wait before animation starts (e.g. 1).
  *                   delayAfterPreview: seconds to pause between previewRotation and foldAnimation (e.g. 1).
  *   previewRotation  — top-level: { duration: 2, povKeyframes: [...] } — rotate view at cfg.fold (initial fold).
@@ -344,7 +344,7 @@ function initBenchmark(globals) {
 
         samples.push({
             id:            datasetSampleCounter++,
-            question:      "The first images show an unfolded paper with " + numInitial +
+            question:      "The first image show an unfolded paper with " + numInitial +
                            " unmarked dot(s). The paper is then folded through a sequence of steps." +
                            " The last image shows the folded result with all points labeled " +
                            optionsList.join(", ") + "." +
@@ -569,8 +569,9 @@ function initBenchmark(globals) {
 
     // ── Step runner ──
 
-    function runStep(steps, index, pauseSec, autoCapture, onComplete) {
+    function runStep(steps, index, pauseSec, autoCapture, hidePointsDuringAnimation, onComplete) {
         if (index >= steps.length) {
+            globals.hideFacePointsDuringAnimation = false;
             running = false;
             updateStatus("Benchmark complete (" + steps.length + " steps).");
             console.log("benchmark: sequence complete");
@@ -586,6 +587,9 @@ function initBenchmark(globals) {
         updateStatus("Step " + (index + 1) + "/" + steps.length +
                      " — fold " + step.fold + "%" +
                      (step.pov ? ", POV " + step.pov : ""));
+
+        var isBoundaryStep = (index === 0 || index === steps.length - 1);
+        globals.hideFacePointsDuringAnimation = hidePointsDuringAnimation === true && !isBoundaryStep;
 
         // reveal hidden points only on the last step
         globals.revealHiddenPoints = (index === steps.length - 1);
@@ -604,11 +608,11 @@ function initBenchmark(globals) {
                 captureScreenshot(stepFilename(index), stepLabel(step.fold, step.pov), function () {
                     // small delay after capture before next step
                     setTimeout(function () {
-                        runStep(steps, index + 1, pauseSec, autoCapture, onComplete);
+                        runStep(steps, index + 1, pauseSec, autoCapture, hidePointsDuringAnimation, onComplete);
                     }, 300);
                 });
             } else {
-                runStep(steps, index + 1, pauseSec, autoCapture, onComplete);
+                runStep(steps, index + 1, pauseSec, autoCapture, hidePointsDuringAnimation, onComplete);
             }
         }, settleMs);
     }
@@ -676,6 +680,7 @@ function initBenchmark(globals) {
         if (getParam("autoCapture") !== null) cfg.autoCapture = getParamBool("autoCapture");
         if (getParam("autoRun") !== null) cfg.autoRun = getParamBool("autoRun");
         if (getParam("showPointNumbers") !== null) cfg.showPointNumbers = getParamBool("showPointNumbers");
+        if (getParam("hidePointsDuringAnimation") !== null) cfg.hidePointsDuringAnimation = getParamBool("hidePointsDuringAnimation");
 
         // fold animation: 0→90 over 4s (preset or URL)
         var foldAnimFrom = getParamFloat("foldAnimFrom");
@@ -1093,10 +1098,10 @@ function initBenchmark(globals) {
         if (cfg.previewRotation) {
             var previewFold = cfg.fold != null ? cfg.fold : (cfg.steps && cfg.steps[0] ? cfg.steps[0].fold : 0);
             runPreviewRotation(cfg.previewRotation, previewFold, false, false, function () {
-                runStep(cfg.steps, 0, cfg.pauseDuration, cfg.autoCapture, onComplete);
+                runStep(cfg.steps, 0, cfg.pauseDuration, cfg.autoCapture, cfg.hidePointsDuringAnimation, onComplete);
             });
         } else {
-            runStep(cfg.steps, 0, cfg.pauseDuration, cfg.autoCapture, onComplete);
+            runStep(cfg.steps, 0, cfg.pauseDuration, cfg.autoCapture, cfg.hidePointsDuringAnimation, onComplete);
         }
     }
 
