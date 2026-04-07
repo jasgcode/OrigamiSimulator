@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "TopoBench origami tracking evaluation suite"
 requires-python = ">=3.13"
 dependencies = [
+    "hydra-core",
     "openai",
     "python-dotenv",
     "wandb",

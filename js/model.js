@@ -445,6 +445,20 @@ function initModel(globals){
 
     var inited = false;
 
+    function toGreyscaleHex(hex){
+        var clean = String(hex || "").replace(/^#/, "");
+        if (clean.length === 3) clean = clean[0] + clean[0] + clean[1] + clean[1] + clean[2] + clean[2];
+        if (clean.length !== 6) return "888888";
+        var r = parseInt(clean.slice(0, 2), 16);
+        var g = parseInt(clean.slice(2, 4), 16);
+        var b = parseInt(clean.slice(4, 6), 16);
+        if (isNaN(r) || isNaN(g) || isNaN(b)) return "888888";
+        var y = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+        var v = y.toString(16);
+        if (v.length < 2) v = "0" + v;
+        return v + v + v;
+    }
+
     function setMeshMaterial() {
         var polygonOffset = 0.5;
         //restore shared geometry for backside (overridden in faceTriangleID)
@@ -535,8 +549,13 @@ function initModel(globals){
                 polygonOffsetFactor: polygonOffset,
                 polygonOffsetUnits: 1
             });
-            material.color.setStyle( "#" + globals.color1);
-            material2.color.setStyle( "#" + globals.color2);
+            if (globals.colorMode == "greyscale") {
+                material.color.setStyle("#" + toGreyscaleHex(globals.color1));
+                material2.color.setStyle("#" + toGreyscaleHex(globals.color2));
+            } else {
+                material.color.setStyle( "#" + globals.color1);
+                material2.color.setStyle( "#" + globals.color2);
+            }
             backside.visible = true;
         }
         frontside.material = material;
@@ -691,7 +710,7 @@ function initModel(globals){
 
     function updateMeshVisibility(){
         frontside.visible = globals.meshVisible;
-        backside.visible = (globals.colorMode == "color" || globals.colorMode == "labelOnly" || globals.colorMode == "faceTriangleID") && globals.meshVisible;
+        backside.visible = (globals.colorMode == "color" || globals.colorMode == "greyscale" || globals.colorMode == "labelOnly" || globals.colorMode == "faceTriangleID") && globals.meshVisible;
     }
 
     function getGeometry(){
