@@ -11,10 +11,12 @@ import { mkdir } from "fs/promises";
 
 const ROOT = import.meta.dir;
 const SCREENSHOTS_DIR = join(ROOT, "screenshots");
+const SCAN_CACHE_DIR = join(SCREENSHOTS_DIR, ".scan-cache");
 const PORT = 3000;
 
 // Ensure screenshots directory exists
 await mkdir(SCREENSHOTS_DIR, { recursive: true });
+await mkdir(SCAN_CACHE_DIR, { recursive: true });
 
 // MIME types for common static file extensions
 const MIME = {
@@ -66,6 +68,43 @@ Bun.serve({
                 });
             } catch (err) {
                 console.error("screenshot save error:", err);
+                return new Response("Internal error", { status: 500 });
+            }
+        }
+
+        // ── Scan cache endpoint ───────────────────────────────────────────
+        // GET /api/scan-cache?key=<cacheKey>
+        // POST /api/scan-cache?key=<cacheKey> with JSON body
+        if (url.pathname === "/api/scan-cache") {
+            try {
+                const rawKey = url.searchParams.get("key") || "";
+                const safeKey = rawKey.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 120);
+                if (!safeKey) {
+                    return new Response("Missing cache key", { status: 400 });
+                }
+                const cachePath = join(SCAN_CACHE_DIR, `${safeKey}.json`);
+
+                if (req.method === "GET") {
+                    const file = Bun.file(cachePath);
+                    if (!(await file.exists())) {
+                        return new Response("Not found", { status: 404 });
+                    }
+                    return new Response(file, {
+                        headers: { "Content-Type": "application/json; charset=utf-8" },
+                    });
+                }
+
+                if (req.method === "POST") {
+                    const payload = await req.json();
+                    await Bun.write(cachePath, JSON.stringify(payload));
+                    return new Response(JSON.stringify({ ok: true, path: cachePath }), {
+                        headers: { "Content-Type": "application/json" },
+                    });
+                }
+
+                return new Response("Method not allowed", { status: 405 });
+            } catch (err) {
+                console.error("scan cache error:", err);
                 return new Response("Internal error", { status: 500 });
             }
         }

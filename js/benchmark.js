@@ -173,7 +173,7 @@ function initBenchmark(globals) {
             // update radio UI
             $(".radio>input[value=" + cfg.colorMode + "]").prop("checked", true);
             // show/hide option panels
-            $("#coloredMaterialOptions").toggle(cfg.colorMode === "color");
+            $("#coloredMaterialOptions").toggle(cfg.colorMode === "color" || cfg.colorMode === "greyscale");
             $("#axialStrainMaterialOptions").toggle(cfg.colorMode === "axialStrain");
             $("#faceIDOptions").toggle(cfg.colorMode === "faceID");
             $("#faceTriangleIDOptions").toggle(cfg.colorMode === "faceTriangleID" || cfg.colorMode === "labelOnly");
@@ -249,7 +249,7 @@ function initBenchmark(globals) {
             if ($("#labelOnlyColor2").length) $("#labelOnlyColor2").val(c2);
         }
         if ((cfg.color1 !== undefined && cfg.color1 !== null) || (cfg.color2 !== undefined && cfg.color2 !== null)) {
-            if (globals.colorMode === "labelOnly" || globals.colorMode === "color") globals.model.setMeshMaterial();
+            if (globals.colorMode === "labelOnly" || globals.colorMode === "color" || globals.colorMode === "greyscale") globals.model.setMeshMaterial();
         }
     }
 
@@ -466,12 +466,12 @@ function initBenchmark(globals) {
             return;
         }
         var originalStyle = globals.labelStyle;
-        globals.labelStyle = "circle";
+        globals.labelStyle = "arrow";
         globals.model.updateFaceColors();
         captureScreenshot(filenameLabel, recordLabel, function () {
-            globals.labelStyle = "arrow";
+            globals.labelStyle = "circle";
             globals.model.updateFaceColors();
-            captureScreenshot(filenameLabel + "_arrow", null, function () {
+            captureScreenshot(filenameLabel + "_dot", null, function () {
                 globals.labelStyle = originalStyle;
                 globals.model.updateFaceColors();
                 if (callback) callback();
@@ -785,13 +785,25 @@ function initBenchmark(globals) {
         if (getParam("autoRun") !== null) cfg.autoRun = getParamBool("autoRun");
         if (getParam("showPointNumbers") !== null) cfg.showPointNumbers = getParamBool("showPointNumbers");
         if (getParam("hidePointsDuringAnimation") !== null) cfg.hidePointsDuringAnimation = getParamBool("hidePointsDuringAnimation");
+        if (getParam("useScanCache") !== null) cfg.useScanCache = getParamBool("useScanCache");
+        if (getParam("forceRescan") !== null) cfg.forceRescan = getParamBool("forceRescan");
 
         var targetPointLabels = getParam("targetPointLabels");
         if (targetPointLabels) cfg.targetPointLabels = targetPointLabels;
         var targetPointIndices = getParam("targetPointIndices");
         if (targetPointIndices) cfg.targetPointIndices = targetPointIndices;
+        var primaryTargetPointLabels = getParam("primaryTargetPointLabels");
+        if (primaryTargetPointLabels) cfg.primaryTargetPointLabels = primaryTargetPointLabels;
+        var primaryTargetPointIndices = getParam("primaryTargetPointIndices");
+        if (primaryTargetPointIndices) cfg.primaryTargetPointIndices = primaryTargetPointIndices;
         var minPointSeparationPx = getParamFloat("minPointSeparationPx");
         if (minPointSeparationPx !== null) cfg.minPointSeparationPx = minPointSeparationPx;
+        var minProgressionEndAngle = getParamFloat("minProgressionEndAngle");
+        if (minProgressionEndAngle !== null) cfg.minProgressionEndAngle = minProgressionEndAngle;
+        var minProgressionTotalAngle = getParamFloat("minProgressionTotalAngle");
+        if (minProgressionTotalAngle !== null) cfg.minProgressionTotalAngle = minProgressionTotalAngle;
+        var minProgressionPairDistance = getParamFloat("minProgressionPairDistance");
+        if (minProgressionPairDistance !== null) cfg.minProgressionPairDistance = minProgressionPairDistance;
         var rotationYawMax = getParamFloat("rotationYawMax");
         if (rotationYawMax !== null) cfg.rotationYawMax = rotationYawMax;
         var rotationPitchMax = getParamFloat("rotationPitchMax");
@@ -1020,6 +1032,182 @@ function initBenchmark(globals) {
         return merged;
     }
 
+    function getPrimaryTargetPointIndicesForCfg(cfg) {
+        var byPrimaryIndex = parseIndexList(cfg && cfg.primaryTargetPointIndices);
+        var byPrimaryLabel = parseLabelList(cfg && cfg.primaryTargetPointLabels);
+        var merged = byPrimaryIndex.slice();
+        for (var i = 0; i < byPrimaryLabel.length; i++) {
+            if (merged.indexOf(byPrimaryLabel[i]) === -1) merged.push(byPrimaryLabel[i]);
+        }
+        if (merged.length > 0) return merged;
+        return getTargetPointIndicesForCfg(cfg);
+    }
+
+    function angularDistanceBetweenDirs(a, b) {
+        if (!a || !b) return 0;
+        var dot = a.x * b.x + a.y * b.y + a.z * b.z;
+        dot = Math.max(-1, Math.min(1, dot));
+        return Math.acos(dot);
+    }
+
+    function getPovDirectionForStep(step) {
+        if (!step || step.pov === undefined || step.pov === null) return null;
+        var dir = getPOVDirection(step.pov);
+        if (!dir) return null;
+        return dir.normalize();
+    }
+
+    function getProgressionMotionMetrics(steps) {
+        if (!steps || steps.length < 2) return { endAngle: 0, totalAngle: 0 };
+        var first = getPovDirectionForStep(steps[0]);
+        var last = getPovDirectionForStep(steps[steps.length - 1]);
+        var endAngle = angularDistanceBetweenDirs(first, last);
+        var totalAngle = 0;
+        for (var i = 1; i < steps.length; i++) {
+            totalAngle += angularDistanceBetweenDirs(getPovDirectionForStep(steps[i - 1]), getPovDirectionForStep(steps[i]));
+        }
+        return { endAngle: endAngle, totalAngle: totalAngle };
+    }
+
+    function progressionDistance(aSteps, bSteps) {
+        if (!aSteps || !bSteps || aSteps.length === 0 || bSteps.length === 0) return 0;
+        var len = Math.min(aSteps.length, bSteps.length);
+        var total = 0;
+        var count = 0;
+        for (var i = 0; i < len; i++) {
+            total += angularDistanceBetweenDirs(getPovDirectionForStep(aSteps[i]), getPovDirectionForStep(bSteps[i]));
+            count++;
+        }
+        return count > 0 ? total / count : 0;
+    }
+
+    function selectDiverseProgressions(candidates, maxCount, minPairDistance) {
+        if (!candidates || candidates.length === 0) return [];
+        var sorted = candidates.slice().sort(function (a, b) {
+            return (b.score || 0) - (a.score || 0);
+        });
+
+        var selected = [];
+        for (var i = 0; i < sorted.length; i++) {
+            if (selected.length >= maxCount) break;
+            var keep = true;
+            for (var s = 0; s < selected.length; s++) {
+                if (progressionDistance(sorted[i].steps, selected[s].steps) < minPairDistance) {
+                    keep = false;
+                    break;
+                }
+            }
+            if (keep) selected.push(sorted[i]);
+        }
+
+        for (var j = 0; selected.length < maxCount && j < sorted.length; j++) {
+            if (selected.indexOf(sorted[j]) === -1) selected.push(sorted[j]);
+        }
+
+        return selected.slice(0, maxCount).map(function (p) {
+            return {
+                steps: p.steps,
+                consistentFaces: p.consistentFaces,
+                score: p.score,
+                metrics: p.metrics
+            };
+        });
+    }
+
+    function stableStringify(value) {
+        if (value === null || value === undefined) return String(value);
+        if (Array.isArray(value)) {
+            var arr = [];
+            for (var i = 0; i < value.length; i++) arr.push(stableStringify(value[i]));
+            return "[" + arr.join(",") + "]";
+        }
+        if (typeof value === "object") {
+            var keys = Object.keys(value).sort();
+            var parts = [];
+            for (var k = 0; k < keys.length; k++) {
+                var key = keys[k];
+                parts.push(JSON.stringify(key) + ":" + stableStringify(value[key]));
+            }
+            return "{" + parts.join(",") + "}";
+        }
+        return JSON.stringify(value);
+    }
+
+    function hashString(input) {
+        var h = 5381;
+        for (var i = 0; i < input.length; i++) {
+            h = ((h << 5) + h) + input.charCodeAt(i);
+            h = h & 0xffffffff;
+        }
+        var unsigned = h >>> 0;
+        return unsigned.toString(16);
+    }
+
+    function buildScanCacheKey(cfg, foldSteps) {
+        var payload = {
+            version: 2,
+            model: cfg.model || "",
+            facePoints: cfg.facePoints || null,
+            scanFoldSteps: foldSteps,
+            scanPovs: cfg.scanPovs || null,
+            povGridSize: cfg.povGridSize || null,
+            minFaceQuality: cfg.minFaceQuality != null ? cfg.minFaceQuality : 0.6,
+            buildProgressions: cfg.buildProgressions || 0,
+            targetFaces: cfg.targetFaces || [],
+            targetPointLabels: cfg.targetPointLabels || null,
+            targetPointIndices: cfg.targetPointIndices || null,
+            primaryTargetPointLabels: cfg.primaryTargetPointLabels || null,
+            primaryTargetPointIndices: cfg.primaryTargetPointIndices || null,
+            minPointSeparationPx: cfg.minPointSeparationPx != null ? cfg.minPointSeparationPx : 70,
+            minProgressionEndAngle: cfg.minProgressionEndAngle != null ? cfg.minProgressionEndAngle : 0.85,
+            minProgressionTotalAngle: cfg.minProgressionTotalAngle != null ? cfg.minProgressionTotalAngle : 1.75,
+            minProgressionPairDistance: cfg.minProgressionPairDistance != null ? cfg.minProgressionPairDistance : 0.22,
+            rotationYawMax: cfg.rotationYawMax != null ? cfg.rotationYawMax : 1.5,
+            rotationPitchMax: cfg.rotationPitchMax != null ? cfg.rotationPitchMax : 0.35,
+            rotationRollMax: cfg.rotationRollMax != null ? cfg.rotationRollMax : 0.18,
+            rotationProfileCount: cfg.rotationProfileCount != null ? cfg.rotationProfileCount : 6,
+            rotationProfiles: cfg.rotationProfiles || null
+        };
+        return "scan_" + hashString(stableStringify(payload));
+    }
+
+    function loadScanCache(cacheKey, callback) {
+        var done = false;
+        var timer = setTimeout(function () {
+            if (done) return;
+            done = true;
+            callback(null);
+        }, 2500);
+
+        fetch("/api/scan-cache?key=" + encodeURIComponent(cacheKey), { method: "GET" })
+            .then(function (res) {
+                if (!res.ok) throw new Error("cache miss");
+                return res.json();
+            })
+            .then(function (data) {
+                if (done) return;
+                done = true;
+                clearTimeout(timer);
+                callback(data || null);
+            })
+            .catch(function () {
+                if (done) return;
+                done = true;
+                clearTimeout(timer);
+                callback(null);
+            });
+    }
+
+    function saveScanCache(cacheKey, data) {
+        fetch("/api/scan-cache?key=" + encodeURIComponent(cacheKey), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(data)
+        }).catch(function () {
+            console.warn("benchmark: could not save scan cache");
+        });
+    }
+
     function buildAutoRotationProfiles(templateSteps, cfg) {
         var stepCount = templateSteps ? templateSteps.length : 0;
         if (stepCount === 0) return [{ name: "none", rotations: [] }];
@@ -1142,7 +1330,11 @@ function initBenchmark(globals) {
     function evaluateTrajectoriesLive(candidates, targetFaces, minQuality, maxCount, settleMs, cfg, callback) {
         var validProgressions = [];
         var targetPointIndices = getTargetPointIndicesForCfg(cfg || {});
+        var primaryTargetPointIndices = getPrimaryTargetPointIndicesForCfg(cfg || {});
         var minPointSeparation = (cfg && cfg.minPointSeparationPx != null) ? cfg.minPointSeparationPx : 70;
+        var minProgressionEndAngle = (cfg && cfg.minProgressionEndAngle != null) ? cfg.minProgressionEndAngle : 0.85;
+        var minProgressionTotalAngle = (cfg && cfg.minProgressionTotalAngle != null) ? cfg.minProgressionTotalAngle : 1.75;
+        var minProgressionPairDistance = (cfg && cfg.minProgressionPairDistance != null) ? cfg.minProgressionPairDistance : 0.22;
         var rotationProfiles = buildAutoRotationProfiles(candidates[0] || [], cfg || {});
         var candidateCount = candidates.length;
         var profileCount = rotationProfiles.length;
@@ -1152,33 +1344,30 @@ function initBenchmark(globals) {
         var currentTraj = 0;
         var currentStep = 0;
         var currentProfile = 0;
-        var currentStepQualities = []; // faceQualities per step for the trajectory being evaluated
+        var currentFaceStats = {}; // fid -> { worst, seenSteps }
+
+        function skipCurrentTrajectoryProfile() {
+            currentProfile++;
+            if (currentProfile >= profileCount) {
+                currentProfile = 0;
+                currentTraj++;
+            }
+            currentStep = 0;
+            currentFaceStats = {};
+        }
 
         function evaluateNext() {
             // Skip to next trajectory if current one has been fully evaluated or invalidated
             while (currentTraj < candidates.length && currentStep >= candidates[currentTraj].length) {
                 // Trajectory fully evaluated — compute consistentFaces and accept
                 var traj = candidates[currentTraj];
-                var allFaceIds = {};
-                for (var s0 = 0; s0 < currentStepQualities.length; s0++) {
-                    for (var fid in currentStepQualities[s0]) {
-                        if (currentStepQualities[s0].hasOwnProperty(fid) && currentStepQualities[s0][fid] > 0) {
-                            allFaceIds[fid] = true;
-                        }
-                    }
-                }
                 var consistentFaces = {};
-                for (var fid2 in allFaceIds) {
-                    if (!allFaceIds.hasOwnProperty(fid2)) continue;
-                    var worst = Infinity;
-                    var visibleInAll = true;
-                    for (var s1 = 0; s1 < currentStepQualities.length; s1++) {
-                        var q2 = currentStepQualities[s1][fid2] || 0;
-                        if (q2 <= 0) { visibleInAll = false; break; }
-                        if (q2 < worst) worst = q2;
-                    }
-                    if (visibleInAll && worst >= 0.6) {
-                        consistentFaces[fid2] = Math.round(worst * 1000) / 1000;
+                var totalSteps = traj.length;
+                for (var fid2 in currentFaceStats) {
+                    if (!currentFaceStats.hasOwnProperty(fid2)) continue;
+                    var stat = currentFaceStats[fid2];
+                    if (stat.seenSteps === totalSteps && stat.worst >= 0.6) {
+                        consistentFaces[fid2] = Math.round(stat.worst * 1000) / 1000;
                     }
                 }
 
@@ -1189,26 +1378,33 @@ function initBenchmark(globals) {
                     if (r) out.rotation = [r.x, r.y, r.z];
                     return out;
                 });
-                validProgressions.push({ steps: cleanSteps, consistentFaces: consistentFaces });
+                var metrics = getProgressionMotionMetrics(cleanSteps);
+                var trackedStepBonus = primaryTargetPointIndices.length > 0 ? 0.2 : 0;
+                var score = 0;
+                score += Math.min(1, metrics.endAngle / Math.max(0.1, minProgressionEndAngle));
+                score += Math.min(1, metrics.totalAngle / Math.max(0.1, minProgressionTotalAngle));
+                score += Object.keys(consistentFaces).length * 0.02;
+                score += trackedStepBonus;
 
-                if (validProgressions.length >= maxCount) {
-                    console.log("evaluateTrajectoriesLive: reached " + maxCount + " valid progressions");
-                    callback(validProgressions);
-                    return;
+                if (metrics.endAngle >= minProgressionEndAngle && metrics.totalAngle >= minProgressionTotalAngle) {
+                    validProgressions.push({
+                        steps: cleanSteps,
+                        consistentFaces: consistentFaces,
+                        score: Math.round(score * 1000) / 1000,
+                        metrics: {
+                            endAngle: Math.round(metrics.endAngle * 1000) / 1000,
+                            totalAngle: Math.round(metrics.totalAngle * 1000) / 1000
+                        }
+                    });
                 }
 
-                currentProfile++;
-                if (currentProfile >= profileCount) {
-                    currentProfile = 0;
-                    currentTraj++;
-                }
-                currentStep = 0;
-                currentStepQualities = [];
+                skipCurrentTrajectoryProfile();
             }
 
             if (currentTraj >= candidates.length) {
-                console.log("evaluateTrajectoriesLive: " + validProgressions.length + " valid out of " + candidates.length + " candidates");
-                callback(validProgressions);
+                var selected = selectDiverseProgressions(validProgressions, maxCount, minProgressionPairDistance);
+                console.log("evaluateTrajectoriesLive: " + validProgressions.length + " valid candidates out of " + candidates.length + ", selected " + selected.length);
+                callback(selected);
                 return;
             }
 
@@ -1233,6 +1429,7 @@ function initBenchmark(globals) {
                          " (" + validProgressions.length + " valid so far)");
 
             setTimeout(function () {
+                try {
                 // Measure actual face quality at this POV
                 var allVisibleFaceIds = globals.facePoints && globals.facePoints.getVisibleFaceIds
                     ? globals.facePoints.getVisibleFaceIds() : [];
@@ -1245,13 +1442,7 @@ function initBenchmark(globals) {
                         var q = faceQualities[targetFaces[ti]] || 0;
                         if (q < minQuality) {
                             // Trajectory fails — skip to next
-                            currentProfile++;
-                            if (currentProfile >= profileCount) {
-                                currentProfile = 0;
-                                currentTraj++;
-                            }
-                            currentStep = 0;
-                            currentStepQualities = [];
+                            skipCurrentTrajectoryProfile();
                             evaluateNext();
                             return;
                         }
@@ -1260,20 +1451,36 @@ function initBenchmark(globals) {
 
                 var trackedEval = evaluateTrackedPoints(targetPointIndices, currentStep, candidates[currentTraj].length, minPointSeparation);
                 if (!trackedEval.ok) {
-                    currentProfile++;
-                    if (currentProfile >= profileCount) {
-                        currentProfile = 0;
-                        currentTraj++;
-                    }
-                    currentStep = 0;
-                    currentStepQualities = [];
+                    skipCurrentTrajectoryProfile();
                     evaluateNext();
                     return;
                 }
 
-                currentStepQualities.push(faceQualities);
+                var primaryTrackedEval = evaluateTrackedPoints(primaryTargetPointIndices, currentStep, candidates[currentTraj].length, minPointSeparation);
+                if (!primaryTrackedEval.ok) {
+                    skipCurrentTrajectoryProfile();
+                    evaluateNext();
+                    return;
+                }
+
+                for (var fid3 in faceQualities) {
+                    if (!faceQualities.hasOwnProperty(fid3)) continue;
+                    var q3 = faceQualities[fid3] || 0;
+                    if (q3 <= 0) continue;
+                    if (!currentFaceStats[fid3]) {
+                        currentFaceStats[fid3] = { worst: q3, seenSteps: 1 };
+                    } else {
+                        if (q3 < currentFaceStats[fid3].worst) currentFaceStats[fid3].worst = q3;
+                        currentFaceStats[fid3].seenSteps++;
+                    }
+                }
                 currentStep++;
                 evaluateNext();
+                } catch (err) {
+                    console.warn("benchmark: trajectory eval error; skipping candidate", err);
+                    skipCurrentTrajectoryProfile();
+                    evaluateNext();
+                }
             }, settleMs);
         }
 
@@ -1293,6 +1500,9 @@ function initBenchmark(globals) {
         }
         var settleMs  = cfg.scanSettleMs  != null ? cfg.scanSettleMs : 300;
         var name      = currentBenchmarkName || globals.filename || "scan";
+        var useScanCache = cfg.useScanCache !== false;
+        var forceRescan = cfg.forceRescan === true;
+        var cacheKey = buildScanCacheKey(cfg, foldSteps);
 
         // Build flat list of {fold, pov} combinations
         var combinations = [];
@@ -1305,6 +1515,27 @@ function initBenchmark(globals) {
         var faces = globals.model ? globals.model.getFaces() : null;
         var totalFaces = faces ? faces.length : 0;
         var scanStates = [];
+
+        function cacheStateKey(fold, pov) {
+            var povKey = Array.isArray(pov) ? pov.join(",") : String(pov);
+            return String(fold) + "|" + povKey;
+        }
+
+        function isUsableCachedScan(cached) {
+            if (!cached || !Array.isArray(cached.scanStates)) return false;
+            if (cached.scanStates.length !== combinations.length) return false;
+            var seen = {};
+            for (var i = 0; i < cached.scanStates.length; i++) {
+                var s = cached.scanStates[i];
+                if (!s) return false;
+                seen[cacheStateKey(s.fold, s.pov)] = true;
+            }
+            for (var j = 0; j < combinations.length; j++) {
+                var c = combinations[j];
+                if (!seen[cacheStateKey(c.fold, c.pov)]) return false;
+            }
+            return true;
+        }
 
         function runCombination(index) {
             if (index >= combinations.length) {
@@ -1476,9 +1707,28 @@ function initBenchmark(globals) {
 
                     updateStatus("Phase 2: evaluating " + candidates.length + " trajectories live…");
                     evaluateTrajectoriesLive(candidates, targetFaces, progQuality, progCount, settleMs, cfg, function (diverseProgressions) {
+                        if (useScanCache && !forceRescan) {
+                            saveScanCache(cacheKey, {
+                                cacheKey: cacheKey,
+                                benchmark: name,
+                                foldSteps: foldSteps,
+                                povCount: povs.length,
+                                scanStates: scanStates
+                            });
+                        }
                         finishScan(suggestedSequences, diverseProgressions);
                     });
                     return;
+                }
+
+                if (useScanCache && !forceRescan) {
+                    saveScanCache(cacheKey, {
+                        cacheKey: cacheKey,
+                        benchmark: name,
+                        foldSteps: foldSteps,
+                        povCount: povs.length,
+                        scanStates: scanStates
+                    });
                 }
 
                 finishScan(suggestedSequences, []);
@@ -1508,16 +1758,21 @@ function initBenchmark(globals) {
                             console.warn("benchmark: could not save scan (server unavailable)");
                         });
 
+                    running = false;
                     if (diverseProgressions.length > 0) {
                         updateStatus("Scan complete. Built " + diverseProgressions.length + " diverse progressions.");
                         console.log("benchmark: scan complete, " + diverseProgressions.length + " progressions:", diverseProgressions);
                     } else {
-                        var topPovs = suggestedSequences.map(function (s) { return s.pov; });
-                        updateStatus("Scan complete. Suggested POVs: " + topPovs.join(", "));
+                        var count = suggestedSequences && suggestedSequences.length ? suggestedSequences.length : 0;
+                        updateStatus("Scan complete. Suggested sequences: " + count);
                     }
                     console.log("benchmark: scan complete, suggestedSequences:", suggestedSequences);
                     if (onComplete) onComplete();
                 }
+            }
+
+            if (index > 0 && index % 25 === 0) {
+                updateStatus("Scan progress: " + index + "/" + combinations.length + " combinations");
             }
 
             var combo = combinations[index];
@@ -1531,6 +1786,7 @@ function initBenchmark(globals) {
                          " (" + (index + 1) + "/" + combinations.length + ")");
 
             setTimeout(function () {
+                try {
                 var minFaceQuality = cfg.minFaceQuality != null ? cfg.minFaceQuality : 0.25;
                 var allVisibleFaceIds = globals.facePoints && globals.facePoints.getVisibleFaceIds
                     ? globals.facePoints.getVisibleFaceIds()
@@ -1542,12 +1798,42 @@ function initBenchmark(globals) {
                 var visibleFaceIds = allVisibleFaceIds.filter(function (id) {
                     return (faceQualities[id] || 0) >= minFaceQuality;
                 });
-                scanStates.push({ fold: combo.fold, pov: combo.pov, visibleFaceIds: visibleFaceIds, faceQualities: faceQualities });
+
+                // Keep compact quality map only for visible faces that pass threshold.
+                var compactQualities = {};
+                for (var vi = 0; vi < visibleFaceIds.length; vi++) {
+                    var fid = visibleFaceIds[vi];
+                    var q = faceQualities[fid] || 0;
+                    compactQualities[fid] = Math.round(q * 1000) / 1000;
+                }
+
+                scanStates.push({ fold: combo.fold, pov: combo.pov, visibleFaceIds: visibleFaceIds, faceQualities: compactQualities });
                 runCombination(index + 1);
+                } catch (err) {
+                    console.warn("benchmark: scan step error; skipping", err);
+                    runCombination(index + 1);
+                }
             }, settleMs);
         }
 
         running = true;
+        if (useScanCache && !forceRescan) {
+            updateStatus("Checking scan cache…");
+            loadScanCache(cacheKey, function (cached) {
+                if (isUsableCachedScan(cached)) {
+                    scanStates = cached.scanStates;
+                    updateStatus("Scan cache hit. Reusing " + scanStates.length + " cached states.");
+                    runCombination(combinations.length);
+                    return;
+                }
+                if (cached && cached.scanStates) {
+                    console.warn("benchmark: cache exists but is incomplete/mismatched; rescanning");
+                }
+                updateStatus("Scan started (" + combinations.length + " combinations, " + settleMs + "ms settle)…");
+                runCombination(0);
+            });
+            return;
+        }
         updateStatus("Scan started (" + combinations.length + " combinations, " + settleMs + "ms settle)…");
         runCombination(0);
     }

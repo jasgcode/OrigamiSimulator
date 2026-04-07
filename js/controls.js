@@ -563,7 +563,7 @@ function initControls(globals){
         globals.ambientOcclusion = val;
     });
 
-    if (globals.colorMode == "color") $("#coloredMaterialOptions").show();
+    if (globals.colorMode == "color" || globals.colorMode == "greyscale") $("#coloredMaterialOptions").show();
     else $("#coloredMaterialOptions").hide();
     if (globals.colorMode == "axialStrain") $("#axialStrainMaterialOptions").show();
     else $("#axialStrainMaterialOptions").hide();
@@ -576,7 +576,7 @@ function initControls(globals){
 
     function setColorMode(val){
         globals.colorMode = val;
-        if (val == "color") {
+        if (val == "color" || val == "greyscale") {
             $("#coloredMaterialOptions").show();
             $("#colorToggle>div").addClass("active");
             $("#strainToggle>div").removeClass("active");
@@ -1045,4 +1045,3 @@ function initControls(globals){
         refreshFacePointList: refreshFacePointList
     }
 }
-

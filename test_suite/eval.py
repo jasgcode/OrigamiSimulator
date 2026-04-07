@@ -32,6 +32,8 @@ from pathlib import Path
 from typing import Any, cast
 
 from dotenv import load_dotenv
+from hydra import compose, initialize_config_dir
+from omegaconf import DictConfig
 from openai import AsyncOpenAI
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
@@ -39,9 +41,11 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 SCREENSHOTS_DIR = Path(__file__).resolve().parent.parent / "screenshots"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
-VLM_BASE_URL = os.environ["BASE_URL"]
-VLM_API_KEY = os.environ["API_KEY"]
-VLM_MODEL = os.environ["MODEL"]
+
+def load_hydra_config(overrides: list[str]) -> DictConfig:
+    config_dir = str((Path(__file__).resolve().parent / "configs").resolve())
+    with initialize_config_dir(version_base=None, config_dir=config_dir):
+        return compose(config_name="config", overrides=overrides)
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +76,9 @@ async def query_vlm(
     images: list[Path],
     question: str,
     semaphore: asyncio.Semaphore,
+    model_name: str,
+    max_tokens: int,
+    temperature: float,
 ) -> tuple[str, str]:
     """Send images + question to the VLM API and return the text response."""
     content: list[dict] = []
@@ -81,10 +88,10 @@ async def query_vlm(
 
     async with semaphore:
         resp = await client.chat.completions.create(
-            model=VLM_MODEL,
+            model=model_name,
             messages=cast(Any, [{"role": "user", "content": content}]),
-            max_tokens=16384,
-            temperature=0.0,
+            max_tokens=max_tokens,
+            temperature=temperature,
         )
         choice = resp.choices[0]
         msg = choice.message
@@ -187,6 +194,9 @@ async def evaluate_sample(
     sample: dict,
     semaphore: asyncio.Semaphore,
     dry_run: bool,
+    model_name: str,
+    max_tokens: int,
+    temperature: float,
 ) -> dict:
     sid = sample["id"]
     question = sample["question"]
@@ -206,7 +216,13 @@ async def evaluate_sample(
         t0 = time.time()
         try:
             predicted, reasoning = await query_vlm(
-                client, image_paths, question, semaphore
+                client,
+                image_paths,
+                question,
+                semaphore,
+                model_name,
+                max_tokens,
+                temperature,
             )
         except Exception as e:
             predicted = f"[ERROR] {type(e).__name__}: {e}"
@@ -232,9 +248,14 @@ async def run_evaluation(
     benchmark_dirs: list[Path],
     dry_run: bool,
     concurrency: int,
+    base_url: str,
+    api_key: str,
+    model_name: str,
+    max_tokens: int,
+    temperature: float,
 ) -> dict:
     semaphore = asyncio.Semaphore(concurrency)
-    client = AsyncOpenAI(base_url=VLM_BASE_URL, api_key=VLM_API_KEY)
+    client = AsyncOpenAI(base_url=base_url, api_key=api_key)
     all_results: list[dict] = []
 
     for bdir in benchmark_dirs:
@@ -247,7 +268,18 @@ async def run_evaluation(
         print(f"Benchmark: {name}  ({len(samples)} samples)")
         print(f"{'=' * 60}")
 
-        tasks = [evaluate_sample(client, s, semaphore, dry_run) for s in samples]
+        tasks = [
+            evaluate_sample(
+                client,
+                s,
+                semaphore,
+                dry_run,
+                model_name,
+                max_tokens,
+                temperature,
+            )
+            for s in samples
+        ]
         results_for_bench = await asyncio.gather(*tasks)
 
         bench_correct = 0
@@ -276,8 +308,8 @@ async def run_evaluation(
     print(f"{'=' * 60}")
 
     return {
-        "model": VLM_MODEL,
-        "base_url": VLM_BASE_URL,
+        "model": model_name,
+        "base_url": base_url,
         "total_correct": total_correct,
         "total_count": total_count,
         "accuracy": overall_acc,
@@ -305,6 +337,30 @@ def get_git_commit() -> str:
         return "unknown"
 
 
+def normalize_wandb_mode(value: Any) -> str:
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    text = str(value).strip().lower()
+    if text in ("off", "false", "0", "no"):
+        return "off"
+    if text in ("on", "true", "1", "yes"):
+        return "on"
+    return "auto"
+
+
+def split_benchmark_and_hydra_args(values: list[str]) -> tuple[list[str], list[str]]:
+    if not values:
+        return [], []
+    benchmark_names: list[str] = []
+    hydra_args: list[str] = []
+    for v in values:
+        if "=" in v:
+            hydra_args.append(v)
+        else:
+            benchmark_names.append(v)
+    return benchmark_names, hydra_args
+
+
 def main():
     parser = argparse.ArgumentParser(description="TopoBench Origami Tracking Eval")
     parser.add_argument(
@@ -314,11 +370,14 @@ def main():
         "--dry-run", action="store_true", help="Print questions, skip API calls"
     )
     parser.add_argument(
-        "--concurrency", type=int, default=4, help="Max parallel API requests"
+        "--concurrency", type=int, default=None, help="Max parallel API requests"
     )
     parser.add_argument("--output", type=str, default=None, help="Output JSON path")
     parser.add_argument(
-        "--wandb", choices=["auto", "on", "off"], default="auto", help="Wandb mode"
+        "--wandb",
+        choices=["auto", "on", "off"],
+        default=None,
+        help="Wandb mode (overrides Hydra wandb.mode)",
     )
     parser.add_argument(
         "--no-wandb",
@@ -326,9 +385,41 @@ def main():
         help="Disable wandb logging (deprecated; same as --wandb off)",
     )
     parser.add_argument(
-        "--wandb-project", type=str, default="origami-eval", help="Wandb project name"
+        "--wandb-project",
+        type=str,
+        default=None,
+        help="Wandb project name (overrides Hydra wandb.project)",
     )
-    args = parser.parse_args()
+    args, hydra_overrides = parser.parse_known_args()
+
+    benchmark_values, benchmark_hydra = split_benchmark_and_hydra_args(
+        args.benchmarks or []
+    )
+    args.benchmarks = benchmark_values if benchmark_values else None
+    hydra_overrides = hydra_overrides + benchmark_hydra
+
+    cfg = load_hydra_config(hydra_overrides)
+    model_cfg = cfg.model
+    eval_cfg = cfg.eval
+    wandb_cfg = cfg.wandb
+
+    model_name = os.environ.get("MODEL", str(model_cfg.name))
+    base_url = os.environ.get("BASE_URL", str(model_cfg.base_url))
+    api_key_env = str(model_cfg.get("api_key_env", "API_KEY"))
+    api_key = os.environ.get(api_key_env, "")
+    if not api_key:
+        print(f"Missing required API key env var: {api_key_env}", file=sys.stderr)
+        sys.exit(2)
+
+    max_tokens = int(
+        eval_cfg.get("max_tokens", model_cfg.get("max_output_tokens", 32768))
+    )
+    temperature = float(eval_cfg.get("temperature", 0.0))
+    concurrency = (
+        args.concurrency
+        if args.concurrency is not None
+        else int(eval_cfg.get("max_concurrency", 4))
+    )
 
     benchmark_dirs = discover_benchmarks(args.benchmarks)
     if not benchmark_dirs:
@@ -336,7 +427,17 @@ def main():
         sys.exit(1)
 
     benchmark_names = [d.name for d in benchmark_dirs]
-    wandb_mode = "off" if args.no_wandb else args.wandb
+    wandb_mode = (
+        "off"
+        if args.no_wandb
+        else normalize_wandb_mode(args.wandb or wandb_cfg.get("mode", "auto"))
+    )
+    wandb_project = args.wandb_project or str(wandb_cfg.get("project", "origami-eval"))
+    wandb_entity = wandb_cfg.get("entity", None)
+    wandb_run_name = wandb_cfg.get("name", None)
+    wandb_tags = wandb_cfg.get("tags", [])
+    wandb_group = wandb_cfg.get("group", None)
+    wandb_job_type = wandb_cfg.get("job_type", "eval")
     requested_wandb = (wandb_mode != "off") and not args.dry_run
     use_wandb = False
     wandb: Any = None
@@ -359,22 +460,43 @@ def main():
 
     if use_wandb:
         wandb.init(
-            project=args.wandb_project,
+            project=wandb_project,
+            entity=wandb_entity,
+            name=wandb_run_name,
+            tags=list(wandb_tags),
+            group=wandb_group,
+            job_type=wandb_job_type,
             config={
-                "model": VLM_MODEL,
-                "base_url": VLM_BASE_URL,
+                "model": model_name,
+                "base_url": base_url,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
                 "benchmarks": benchmark_names,
-                "concurrency": args.concurrency,
+                "concurrency": concurrency,
                 "git_commit": get_git_commit(),
+                "hydra_overrides": hydra_overrides,
+                "wandb_mode": wandb_mode,
             },
         )
 
     print(f"Found {len(benchmark_dirs)} benchmark(s): {benchmark_names}")
     if not args.dry_run:
-        print(f"Model: {VLM_MODEL}  Base URL: {VLM_BASE_URL}")
+        print(
+            f"Model: {model_name}  Base URL: {base_url}  "
+            f"Max tokens: {max_tokens}  Temp: {temperature}  Concurrency: {concurrency}"
+        )
 
     results = asyncio.run(
-        run_evaluation(benchmark_dirs, args.dry_run, args.concurrency)
+        run_evaluation(
+            benchmark_dirs,
+            args.dry_run,
+            concurrency,
+            base_url,
+            api_key,
+            model_name,
+            max_tokens,
+            temperature,
+        )
     )
 
     RESULTS_DIR.mkdir(exist_ok=True)
