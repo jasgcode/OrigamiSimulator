@@ -134,6 +134,28 @@ function initModel(globals){
         ctx.fillText(label, 32, 34);
         return new THREE.CanvasTexture(c);
     }
+    // Text-only label (no background circle) for arrow annotations
+    function createArrowLabelTexture(label){
+        var c = document.createElement('canvas');
+        c.width = 128; c.height = 128;
+        var ctx = c.getContext('2d');
+        // transparent background — just draw the letter with a thin outline for readability
+        ctx.font = "bold 80px Arial";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = 6;
+        ctx.strokeText(label, 64, 68);
+        ctx.fillStyle = "#000000";
+        ctx.fillText(label, 64, 68);
+        return new THREE.CanvasTexture(c);
+    }
+
+    // Pre-create arrow label textures (A, B, C, ... — text only, transparent bg)
+    var arrowLabelMaps = [];
+    for (var i = 0; i < MAX_POINT_SPRITES; i++) {
+        arrowLabelMaps.push(createArrowLabelTexture(String.fromCharCode(65 + (i % 26))));
+    }
 
     var pointSphereGeo = new THREE.SphereGeometry(0.015, 12, 8);
     var pointSphereMat = new THREE.MeshBasicMaterial({color: 0x000000});
@@ -143,6 +165,43 @@ function initModel(globals){
         sph.visible = false;
         globals.threeView.sceneAddModel(sph);
         pointSpheres.push(sph);
+    }
+
+    // Arrow-style label pool: line + arrowhead pointing to face, label billboard at tail
+    var ARROW_OFFSET = 0.14;  // distance from face point to label
+    var ARROW_LIFT = 0.008;   // lift above surface to avoid z-fighting
+    var arrowGroups = [];
+    // Arrow annotations render on top of mesh (depthTest: false) so they never clip
+    var arrowLineMat = new THREE.LineBasicMaterial({color: 0x000000, linewidth: 1, depthTest: false});
+    var arrowConeMat = new THREE.MeshBasicMaterial({color: 0x000000, depthTest: false});
+    var arrowConeGeo = new THREE.ConeGeometry(0.006, 0.016, 6);
+    var arrowDotGeo = new THREE.CircleGeometry(0.004, 8);
+    var arrowDotMat = new THREE.MeshBasicMaterial({color: 0x000000, side: THREE.DoubleSide, depthTest: false});
+    for (var i = 0; i < MAX_POINT_SPRITES; i++) {
+        var arrowGroup = new THREE.Group();
+        // Shaft line
+        var lineGeoArr = new THREE.BufferGeometry();
+        lineGeoArr.addAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
+        var arrowLine = new THREE.Line(lineGeoArr, arrowLineMat);
+        arrowLine.renderOrder = 999;
+        arrowGroup.add(arrowLine);
+        // Arrowhead cone
+        var arrowCone = new THREE.Mesh(arrowConeGeo, arrowConeMat);
+        arrowCone.renderOrder = 999;
+        arrowGroup.add(arrowCone);
+        // Dot at face point
+        var arrowDot = new THREE.Mesh(arrowDotGeo, arrowDotMat);
+        arrowDot.renderOrder = 999;
+        arrowGroup.add(arrowDot);
+        // Label — transparent text, always faces camera, renders on top
+        var arrowSpriteMat = new THREE.SpriteMaterial({map: arrowLabelMaps[i], depthTest: false, transparent: true});
+        var arrowLabel = new THREE.Sprite(arrowSpriteMat);
+        arrowLabel.scale.set(0.06, 0.06, 1);
+        arrowLabel.renderOrder = 1000;
+        arrowGroup.add(arrowLabel);
+        arrowGroup.visible = false;
+        globals.threeView.sceneAddModel(arrowGroup);
+        arrowGroups.push({group: arrowGroup, line: arrowLine, cone: arrowCone, dot: arrowDot, label: arrowLabel});
     }
 
     var facePointPreviewSprite = createFacePointPreviewSprite();
@@ -279,12 +338,14 @@ function initModel(globals){
             var camera = globals.threeView.camera;
             var N = faces.length;
             var pts = (globals.facePoints && globals.facePoints.getPoints) ? globals.facePoints.getPoints() : [];
+            var useArrows = globals.labelStyle === "arrow";
 
             labelA.visible = false;
             labelB.visible = false;
             for (var si = 0; si < pointDiscs.length; si++){
                 pointDiscs[si].visible = false;
                 pointSpheres[si].visible = false;
+                arrowGroups[si].group.visible = false;
             }
             if (facePointPreviewSprite.visible){
                 var pulse = 0.032 + 0.008 * Math.sin(Date.now() / 100);
@@ -294,18 +355,19 @@ function initModel(globals){
             var showNums = globals.showFacePointNumbers !== false;
             // Before reveal: visible (non-hidden) points show as blank dots (no label).
             // After reveal (last step): ALL points get letter labels (A,B,C,...).
-            // The task: "which lettered points were the original unmarked dots?"
+            // In arrow mode, labels are drawn in screen-space overlay (not on dots).
             var allLetters = globals.revealHiddenPoints;
             var letterIndex = 0;
             for (var pi = 0; pi < pointDiscs.length; pi++){
                 pointDiscs[pi].visible = false;
                 pointSpheres[pi].visible = false;
-                if (allLetters) {
-                    pointDiscs[pi].material.map = pointDiscLetterMaps[letterIndex];
-                    letterIndex++;
-                } else {
-                    pointDiscs[pi].material.map = blankPointTexture;
-                }
+                arrowGroups[pi].group.visible = false;
+                var showLetter = allLetters && !useArrows;
+                var tex = showLetter ? pointDiscLetterMaps[letterIndex] : blankPointTexture;
+                pointDiscs[pi].material.map = tex;
+                // Arrow labels use transparent text-only textures
+                arrowGroups[pi].label.material.map = showLetter ? arrowLabelMaps[letterIndex] : blankPointTexture;
+                if (showLetter) letterIndex++;
             }
             for (var pi = 0; pi < pts.length && pi < pointDiscs.length; pi++){
                 var pt = pts[pi];
@@ -315,37 +377,37 @@ function initModel(globals){
                 var pos = globals.facePoints.getPointPosition(pi);
                 var normal = getFaceNormal(triIdx);
                 if (pos && normal){
-                    var offset = normal.clone().multiplyScalar(isFront ? 0.003 : -0.003);
+                    var faceDir = isFront ? normal.clone() : normal.clone().negate();
+                    var offset = faceDir.clone().multiplyScalar(0.003);
                     var ptPos = pos.clone().add(offset);
                     var toCamera = camera.position.clone().sub(pos);
                     var dot = toCamera.dot(normal);
                     var pointHidden = globals.facePoints.isPointHidden && globals.facePoints.isPointHidden(pi);
-                    var visible = (isFront ? dot > 0 : dot < 0)
+                    var pointVisible = globals.facePoints && globals.facePoints.isPointVisible
+                        ? globals.facePoints.isPointVisible(pi)
+                        : (isFront ? dot > 0 : dot < 0);
+                    var visible = pointVisible
                         && !globals.hideFacePointsDuringAnimation
                         && (!pointHidden || globals.revealHiddenPoints);
+                    // Compute face direction and orientation basis (shared by disc and arrow modes)
+                    var camUp = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+                    var discUp = camUp.clone().sub(faceDir.clone().multiplyScalar(camUp.dot(faceDir)));
+                    if (discUp.lengthSq() < 0.0001) {
+                        discUp.set(0, 0, 1).sub(faceDir.clone().multiplyScalar(faceDir.z));
+                        if (discUp.lengthSq() < 0.0001) discUp.set(1, 0, 0);
+                    }
+                    discUp.normalize();
+                    var discRight = new THREE.Vector3().crossVectors(discUp, faceDir).normalize();
+                    var faceBasis = new THREE.Matrix4().makeBasis(discRight, discUp, faceDir);
+
                     if (use3D){
                         pointSpheres[pi].position.copy(ptPos);
                         pointSpheres[pi].visible = visible;
                     } else {
+                        // In arrow mode, labels/arrows are drawn by pointAnnotations overlay.
+                        // Here we only draw face dots.
                         pointDiscs[pi].position.copy(ptPos);
-                        // Orient disc flat on the face (Z = face-facing direction) while
-                        // rotating within that plane so the number's up tracks the camera's
-                        // screen-up. This keeps the disc coplanar with the face and the
-                        // label readable from any camera angle.
-                        var faceDir = isFront ? normal.clone() : normal.clone().negate();
-                        var camUp = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
-                        // Project camUp onto the face plane
-                        var discUp = camUp.clone().sub(faceDir.clone().multiplyScalar(camUp.dot(faceDir)));
-                        if (discUp.lengthSq() < 0.0001) {
-                            // Camera looking straight along normal — fall back to world Z then X
-                            discUp.set(0, 0, 1).sub(faceDir.clone().multiplyScalar(faceDir.z));
-                            if (discUp.lengthSq() < 0.0001) discUp.set(1, 0, 0);
-                        }
-                        discUp.normalize();
-                        var discRight = new THREE.Vector3().crossVectors(discUp, faceDir).normalize();
-                        pointDiscs[pi].quaternion.setFromRotationMatrix(
-                            new THREE.Matrix4().makeBasis(discRight, discUp, faceDir)
-                        );
+                        pointDiscs[pi].quaternion.setFromRotationMatrix(faceBasis);
                         pointDiscs[pi].visible = visible;
                     }
                 }
@@ -356,6 +418,7 @@ function initModel(globals){
             for (var si = 0; si < pointDiscs.length; si++){
                 pointDiscs[si].visible = false;
                 pointSpheres[si].visible = false;
+                arrowGroups[si].group.visible = false;
             }
             facePointPreviewSprite.visible = false;
         }

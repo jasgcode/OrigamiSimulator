@@ -107,8 +107,8 @@ function initThreeView(globals) {
     // Set camera to an arbitrary position vector (direction from origin).
     // Used for smooth POV transitions during benchmark animation.
     // fitAllPoints: if true, scales distance so the entire model always stays in view.
-    function setCameraToPosition(positionVec, fitAllPoints) {
-        resetModel();
+    function setCameraToPosition(positionVec, fitAllPoints, preserveModelRotation) {
+        if (!preserveModelRotation) resetModel();
         var pos = positionVec.clone();
         if (fitAllPoints) {
             var minDist = getMinCameraDistanceToFitModel();
@@ -164,15 +164,29 @@ function initThreeView(globals) {
             return;
         }
         renderer.render(scene, camera);
+        if (globals.pointAnnotations && globals.pointAnnotations.render) globals.pointAnnotations.render();
         if (globals.capturer) {
             if (globals.capturer == "png"){
                 var canvas = globals.threeView.renderer.domElement;
+                var annotationCanvas = (globals.pointAnnotations && globals.pointAnnotations.getCanvas)
+                    ? globals.pointAnnotations.getCanvas()
+                    : null;
                 var _captureCallback = globals.captureCallback || null;
                 globals.capturer = null;
                 globals.captureCallback = null;
                 globals.shouldScaleCanvas = false;
                 globals.shouldAnimateFoldPercent = false;
-                canvas.toBlob(function(blob) {
+                var sourceCanvas = canvas;
+                if (annotationCanvas && annotationCanvas.style.display !== "none") {
+                    var merged = document.createElement("canvas");
+                    merged.width = canvas.width;
+                    merged.height = canvas.height;
+                    var mergedCtx = merged.getContext("2d");
+                    mergedCtx.drawImage(canvas, 0, 0);
+                    mergedCtx.drawImage(annotationCanvas, 0, 0, merged.width, merged.height);
+                    sourceCanvas = merged;
+                }
+                sourceCanvas.toBlob(function(blob) {
                     if (_captureCallback) {
                         _captureCallback(blob);
                     } else {
@@ -230,6 +244,7 @@ function initThreeView(globals) {
         if (globals.shouldScaleCanvas) scale = globals.capturerScale;
         renderer.setSize(scale*window.innerWidth, scale*window.innerHeight);
         controls.handleResize();
+        if (globals.pointAnnotations && globals.pointAnnotations.onResize) globals.pointAnnotations.onResize();
     }
 
     function enableControls(state){
@@ -273,6 +288,10 @@ function initThreeView(globals) {
         modelWrapper.rotation.set(0,0,0);
     }
 
+    function setModelRotation(x, y, z){
+        modelWrapper.rotation.set(x, y, z);
+    }
+
     function setBackgroundColor(color){
         if (color === undefined) color = globals.backgroundColor;
         scene.background.setStyle( "#" + color);
@@ -304,6 +323,7 @@ function initThreeView(globals) {
 
         resetModel: resetModel,//reset model orientation
         resetCamera:resetCamera,
-        setBackgroundColor: setBackgroundColor
+        setBackgroundColor: setBackgroundColor,
+        setModelRotation: setModelRotation
     }
 }

@@ -11,6 +11,9 @@ Usage:
     uv run eval.py --benchmarks bird-track-7 bird-track-8
     uv run eval.py --dry-run                # print questions, skip API calls
     uv run eval.py --concurrency 4          # parallel API requests
+    uv run eval.py --wandb off              # disable wandb logging
+    uv run eval.py --wandb on               # require wandb; fail if unavailable
+    uv run eval.py --wandb-project myproj   # custom wandb project name
 """
 
 from __future__ import annotations
@@ -18,12 +21,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import importlib
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any, cast
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
@@ -42,11 +48,14 @@ VLM_MODEL = os.environ["MODEL"]
 # Image encoding
 # ---------------------------------------------------------------------------
 
+
 def image_to_content(path: Path) -> dict:
     """Build an OpenAI-compatible image_url content block."""
     b64 = base64.b64encode(path.read_bytes()).decode("utf-8")
     suffix = path.suffix.lstrip(".").lower()
-    mime = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg"}.get(suffix, "image/png")
+    mime = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg"}.get(
+        suffix, "image/png"
+    )
     return {
         "type": "image_url",
         "image_url": {"url": f"data:{mime};base64,{b64}"},
@@ -57,12 +66,13 @@ def image_to_content(path: Path) -> dict:
 # API call
 # ---------------------------------------------------------------------------
 
+
 async def query_vlm(
     client: AsyncOpenAI,
     images: list[Path],
     question: str,
     semaphore: asyncio.Semaphore,
-) -> str:
+) -> tuple[str, str]:
     """Send images + question to the VLM API and return the text response."""
     content: list[dict] = []
     for img_path in images:
@@ -72,7 +82,7 @@ async def query_vlm(
     async with semaphore:
         resp = await client.chat.completions.create(
             model=VLM_MODEL,
-            messages=[{"role": "user", "content": content}],
+            messages=cast(Any, [{"role": "user", "content": content}]),
             max_tokens=16384,
             temperature=0.0,
         )
@@ -81,14 +91,18 @@ async def query_vlm(
         text = msg.content or ""
         reasoning = getattr(msg, "reasoning_content", None) or ""
         if not text:
-            print(f"  DEBUG: empty content. finish_reason={choice.finish_reason}, "
-                  f"usage={resp.usage}, raw_message={msg}", file=sys.stderr)
+            print(
+                f"  DEBUG: empty content. finish_reason={choice.finish_reason}, "
+                f"usage={resp.usage}, raw_message={msg}",
+                file=sys.stderr,
+            )
         return text.strip(), reasoning.strip()
 
 
 # ---------------------------------------------------------------------------
 # Answer comparison
 # ---------------------------------------------------------------------------
+
 
 def normalize_answer(text: str) -> str:
     return text.strip().lower().rstrip(".!,")
@@ -121,6 +135,7 @@ def compare_answer(predicted: str, expected: str, answer_type: str) -> bool:
         return exp in pred
 
     if answer_type == "list":
+
         def parse_letters(text: str) -> set[str]:
             try:
                 parsed = json.loads(text)
@@ -143,6 +158,7 @@ def compare_answer(predicted: str, expected: str, answer_type: str) -> bool:
 # Dataset loading
 # ---------------------------------------------------------------------------
 
+
 def discover_benchmarks(benchmarks: list[str] | None) -> list[Path]:
     if benchmarks:
         dirs = [SCREENSHOTS_DIR / b for b in benchmarks]
@@ -154,12 +170,17 @@ def discover_benchmarks(benchmarks: list[str] | None) -> list[Path]:
 def load_samples(benchmark_dir: Path) -> list[dict]:
     with open(benchmark_dir / "dataset.json") as f:
         samples = json.load(f)
-    return [s for s in samples if all(k in s for k in ("id", "question", "answer", "images"))]
+    return [
+        s
+        for s in samples
+        if all(k in s for k in ("id", "question", "answer", "images"))
+    ]
 
 
 # ---------------------------------------------------------------------------
 # Evaluation
 # ---------------------------------------------------------------------------
+
 
 async def evaluate_sample(
     client: AsyncOpenAI,
@@ -172,7 +193,11 @@ async def evaluate_sample(
     expected = sample["answer"]
     answer_type = sample.get("answer_type", "free_text")
 
-    image_paths = [SCREENSHOTS_DIR / ip for ip in sample["images"] if (SCREENSHOTS_DIR / ip).exists()]
+    image_paths = [
+        SCREENSHOTS_DIR / ip
+        for ip in sample["images"]
+        if (SCREENSHOTS_DIR / ip).exists()
+    ]
 
     reasoning = ""
     if dry_run:
@@ -180,7 +205,9 @@ async def evaluate_sample(
     else:
         t0 = time.time()
         try:
-            predicted, reasoning = await query_vlm(client, image_paths, question, semaphore)
+            predicted, reasoning = await query_vlm(
+                client, image_paths, question, semaphore
+            )
         except Exception as e:
             predicted = f"[ERROR] {type(e).__name__}: {e}"
             print(f"  API error for sample {sid}: {e}", file=sys.stderr)
@@ -216,9 +243,9 @@ async def run_evaluation(
         for s in samples:
             s["_benchmark"] = name
 
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"Benchmark: {name}  ({len(samples)} samples)")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
 
         tasks = [evaluate_sample(client, s, semaphore, dry_run) for s in samples]
         results_for_bench = await asyncio.gather(*tasks)
@@ -228,7 +255,9 @@ async def run_evaluation(
             tag = "OK" if r["correct"] else "WRONG"
             print(f"  [{r['id']}] {tag}  Q: {r['question']}")
             if not dry_run:
-                print(f"         Expected: {r['expected']}  Predicted: {r['predicted']}")
+                print(
+                    f"         Expected: {r['expected']}  Predicted: {r['predicted']}"
+                )
             if r["correct"]:
                 bench_correct += 1
             all_results.append(r)
@@ -242,9 +271,9 @@ async def run_evaluation(
     total_count = len(all_results)
     overall_acc = total_correct / total_count * 100 if total_count else 0
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"OVERALL: {total_correct}/{total_count} = {overall_acc:.1f}%")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     return {
         "model": VLM_MODEL,
@@ -260,12 +289,45 @@ async def run_evaluation(
 # Entry point
 # ---------------------------------------------------------------------------
 
+
+def get_git_commit() -> str:
+    try:
+        return (
+            subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=Path(__file__).resolve().parent.parent,
+                stderr=subprocess.DEVNULL,
+            )
+            .decode()
+            .strip()
+        )
+    except Exception:
+        return "unknown"
+
+
 def main():
     parser = argparse.ArgumentParser(description="TopoBench Origami Tracking Eval")
-    parser.add_argument("--benchmarks", nargs="*", help="Benchmark folder names (default: all)")
-    parser.add_argument("--dry-run", action="store_true", help="Print questions, skip API calls")
-    parser.add_argument("--concurrency", type=int, default=4, help="Max parallel API requests")
+    parser.add_argument(
+        "--benchmarks", nargs="*", help="Benchmark folder names (default: all)"
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Print questions, skip API calls"
+    )
+    parser.add_argument(
+        "--concurrency", type=int, default=4, help="Max parallel API requests"
+    )
     parser.add_argument("--output", type=str, default=None, help="Output JSON path")
+    parser.add_argument(
+        "--wandb", choices=["auto", "on", "off"], default="auto", help="Wandb mode"
+    )
+    parser.add_argument(
+        "--no-wandb",
+        action="store_true",
+        help="Disable wandb logging (deprecated; same as --wandb off)",
+    )
+    parser.add_argument(
+        "--wandb-project", type=str, default="origami-eval", help="Wandb project name"
+    )
     args = parser.parse_args()
 
     benchmark_dirs = discover_benchmarks(args.benchmarks)
@@ -273,11 +335,47 @@ def main():
         print("No benchmarks found with dataset.json in screenshots/")
         sys.exit(1)
 
-    print(f"Found {len(benchmark_dirs)} benchmark(s): {[d.name for d in benchmark_dirs]}")
+    benchmark_names = [d.name for d in benchmark_dirs]
+    wandb_mode = "off" if args.no_wandb else args.wandb
+    requested_wandb = (wandb_mode != "off") and not args.dry_run
+    use_wandb = False
+    wandb: Any = None
+
+    if requested_wandb:
+        try:
+            wandb = importlib.import_module("wandb")
+            use_wandb = True
+        except Exception:
+            if wandb_mode == "on":
+                print(
+                    "wandb requested but not available. Install wandb or use --wandb off.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            print(
+                "wandb not available; continuing without wandb logging.",
+                file=sys.stderr,
+            )
+
+    if use_wandb:
+        wandb.init(
+            project=args.wandb_project,
+            config={
+                "model": VLM_MODEL,
+                "base_url": VLM_BASE_URL,
+                "benchmarks": benchmark_names,
+                "concurrency": args.concurrency,
+                "git_commit": get_git_commit(),
+            },
+        )
+
+    print(f"Found {len(benchmark_dirs)} benchmark(s): {benchmark_names}")
     if not args.dry_run:
         print(f"Model: {VLM_MODEL}  Base URL: {VLM_BASE_URL}")
 
-    results = asyncio.run(run_evaluation(benchmark_dirs, args.dry_run, args.concurrency))
+    results = asyncio.run(
+        run_evaluation(benchmark_dirs, args.dry_run, args.concurrency)
+    )
 
     RESULTS_DIR.mkdir(exist_ok=True)
     if args.output:
@@ -289,6 +387,59 @@ def main():
     with open(out_path, "w") as f:
         json.dump(results, f, indent=2)
     print(f"\nResults saved to: {out_path}")
+
+    if use_wandb:
+        # Log summary metrics
+        per_bench = {}
+        for r in results["results"]:
+            b = r["benchmark"]
+            per_bench.setdefault(b, {"correct": 0, "total": 0})
+            per_bench[b]["total"] += 1
+            if r["correct"]:
+                per_bench[b]["correct"] += 1
+
+        wandb.log(
+            {
+                "accuracy": results["accuracy"],
+                "total_correct": results["total_correct"],
+                "total_count": results["total_count"],
+                "avg_elapsed": sum(r["elapsed"] for r in results["results"])
+                / len(results["results"])
+                if results["results"]
+                else 0,
+                **{
+                    f"accuracy/{b}": v["correct"] / v["total"] * 100
+                    for b, v in per_bench.items()
+                },
+            }
+        )
+
+        # Log per-sample results table
+        table = wandb.Table(
+            columns=[
+                "benchmark",
+                "id",
+                "question",
+                "expected",
+                "predicted",
+                "correct",
+                "elapsed",
+                "answer_type",
+            ]
+        )
+        for r in results["results"]:
+            table.add_data(
+                r["benchmark"],
+                r["id"],
+                r["question"],
+                str(r["expected"]),
+                r["predicted"],
+                r["correct"],
+                r["elapsed"],
+                r["answer_type"],
+            )
+        wandb.log({"results_table": table})
+        wandb.finish()
 
 
 if __name__ == "__main__":

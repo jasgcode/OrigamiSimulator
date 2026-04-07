@@ -56,6 +56,7 @@ $(function() {
     globals.importer = initImporter(globals);
     globals.model = initModel(globals);
     globals.facePoints = initFacePoints(globals);
+    globals.pointAnnotations = initPointAnnotations(globals);
     // globals.staticSolver = initStaticSolver(globals);//still in development
     globals.dynamicSolver = initDynamicSolver(globals);
     // globals.rigidSolver = initRigidSolver(globals);//still in development
