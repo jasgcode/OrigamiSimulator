@@ -7,6 +7,19 @@
 function initFacePoints(globals) {
 
     var points = [];  // [{ faceId, u, v, w }, ...]
+    var _modelWorld = new THREE.Matrix4();
+    var _modelInv = new THREE.Matrix4();
+
+    function updateModelMatrices() {
+        if (globals.threeView && globals.threeView.modelWrapper) {
+            globals.threeView.modelWrapper.updateMatrixWorld(true);
+            _modelWorld.copy(globals.threeView.modelWrapper.matrixWorld);
+            _modelInv.getInverse(_modelWorld);
+        } else {
+            _modelWorld.identity();
+            _modelInv.identity();
+        }
+    }
 
     function barycentricToWorld(faceIndex, u, v, w) {
         var faces = globals.model.getFaces();
@@ -159,7 +172,9 @@ function initFacePoints(globals) {
         var toCamera = globals.threeView.camera.position.clone().sub(intersection.point);
         var isBackside = toCamera.dot(normal) < 0;
         var faceId = isBackside ? N + faceIndex : faceIndex;
-        var bary = worldToBarycentric(faceIndex, intersection.point);
+        updateModelMatrices();
+        var localPoint = intersection.point.clone().applyMatrix4(_modelInv);
+        var bary = worldToBarycentric(faceIndex, localPoint);
         if (!bary) return null;
         bary = clampBarycentric(bary);
         return { faceId: faceId, u: bary.u, v: bary.v, w: bary.w };
@@ -207,13 +222,16 @@ function initFacePoints(globals) {
         if (N === 0) return false;
         var isFront = p.faceId < N;
         var triIdx = isFront ? p.faceId : p.faceId - N;
-        var pos = getPointPosition(index);
-        var normal = getFaceNormal(triIdx);
-        if (!pos || !normal) return false;
+        var posLocal = getPointPosition(index);
+        var normalLocal = getFaceNormal(triIdx);
+        if (!posLocal || !normalLocal) return false;
         var camera = globals.threeView && globals.threeView.camera;
         if (!camera) return false;
-        var toCamera = camera.position.clone().sub(pos);
-        var dot = toCamera.dot(normal);
+        updateModelMatrices();
+        var posWorld = posLocal.clone().applyMatrix4(_modelWorld);
+        var normalWorld = normalLocal.clone().transformDirection(_modelWorld);
+        var toCamera = camera.position.clone().sub(posWorld);
+        var dot = toCamera.dot(normalWorld);
         var facingCamera = isFront ? dot > 0 : dot < 0;
         if (!facingCamera) return false;
 
@@ -221,9 +239,17 @@ function initFacePoints(globals) {
         var positions = globals.model.getPositionsArray();
         if (!faces || !positions) return true; // can't test, assume visible
         var distToCamera = toCamera.length();
-        var dir = toCamera.divideScalar(distToCamera);
-        var origin = pos.clone().addScaledVector(dir, OCCL_EPSILON);
-        return !isOccluded(origin, dir, distToCamera, faces, positions);
+        if (distToCamera < 1e-8) return true;
+        var dirWorld = toCamera.clone().divideScalar(distToCamera);
+        var originWorld = posWorld.clone().addScaledVector(dirWorld, OCCL_EPSILON);
+
+        var localCamera = camera.position.clone().applyMatrix4(_modelInv);
+        var originLocal = originWorld.clone().applyMatrix4(_modelInv);
+        var toCameraLocal = localCamera.clone().sub(originLocal);
+        var localDistToCamera = toCameraLocal.length();
+        if (localDistToCamera < 1e-8) return true;
+        var dirLocal = toCameraLocal.clone().divideScalar(localDistToCamera);
+        return !isOccluded(originLocal, dirLocal, localDistToCamera, faces, positions);
     }
 
     // Returns points array enriched with world position and camera-facing visibility.
@@ -331,25 +357,36 @@ function initFacePoints(globals) {
         var positions = globals.model.getPositionsArray();
         var camera = globals.threeView && globals.threeView.camera;
         if (!faces || !positions || !camera) return [];
+        updateModelMatrices();
+        var localCamera = camera.position.clone().applyMatrix4(_modelInv);
         var N = faces.length;
         var result = [];
         for (var i = 0; i < N; i++) {
-            var normal = getFaceNormal(i);
-            if (!normal) continue;
+            var normalLocal = getFaceNormal(i);
+            if (!normalLocal) continue;
             var face = faces[i];
-            var centroid = new THREE.Vector3(
+            var centroidLocal = new THREE.Vector3(
                 (positions[face[0]*3]   + positions[face[1]*3]   + positions[face[2]*3])   / 3,
                 (positions[face[0]*3+1] + positions[face[1]*3+1] + positions[face[2]*3+1]) / 3,
                 (positions[face[0]*3+2] + positions[face[1]*3+2] + positions[face[2]*3+2]) / 3
             );
-            var toCamera = camera.position.clone().sub(centroid);
-            var dot = toCamera.dot(normal);
+            var centroidWorld = centroidLocal.clone().applyMatrix4(_modelWorld);
+            var normalWorld = normalLocal.clone().transformDirection(_modelWorld);
+            var toCamera = camera.position.clone().sub(centroidWorld);
+            var dot = toCamera.dot(normalWorld);
             if (dot <= 0) continue; // back-facing, skip
 
             var distToCamera = toCamera.length();
-            var dir = toCamera.divideScalar(distToCamera);
-            var origin = centroid.clone().addScaledVector(dir, OCCL_EPSILON);
-            if (!isOccluded(origin, dir, distToCamera, faces, positions)) result.push(i);
+            if (distToCamera < 1e-8) continue;
+            var dirWorld = toCamera.clone().divideScalar(distToCamera);
+            var originWorld = centroidWorld.clone().addScaledVector(dirWorld, OCCL_EPSILON);
+
+            var originLocal = originWorld.clone().applyMatrix4(_modelInv);
+            var toCameraLocal = localCamera.clone().sub(originLocal);
+            var localDistToCamera = toCameraLocal.length();
+            if (localDistToCamera < 1e-8) continue;
+            var dirLocal = toCameraLocal.clone().divideScalar(localDistToCamera);
+            if (!isOccluded(originLocal, dirLocal, localDistToCamera, faces, positions)) result.push(i);
         }
         return result;
     }
@@ -362,22 +399,25 @@ function initFacePoints(globals) {
         var positions = globals.model.getPositionsArray();
         var camera = globals.threeView && globals.threeView.camera;
         if (!faces || !positions || !camera) return {};
+        updateModelMatrices();
         var N = faces.length;
         var result = {};
         for (var i = 0; i < faceIds.length; i++) {
             var id = faceIds[i];
             if (id < 0 || id >= N) { result[id] = 0; continue; }
-            var normal = getFaceNormal(id);
-            if (!normal) { result[id] = 0; continue; }
+            var normalLocal = getFaceNormal(id);
+            if (!normalLocal) { result[id] = 0; continue; }
             var face = faces[id];
-            var centroid = new THREE.Vector3(
+            var centroidLocal = new THREE.Vector3(
                 (positions[face[0]*3]   + positions[face[1]*3]   + positions[face[2]*3])   / 3,
                 (positions[face[0]*3+1] + positions[face[1]*3+1] + positions[face[2]*3+1]) / 3,
                 (positions[face[0]*3+2] + positions[face[1]*3+2] + positions[face[2]*3+2]) / 3
             );
-            var toCamera = camera.position.clone().sub(centroid);
+            var centroidWorld = centroidLocal.clone().applyMatrix4(_modelWorld);
+            var normalWorld = normalLocal.clone().transformDirection(_modelWorld);
+            var toCamera = camera.position.clone().sub(centroidWorld);
             var dist = toCamera.length();
-            result[id] = dist > 0 ? Math.max(0, toCamera.dot(normal) / dist) : 0;
+            result[id] = dist > 0 ? Math.max(0, toCamera.dot(normalWorld) / dist) : 0;
         }
         return result;
     }

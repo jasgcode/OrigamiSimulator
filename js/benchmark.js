@@ -32,6 +32,8 @@
  *                   delay / delayBeforeAnimation: seconds to wait before animation starts (e.g. 1).
  *                   delayAfterPreview: seconds to pause between previewRotation and foldAnimation (e.g. 1).
  *   previewRotation  — top-level: { duration: 2, povKeyframes: [...] } — rotate view at cfg.fold (initial fold).
+ *                   trackModel: "true" to rotate the model instead of moving camera during preview.
+ *                   fitAllPoints: "true" to zoom out so entire model stays in view during preview.
  *   color1, color2   — hex colors for labelOnly (front/back sides), e.g. ec008b, dddddd. URL: color1=ec008b&color2=dddddd
  *   backgroundColor — hex background color (e.g. ffffff or #ffffff).
  *   showPointNumbers — "false" to hide numbers on face points
@@ -123,6 +125,46 @@ function initBenchmark(globals) {
         }
     }
 
+    // ── Model rotation helpers ──
+
+    function parseRotation(rot) {
+        if (!rot) return null;
+        if (Array.isArray(rot) && rot.length === 3) return { x: rot[0], y: rot[1], z: rot[2] };
+        if (typeof rot === "object" && rot !== null && "x" in rot) return { x: rot.x || 0, y: rot.y || 0, z: rot.z || 0 };
+        return null;
+    }
+
+    function applyRotation(rot) {
+        var r = parseRotation(rot);
+        if (r) {
+            globals.threeView.setModelRotation(r.x, r.y, r.z);
+        }
+    }
+
+    // Linear interpolation of Euler angles between keyframes that have a rotation field.
+    // keyframes: [{ fold: N, rotation: [x,y,z] }, ...] — fold is the progress key.
+    function getInterpolatedRotation(keyframes, foldPct) {
+        if (!keyframes || keyframes.length === 0) return null;
+        var hasAny = false;
+        for (var i = 0; i < keyframes.length; i++) {
+            if (keyframes[i].rotation) { hasAny = true; break; }
+        }
+        if (!hasAny) return null;
+        var idx = 0;
+        while (idx < keyframes.length - 1 && keyframes[idx + 1].fold <= foldPct) idx++;
+        var a = keyframes[idx];
+        var b = keyframes[idx + 1];
+        var ra = parseRotation(a.rotation) || { x: 0, y: 0, z: 0 };
+        if (!b) return ra;
+        var t = Math.max(0, Math.min(1, (foldPct - a.fold) / (b.fold - a.fold)));
+        var rb = parseRotation(b.rotation) || { x: 0, y: 0, z: 0 };
+        return {
+            x: ra.x + (rb.x - ra.x) * t,
+            y: ra.y + (rb.y - ra.y) * t,
+            z: ra.z + (rb.z - ra.z) * t
+        };
+    }
+
     // ── Apply settings (colorMode, highlights) ──
 
     function applySettings(cfg) {
@@ -179,6 +221,11 @@ function initBenchmark(globals) {
         if (cfg.showPointNumbers !== undefined) {
             globals.showFacePointNumbers = cfg.showPointNumbers !== false;
             if ($("#showFacePointNumbers").length) $("#showFacePointNumbers").prop("checked", globals.showFacePointNumbers);
+            globals.model.updateFaceColors();
+        }
+
+        if (cfg.labelStyle !== undefined) {
+            globals.labelStyle = (cfg.labelStyle === "both") ? "circle" : cfg.labelStyle;
             globals.model.updateFaceColors();
         }
 
@@ -399,7 +446,7 @@ function initBenchmark(globals) {
                 .then(function (res) {
                     if (!res.ok) throw new Error("server error");
                     console.log("benchmark: saved screenshots/" + relativePath);
-                    recordStateVisibility(recordLabel);
+                    if (recordLabel !== null && recordLabel !== undefined) recordStateVisibility(recordLabel);
                     capturedFiles.push(relativePath);
                     if (callback) callback();
                 })
@@ -411,6 +458,25 @@ function initBenchmark(globals) {
                 });
         };
         globals.capturer = "png";
+    }
+
+    function captureFinalWithBothStyles(filenameLabel, recordLabel, labelStyleMode, callback) {
+        if (labelStyleMode !== "both") {
+            captureScreenshot(filenameLabel, recordLabel, callback);
+            return;
+        }
+        var originalStyle = globals.labelStyle;
+        globals.labelStyle = "circle";
+        globals.model.updateFaceColors();
+        captureScreenshot(filenameLabel, recordLabel, function () {
+            globals.labelStyle = "arrow";
+            globals.model.updateFaceColors();
+            captureScreenshot(filenameLabel + "_arrow", null, function () {
+                globals.labelStyle = originalStyle;
+                globals.model.updateFaceColors();
+                if (callback) callback();
+            });
+        });
     }
 
     // ── Interpolate POV between keyframes (fold % → POV) ──
@@ -437,6 +503,18 @@ function initBenchmark(globals) {
     // ── Preview rotation (standalone): rotate view of model at fixed fold, no folding ──
 
     function runPreviewRotation(opts, foldAt, trackModel, fitAllPoints, callback) {
+        opts = opts || {};
+        var hasOwn = Object.prototype.hasOwnProperty;
+        var useTrackModel = hasOwn.call(opts, "trackModel") ? opts.trackModel === true : trackModel === true;
+        var useFitAllPoints;
+        if (hasOwn.call(opts, "fitAllPoints")) {
+            useFitAllPoints = opts.fitAllPoints === true;
+        } else if (hasOwn.call(opts, "povFitAllPoints")) {
+            useFitAllPoints = opts.povFitAllPoints === true;
+        } else {
+            useFitAllPoints = fitAllPoints === true;
+        }
+
         var fold = opts.fold !== undefined && opts.fold !== null ? opts.fold : foldAt;
         globals.setCreasePercent((fold != null ? fold : 0) / 100);
         globals.shouldChangeCreasePercent = true;
@@ -463,11 +541,11 @@ function initBenchmark(globals) {
         if (keyframes.length > 0) {
             var initialDir = getInterpolatedPOV(keyframes, 0);
             if (initialDir) {
-                if (trackModel) {
+                if (useTrackModel) {
                     globals.threeView.setCameraFixedForTracking();
                     globals.threeView.setModelRotationForPOV(initialDir);
                 } else {
-                    globals.threeView.setCameraToPosition(initialDir, fitAllPoints);
+                    globals.threeView.setCameraToPosition(initialDir, useFitAllPoints);
                 }
             }
         }
@@ -477,9 +555,11 @@ function initBenchmark(globals) {
             if (elapsed >= duration) {
                 var finalDir = keyframes.length > 0 ? getInterpolatedPOV(keyframes, 100) : null;
                 if (finalDir) {
-                    if (trackModel) globals.threeView.setModelRotationForPOV(finalDir);
-                    else globals.threeView.setCameraToPosition(finalDir, fitAllPoints);
+                    if (useTrackModel) globals.threeView.setModelRotationForPOV(finalDir);
+                    else globals.threeView.setCameraToPosition(finalDir, useFitAllPoints);
                 }
+                var finalRot = getInterpolatedRotation(keyframes, 100);
+                if (finalRot) globals.threeView.setModelRotation(finalRot.x, finalRot.y, finalRot.z);
                 globals.threeView.startSimulation();
                 updateStatus("Preview complete.");
                 if (callback) callback();
@@ -489,10 +569,12 @@ function initBenchmark(globals) {
             if (keyframes.length > 0) {
                 var dir = getInterpolatedPOV(keyframes, progress);
                 if (dir) {
-                    if (trackModel) globals.threeView.setModelRotationForPOV(dir);
-                    else globals.threeView.setCameraToPosition(dir, fitAllPoints);
+                    if (useTrackModel) globals.threeView.setModelRotationForPOV(dir);
+                    else globals.threeView.setCameraToPosition(dir, useFitAllPoints);
                 }
             }
+            var prevRot = getInterpolatedRotation(keyframes, progress);
+            if (prevRot) globals.threeView.setModelRotation(prevRot.x, prevRot.y, prevRot.z);
             updateStatus("Preview: rotating view (" + Math.round(progress) + "%)");
             requestAnimationFrame(prevTick);
         }
@@ -545,6 +627,9 @@ function initBenchmark(globals) {
                 }
                 if (hidePoints) globals.hideFacePointsDuringAnimation = false;
                 globals.revealHiddenPoints = true;
+                // apply final rotation interpolation
+                var finalRot = getInterpolatedRotation(keyframes, to);
+                if (finalRot) globals.threeView.setModelRotation(finalRot.x, finalRot.y, finalRot.z);
                 globals.model.updateFaceColors();
                 updateStatus("Fold animation complete (0→" + to + "%).");
                 if (callback) callback();
@@ -561,6 +646,9 @@ function initBenchmark(globals) {
                     else globals.threeView.setCameraToPosition(dir, fitAllPoints);
                 }
             }
+            // apply interpolated rotation from keyframes
+            var interpRot = getInterpolatedRotation(keyframes, pct);
+            if (interpRot) globals.threeView.setModelRotation(interpRot.x, interpRot.y, interpRot.z);
             updateStatus("Fold animation: " + Math.round(pct) + "% (" + Math.round(elapsed * 10) / 10 + "s / " + durationSec + "s)");
             requestAnimationFrame(tick);
         }
@@ -569,7 +657,7 @@ function initBenchmark(globals) {
 
     // ── Step runner ──
 
-    function runStep(steps, index, pauseSec, autoCapture, hidePointsDuringAnimation, onComplete) {
+    function runStep(steps, index, pauseSec, autoCapture, hidePointsDuringAnimation, labelStyleMode, onComplete) {
         if (index >= steps.length) {
             globals.hideFacePointsDuringAnimation = false;
             running = false;
@@ -601,18 +689,31 @@ function initBenchmark(globals) {
         // set camera
         setPOV(step.pov);
 
+        // apply model rotation per-step; if omitted, keep this step unrotated
+        if (step.rotation !== undefined && step.rotation !== null) {
+            applyRotation(step.rotation);
+        } else {
+            globals.threeView.resetModel();
+        }
+
         // wait for simulation to settle, then optionally capture
         var settleMs = Math.max(pauseSec * 1000, 500);
             setTimeout(function () {
             if (autoCapture) {
-                captureScreenshot(stepFilename(index), stepLabel(step.fold, step.pov), function () {
+                var isFinalStep = index === steps.length - 1;
+                var done = function () {
                     // small delay after capture before next step
                     setTimeout(function () {
-                        runStep(steps, index + 1, pauseSec, autoCapture, hidePointsDuringAnimation, onComplete);
+                        runStep(steps, index + 1, pauseSec, autoCapture, hidePointsDuringAnimation, labelStyleMode, onComplete);
                     }, 300);
-                });
+                };
+                if (isFinalStep) {
+                    captureFinalWithBothStyles(stepFilename(index), stepLabel(step.fold, step.pov), labelStyleMode, done);
+                } else {
+                    captureScreenshot(stepFilename(index), stepLabel(step.fold, step.pov), done);
+                }
             } else {
-                runStep(steps, index + 1, pauseSec, autoCapture, hidePointsDuringAnimation, onComplete);
+                runStep(steps, index + 1, pauseSec, autoCapture, hidePointsDuringAnimation, labelStyleMode, onComplete);
             }
         }, settleMs);
     }
@@ -651,6 +752,9 @@ function initBenchmark(globals) {
         var color2 = getParam("color2");
         if (color2 !== null && color2 !== undefined) cfg.color2 = color2.replace(/^#/, "");
 
+        var labelStyle = getParam("labelStyle");
+        if (labelStyle) cfg.labelStyle = labelStyle;
+
         var pointA = getParamInt("pointA");
         if (pointA !== null) cfg.pointA = pointA;
 
@@ -681,6 +785,21 @@ function initBenchmark(globals) {
         if (getParam("autoRun") !== null) cfg.autoRun = getParamBool("autoRun");
         if (getParam("showPointNumbers") !== null) cfg.showPointNumbers = getParamBool("showPointNumbers");
         if (getParam("hidePointsDuringAnimation") !== null) cfg.hidePointsDuringAnimation = getParamBool("hidePointsDuringAnimation");
+
+        var targetPointLabels = getParam("targetPointLabels");
+        if (targetPointLabels) cfg.targetPointLabels = targetPointLabels;
+        var targetPointIndices = getParam("targetPointIndices");
+        if (targetPointIndices) cfg.targetPointIndices = targetPointIndices;
+        var minPointSeparationPx = getParamFloat("minPointSeparationPx");
+        if (minPointSeparationPx !== null) cfg.minPointSeparationPx = minPointSeparationPx;
+        var rotationYawMax = getParamFloat("rotationYawMax");
+        if (rotationYawMax !== null) cfg.rotationYawMax = rotationYawMax;
+        var rotationPitchMax = getParamFloat("rotationPitchMax");
+        if (rotationPitchMax !== null) cfg.rotationPitchMax = rotationPitchMax;
+        var rotationRollMax = getParamFloat("rotationRollMax");
+        if (rotationRollMax !== null) cfg.rotationRollMax = rotationRollMax;
+        var rotationProfileCount = getParamInt("rotationProfileCount");
+        if (rotationProfileCount !== null) cfg.rotationProfileCount = rotationProfileCount;
 
         // fold animation: 0→90 over 4s (preset or URL)
         var foldAnimFrom = getParamFloat("foldAnimFrom");
@@ -728,11 +847,450 @@ function initBenchmark(globals) {
         return cfg;
     }
 
+    // ── POV grid generation (Fibonacci sphere on upper hemisphere) ──
+
+    function generatePovGrid(count) {
+        // Fibonacci sphere sampling, filtered to y >= -0.3.
+        // count controls total sphere points before filtering; all passing points are kept.
+        var goldenAngle = Math.PI * (3 - Math.sqrt(5));
+        var candidates = [];
+        for (var i = 0; i < count; i++) {
+            var y = 1 - (2 * i / (count - 1));
+            if (y < -0.3) continue;
+            var radius = Math.sqrt(1 - y * y);
+            var theta = goldenAngle * i;
+            var x = Math.cos(theta) * radius;
+            var z = Math.sin(theta) * radius;
+            candidates.push([
+                Math.round(x * 100) / 100,
+                Math.round(y * 100) / 100,
+                Math.round(z * 100) / 100
+            ]);
+        }
+        return candidates;
+    }
+
+    // ── Diverse progression builder ──
+    // Given scan results, builds N diverse smooth POV progressions where
+    // all targetFaces have quality >= minQuality at every fold step.
+
+    // Generate candidate trajectory POV lists from grid scan data.
+    // Returns array of trajectories, each is array of { fold, pov } steps.
+    // These are NOT validated — they need live evaluation in phase 2.
+    function generateCandidateTrajectories(scanStates, foldSteps, count) {
+        var isoVec = [1, 1, 1];
+        function normalize(v) {
+            var mag = Math.sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
+            return mag > 0 ? [v[0]/mag, v[1]/mag, v[2]/mag] : [0, 1, 0];
+        }
+        function lerp3(a, b, t) {
+            return [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t];
+        }
+        function round2(v) {
+            return [Math.round(v[0]*100)/100, Math.round(v[1]*100)/100, Math.round(v[2]*100)/100];
+        }
+        function angularDist(a, b) {
+            var dot = a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+            var mA = Math.sqrt(a[0]*a[0]+a[1]*a[1]+a[2]*a[2]);
+            var mB = Math.sqrt(b[0]*b[0]+b[1]*b[1]+b[2]*b[2]);
+            if (mA === 0 || mB === 0) return Math.PI;
+            return Math.acos(Math.max(-1, Math.min(1, dot/(mA*mB))));
+        }
+
+        // Collect all unique continuous POVs scanned at the last fold step as potential endpoints
+        var lastFold = foldSteps[foldSteps.length - 1];
+        var endpoints = [];
+        var seen = {};
+        for (var si = 0; si < scanStates.length; si++) {
+            var st = scanStates[si];
+            if (st.fold !== lastFold || !Array.isArray(st.pov)) continue;
+            var k = st.pov.join(",");
+            if (!seen[k]) { seen[k] = true; endpoints.push(st.pov); }
+        }
+
+        // t-curves: control how fast camera moves from iso toward endpoint
+        var tCurves = [
+            function (fi, n) { return fi === 0 ? 0 : 1; },                              // immediate
+            function (fi, n) { return fi / (n - 1); },                                   // linear
+            function (fi, n) { var r = fi/(n-1); return r * r; },                         // slow start
+            function (fi, n) { var r = fi/(n-1); return 1 - (1-r)*(1-r); },              // quick start
+            function (fi, n) { return fi <= 1 ? 0 : (fi - 1) / (n - 2); }               // hold then go
+        ];
+
+        var nIso = normalize(isoVec);
+        var trajectories = [];
+
+        // Sort endpoints for diversity: greedy farthest-first from iso
+        var sorted = endpoints.slice().sort(function (a, b) {
+            return angularDist(b, nIso) - angularDist(a, nIso);
+        });
+
+        for (var ei = 0; ei < sorted.length; ei++) {
+            var ep = sorted[ei];
+
+            // Skip endpoints too close to already-used ones (0.15 rad ≈ 8.6°)
+            var tooClose = false;
+            for (var ui = 0; ui < trajectories.length; ui++) {
+                var lastStep = trajectories[ui][trajectories[ui].length - 1];
+                if (Array.isArray(lastStep.pov) && angularDist(ep, lastStep.pov) < 0.15) {
+                    tooClose = true; break;
+                }
+            }
+            if (tooClose) continue;
+
+            for (var ci = 0; ci < tCurves.length; ci++) {
+                var steps = [{ fold: foldSteps[0], pov: "iso" }];
+                for (var fi = 1; fi < foldSteps.length; fi++) {
+                    var t = tCurves[ci](fi, foldSteps.length);
+                    steps.push({ fold: foldSteps[fi], pov: round2(lerp3(nIso, ep, t)) });
+                }
+                trajectories.push(steps);
+            }
+        }
+
+        // Also add trajectories using ALL endpoints (no distance filter) if we don't have enough
+        if (trajectories.length < count * 3) {
+            for (var ei2 = 0; ei2 < sorted.length; ei2++) {
+                var ep2 = sorted[ei2];
+                for (var ci2 = 0; ci2 < tCurves.length; ci2++) {
+                    var steps2 = [{ fold: foldSteps[0], pov: "iso" }];
+                    for (var fi2 = 1; fi2 < foldSteps.length; fi2++) {
+                        var t2 = tCurves[ci2](fi2, foldSteps.length);
+                        steps2.push({ fold: foldSteps[fi2], pov: round2(lerp3(nIso, ep2, t2)) });
+                    }
+                    // Dedup
+                    var isDupe = false;
+                    for (var di = 0; di < trajectories.length; di++) {
+                        var same = true;
+                        for (var ds = 1; ds < steps2.length; ds++) {
+                            var a = steps2[ds].pov, b = trajectories[di][ds].pov;
+                            if (Array.isArray(a) && Array.isArray(b)) {
+                                if (a[0]!==b[0]||a[1]!==b[1]||a[2]!==b[2]) { same=false; break; }
+                            }
+                        }
+                        if (same) { isDupe = true; break; }
+                    }
+                    if (!isDupe) trajectories.push(steps2);
+                }
+            }
+        }
+
+        console.log("generateCandidateTrajectories: " + endpoints.length + " endpoints → " + trajectories.length + " candidates");
+        return trajectories;
+    }
+
+    function pointLabelToIndex(label) {
+        if (label === undefined || label === null) return null;
+        var s = String(label).trim().toUpperCase();
+        if (!s || s.length !== 1) return null;
+        var code = s.charCodeAt(0);
+        if (code < 65 || code > 90) return null;
+        return code - 65;
+    }
+
+    function parseIndexList(list) {
+        if (!list) return [];
+        var arr = Array.isArray(list) ? list : String(list).split(",");
+        var out = [];
+        for (var i = 0; i < arr.length; i++) {
+            var v = parseInt(arr[i], 10);
+            if (!isNaN(v) && out.indexOf(v) === -1) out.push(v);
+        }
+        return out;
+    }
+
+    function parseLabelList(list) {
+        if (!list) return [];
+        var arr = Array.isArray(list) ? list : String(list).split(",");
+        var out = [];
+        for (var i = 0; i < arr.length; i++) {
+            var idx = pointLabelToIndex(arr[i]);
+            if (idx !== null && out.indexOf(idx) === -1) out.push(idx);
+        }
+        return out;
+    }
+
+    function getTargetPointIndicesForCfg(cfg) {
+        var byIndex = parseIndexList(cfg && cfg.targetPointIndices);
+        var byLabel = parseLabelList(cfg && cfg.targetPointLabels);
+        var merged = byIndex.slice();
+        for (var i = 0; i < byLabel.length; i++) {
+            if (merged.indexOf(byLabel[i]) === -1) merged.push(byLabel[i]);
+        }
+        return merged;
+    }
+
+    function buildAutoRotationProfiles(templateSteps, cfg) {
+        var stepCount = templateSteps ? templateSteps.length : 0;
+        if (stepCount === 0) return [{ name: "none", rotations: [] }];
+
+        if (cfg && Array.isArray(cfg.rotationProfiles) && cfg.rotationProfiles.length > 0) {
+            var parsedProfiles = [];
+            for (var pi = 0; pi < cfg.rotationProfiles.length; pi++) {
+                var raw = cfg.rotationProfiles[pi];
+                if (!Array.isArray(raw) || raw.length !== stepCount) continue;
+                var rots = [];
+                var valid = true;
+                for (var si = 0; si < raw.length; si++) {
+                    var r = parseRotation(raw[si]);
+                    if (!r) { valid = false; break; }
+                    rots.push({ x: r.x, y: r.y, z: r.z });
+                }
+                if (valid) parsedProfiles.push({ name: "custom-" + (parsedProfiles.length + 1), rotations: rots });
+            }
+            if (parsedProfiles.length > 0) return parsedProfiles;
+        }
+
+        var yawMax = cfg && cfg.rotationYawMax != null ? cfg.rotationYawMax : 1.5;
+        var pitchMax = cfg && cfg.rotationPitchMax != null ? cfg.rotationPitchMax : 0.35;
+        var rollMax = cfg && cfg.rotationRollMax != null ? cfg.rotationRollMax : 0.18;
+        var requested = cfg && cfg.rotationProfileCount != null ? cfg.rotationProfileCount : 6;
+        var templates = [
+            { name: "cw-soft", sign: 1, amp: 0.75 },
+            { name: "cw-med", sign: 1, amp: 1.0 },
+            { name: "cw-strong", sign: 1, amp: 1.2 },
+            { name: "ccw-soft", sign: -1, amp: 0.75 },
+            { name: "ccw-med", sign: -1, amp: 1.0 },
+            { name: "ccw-strong", sign: -1, amp: 1.2 }
+        ];
+        var count = Math.max(1, Math.min(requested, templates.length));
+        var profiles = [];
+        for (var ti = 0; ti < count; ti++) {
+            var tplt = templates[ti];
+            var rots = [];
+            for (var si2 = 0; si2 < stepCount; si2++) {
+                var t = stepCount <= 1 ? 1 : (si2 / (stepCount - 1));
+                var yaw = tplt.sign * yawMax * tplt.amp * t;
+                var pitch = pitchMax * 4 * t * (1 - t);
+                var roll = tplt.sign * rollMax * Math.sin(t * Math.PI);
+                rots.push({
+                    x: Math.round(pitch * 1000) / 1000,
+                    y: Math.round(yaw * 1000) / 1000,
+                    z: Math.round(roll * 1000) / 1000
+                });
+            }
+            profiles.push({ name: tplt.name, rotations: rots });
+        }
+        return profiles;
+    }
+
+    function getPointScreenPosition(index) {
+        if (!globals.facePoints || !globals.facePoints.getPointPosition) return null;
+        var posLocal = globals.facePoints.getPointPosition(index);
+        if (!posLocal) return null;
+        if (!globals.threeView || !globals.threeView.camera || !globals.threeView.renderer || !globals.threeView.modelWrapper) return null;
+
+        globals.threeView.modelWrapper.updateMatrixWorld(true);
+        var posWorld = posLocal.clone().applyMatrix4(globals.threeView.modelWrapper.matrixWorld);
+        var p = posWorld.clone().project(globals.threeView.camera);
+        if (p.z < -1 || p.z > 1) return null;
+
+        var canvas = globals.threeView.renderer.domElement;
+        var w = canvas.width || Math.max(1, Math.floor(window.innerWidth * (window.devicePixelRatio || 1)));
+        var h = canvas.height || Math.max(1, Math.floor(window.innerHeight * (window.devicePixelRatio || 1)));
+        return {
+            x: (p.x * 0.5 + 0.5) * w,
+            y: (-p.y * 0.5 + 0.5) * h
+        };
+    }
+
+    function evaluateTrackedPoints(targetPointIndices, stepIndex, totalSteps, minPointSeparation) {
+        if (!targetPointIndices || targetPointIndices.length === 0) {
+            return { ok: true, requiredCount: 0, visibleCount: 0, minSep: Infinity };
+        }
+
+        var required = [];
+        for (var i = 0; i < targetPointIndices.length; i++) {
+            var idx = targetPointIndices[i];
+            var hidden = globals.facePoints && globals.facePoints.isPointHidden ? globals.facePoints.isPointHidden(idx) : false;
+            if (!hidden || stepIndex === totalSteps - 1) required.push(idx);
+        }
+
+        var visibleScreens = [];
+        for (var ri = 0; ri < required.length; ri++) {
+            var rIdx = required[ri];
+            if (!(globals.facePoints && globals.facePoints.isPointVisible && globals.facePoints.isPointVisible(rIdx))) {
+                return { ok: false, requiredCount: required.length, visibleCount: visibleScreens.length, minSep: 0 };
+            }
+            var screen = getPointScreenPosition(rIdx);
+            if (!screen) {
+                return { ok: false, requiredCount: required.length, visibleCount: visibleScreens.length, minSep: 0 };
+            }
+            visibleScreens.push(screen);
+        }
+
+        var minSep = Infinity;
+        for (var a = 0; a < visibleScreens.length; a++) {
+            for (var b = a + 1; b < visibleScreens.length; b++) {
+                var dx = visibleScreens[a].x - visibleScreens[b].x;
+                var dy = visibleScreens[a].y - visibleScreens[b].y;
+                var d = Math.sqrt(dx * dx + dy * dy);
+                if (d < minSep) minSep = d;
+            }
+        }
+
+        if (stepIndex === totalSteps - 1 && visibleScreens.length >= 2 && minSep < minPointSeparation) {
+            return { ok: false, requiredCount: required.length, visibleCount: visibleScreens.length, minSep: minSep };
+        }
+        return { ok: true, requiredCount: required.length, visibleCount: visibleScreens.length, minSep: minSep };
+    }
+
+    // ── Phase 2: live trajectory evaluation ──
+    // Sets camera to each interpolated POV, measures actual face quality via getFaceViewQualities.
+    // Keeps trajectories where all targetFaces stay >= minQuality at every step.
+
+    function evaluateTrajectoriesLive(candidates, targetFaces, minQuality, maxCount, settleMs, cfg, callback) {
+        var validProgressions = [];
+        var targetPointIndices = getTargetPointIndicesForCfg(cfg || {});
+        var minPointSeparation = (cfg && cfg.minPointSeparationPx != null) ? cfg.minPointSeparationPx : 70;
+        var rotationProfiles = buildAutoRotationProfiles(candidates[0] || [], cfg || {});
+        var candidateCount = candidates.length;
+        var profileCount = rotationProfiles.length;
+
+        // Flatten all trajectory steps into a sequential evaluation queue.
+        // We evaluate one trajectory at a time, step by step.
+        var currentTraj = 0;
+        var currentStep = 0;
+        var currentProfile = 0;
+        var currentStepQualities = []; // faceQualities per step for the trajectory being evaluated
+
+        function evaluateNext() {
+            // Skip to next trajectory if current one has been fully evaluated or invalidated
+            while (currentTraj < candidates.length && currentStep >= candidates[currentTraj].length) {
+                // Trajectory fully evaluated — compute consistentFaces and accept
+                var traj = candidates[currentTraj];
+                var allFaceIds = {};
+                for (var s0 = 0; s0 < currentStepQualities.length; s0++) {
+                    for (var fid in currentStepQualities[s0]) {
+                        if (currentStepQualities[s0].hasOwnProperty(fid) && currentStepQualities[s0][fid] > 0) {
+                            allFaceIds[fid] = true;
+                        }
+                    }
+                }
+                var consistentFaces = {};
+                for (var fid2 in allFaceIds) {
+                    if (!allFaceIds.hasOwnProperty(fid2)) continue;
+                    var worst = Infinity;
+                    var visibleInAll = true;
+                    for (var s1 = 0; s1 < currentStepQualities.length; s1++) {
+                        var q2 = currentStepQualities[s1][fid2] || 0;
+                        if (q2 <= 0) { visibleInAll = false; break; }
+                        if (q2 < worst) worst = q2;
+                    }
+                    if (visibleInAll && worst >= 0.6) {
+                        consistentFaces[fid2] = Math.round(worst * 1000) / 1000;
+                    }
+                }
+
+                var profile = rotationProfiles[Math.min(currentProfile, rotationProfiles.length - 1)] || { name: "none", rotations: [] };
+                var cleanSteps = traj.map(function (s, i) {
+                    var out = { fold: s.fold, pov: s.pov };
+                    var r = profile.rotations && profile.rotations[i];
+                    if (r) out.rotation = [r.x, r.y, r.z];
+                    return out;
+                });
+                validProgressions.push({ steps: cleanSteps, consistentFaces: consistentFaces });
+
+                if (validProgressions.length >= maxCount) {
+                    console.log("evaluateTrajectoriesLive: reached " + maxCount + " valid progressions");
+                    callback(validProgressions);
+                    return;
+                }
+
+                currentProfile++;
+                if (currentProfile >= profileCount) {
+                    currentProfile = 0;
+                    currentTraj++;
+                }
+                currentStep = 0;
+                currentStepQualities = [];
+            }
+
+            if (currentTraj >= candidates.length) {
+                console.log("evaluateTrajectoriesLive: " + validProgressions.length + " valid out of " + candidates.length + " candidates");
+                callback(validProgressions);
+                return;
+            }
+
+            var step = candidates[currentTraj][currentStep];
+            var profileNow = rotationProfiles[Math.min(currentProfile, rotationProfiles.length - 1)] || { name: "none", rotations: [] };
+            var stepRot = profileNow.rotations && profileNow.rotations[currentStep] ? profileNow.rotations[currentStep] : null;
+
+            // Set fold and POV
+            globals.setCreasePercent(step.fold / 100);
+            globals.shouldChangeCreasePercent = true;
+            setPOV(step.pov);
+            if (stepRot) globals.threeView.setModelRotation(stepRot.x, stepRot.y, stepRot.z);
+            else globals.threeView.resetModel();
+            globals.model.step();
+
+            var povLabel = Array.isArray(step.pov) ? "[" + step.pov.join(",") + "]" : step.pov;
+            updateStatus("Phase 2: traj " + (currentTraj + 1) + "/" + candidateCount +
+                         " profile " + (currentProfile + 1) + "/" + profileCount +
+                         " (" + (profileNow.name || "rot") + ")" +
+                         " step " + (currentStep + 1) + "/" + candidates[currentTraj].length +
+                         " fold=" + step.fold + " pov=" + povLabel +
+                         " (" + validProgressions.length + " valid so far)");
+
+            setTimeout(function () {
+                // Measure actual face quality at this POV
+                var allVisibleFaceIds = globals.facePoints && globals.facePoints.getVisibleFaceIds
+                    ? globals.facePoints.getVisibleFaceIds() : [];
+                var faceQualities = globals.facePoints && globals.facePoints.getFaceViewQualities
+                    ? globals.facePoints.getFaceViewQualities(allVisibleFaceIds) : {};
+
+                // Check target faces pass quality threshold (skip fold=0, always passes)
+                if (step.fold > 0) {
+                    for (var ti = 0; ti < targetFaces.length; ti++) {
+                        var q = faceQualities[targetFaces[ti]] || 0;
+                        if (q < minQuality) {
+                            // Trajectory fails — skip to next
+                            currentProfile++;
+                            if (currentProfile >= profileCount) {
+                                currentProfile = 0;
+                                currentTraj++;
+                            }
+                            currentStep = 0;
+                            currentStepQualities = [];
+                            evaluateNext();
+                            return;
+                        }
+                    }
+                }
+
+                var trackedEval = evaluateTrackedPoints(targetPointIndices, currentStep, candidates[currentTraj].length, minPointSeparation);
+                if (!trackedEval.ok) {
+                    currentProfile++;
+                    if (currentProfile >= profileCount) {
+                        currentProfile = 0;
+                        currentTraj++;
+                    }
+                    currentStep = 0;
+                    currentStepQualities = [];
+                    evaluateNext();
+                    return;
+                }
+
+                currentStepQualities.push(faceQualities);
+                currentStep++;
+                evaluateNext();
+            }, settleMs);
+        }
+
+        evaluateNext();
+    }
+
     // ── Scan mode: dense fold × POV face-visibility discovery (no screenshots) ──
 
     function runScan(cfg, onComplete) {
         var foldSteps = cfg.scanFoldSteps || [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
         var povs      = cfg.scanPovs      || ["y", "-y", "z", "-z", "x", "-x", "iso"];
+        // If povGridSize is set, generate a continuous POV grid instead
+        if (cfg.povGridSize && !cfg.scanPovs) {
+            var grid = generatePovGrid(cfg.povGridSize);
+            // Include standard named POVs as well for completeness
+            povs = ["y", "-y", "z", "-z", "x", "-x", "iso"].concat(grid);
+        }
         var settleMs  = cfg.scanSettleMs  != null ? cfg.scanSettleMs : 300;
         var name      = currentBenchmarkName || globals.filename || "scan";
 
@@ -751,8 +1309,10 @@ function initBenchmark(globals) {
         function runCombination(index) {
             if (index >= combinations.length) {
                 // Build per-POV analysis: for each POV, which faces are visible at every fold step?
+                // Skip detailed per-POV analysis for large grids (handled by buildDiverseProgressions)
                 var povAnalysis = {};
-                for (var pi = 0; pi < povs.length; pi++) {
+                var skipPovAnalysis = cfg.povGridSize && povs.length > 20;
+                for (var pi = 0; !skipPovAnalysis && pi < povs.length; pi++) {
                     var pov = povs[pi];
                     var povStates = scanStates.filter(function (s) { return s.pov === pov; });
 
@@ -786,8 +1346,8 @@ function initBenchmark(globals) {
                 }
 
                 // Rank POVs by average minimum quality (primary), then face count (tiebreaker)
-                var recommendedPovs = povs.slice()
-                    .filter(function (p) { return povAnalysis[p].faceCount > 0; })
+                var recommendedPovs = skipPovAnalysis ? [] : povs.slice()
+                    .filter(function (p) { return povAnalysis[p] && povAnalysis[p].faceCount > 0; })
                     .sort(function (a, b) {
                         var qDiff = povAnalysis[b].avgMinQuality - povAnalysis[a].avgMinQuality;
                         if (Math.abs(qDiff) > 1e-6) return qDiff;
@@ -895,33 +1455,69 @@ function initBenchmark(globals) {
                     });
                 }
 
-                var result = {
-                    benchmark:          name,
-                    model:              cfg.model || null,
-                    totalFaces:         totalFaces,
-                    scanPovs:           povs,
-                    scanFoldSteps:      foldSteps,
-                    suggestedSequences: suggestedSequences,
-                    povAnalysis:        povAnalysis
-                };
+                // Phase 2: live trajectory evaluation
+                if (cfg.buildProgressions) {
+                    var targetFaces = cfg.targetFaces || [];
+                    if (targetFaces.length === 0 && cfg.facePoints) {
+                        if (Array.isArray(cfg.facePoints)) {
+                            cfg.facePoints.forEach(function (p) {
+                                if (p.faceId != null && targetFaces.indexOf(p.faceId) === -1) targetFaces.push(p.faceId);
+                            });
+                        } else {
+                            Object.keys(cfg.facePoints).forEach(function (k) {
+                                var id = parseInt(k);
+                                if (!isNaN(id) && targetFaces.indexOf(id) === -1) targetFaces.push(id);
+                            });
+                        }
+                    }
+                    var progQuality = cfg.minFaceQuality != null ? cfg.minFaceQuality : 0.6;
+                    var progCount = typeof cfg.buildProgressions === "number" ? cfg.buildProgressions : 20;
+                    var candidates = generateCandidateTrajectories(scanStates, foldSteps, progCount);
 
-                var blob = new Blob([JSON.stringify(result, null, 2)], { type: "application/json" });
-                var formData = new FormData();
-                formData.append("file", blob, "scan.json");
-                fetch("/api/screenshot?folder=" + encodeURIComponent(name), { method: "POST", body: formData })
-                    .then(function (res) {
-                        if (!res.ok) throw new Error("server error");
-                        console.log("benchmark: saved screenshots/" + name + "/scan.json");
-                    })
-                    .catch(function () {
-                        console.warn("benchmark: could not save scan (server unavailable)");
+                    updateStatus("Phase 2: evaluating " + candidates.length + " trajectories live…");
+                    evaluateTrajectoriesLive(candidates, targetFaces, progQuality, progCount, settleMs, cfg, function (diverseProgressions) {
+                        finishScan(suggestedSequences, diverseProgressions);
                     });
+                    return;
+                }
 
-                var topPovs = suggestedSequences.map(function (s) { return s.pov; });
-                updateStatus("Scan complete. Suggested POVs: " + topPovs.join(", "));
-                console.log("benchmark: scan complete, suggestedSequences:", suggestedSequences);
-                if (onComplete) onComplete();
+                finishScan(suggestedSequences, []);
                 return;
+
+                function finishScan(suggestedSequences, diverseProgressions) {
+                    var result = {
+                        benchmark:          name,
+                        model:              cfg.model || null,
+                        totalFaces:         totalFaces,
+                        scanPovs:           povs.length > 20 ? povs.length + " POVs (grid)" : povs,
+                        scanFoldSteps:      foldSteps,
+                        suggestedSequences: suggestedSequences,
+                        diverseProgressions: diverseProgressions.length > 0 ? diverseProgressions : undefined,
+                        povAnalysis:        cfg.povGridSize ? undefined : povAnalysis
+                    };
+
+                    var blob = new Blob([JSON.stringify(result, null, 2)], { type: "application/json" });
+                    var formData = new FormData();
+                    formData.append("file", blob, "scan.json");
+                    fetch("/api/screenshot?folder=" + encodeURIComponent(name), { method: "POST", body: formData })
+                        .then(function (res) {
+                            if (!res.ok) throw new Error("server error");
+                            console.log("benchmark: saved screenshots/" + name + "/scan.json");
+                        })
+                        .catch(function () {
+                            console.warn("benchmark: could not save scan (server unavailable)");
+                        });
+
+                    if (diverseProgressions.length > 0) {
+                        updateStatus("Scan complete. Built " + diverseProgressions.length + " diverse progressions.");
+                        console.log("benchmark: scan complete, " + diverseProgressions.length + " progressions:", diverseProgressions);
+                    } else {
+                        var topPovs = suggestedSequences.map(function (s) { return s.pov; });
+                        updateStatus("Scan complete. Suggested POVs: " + topPovs.join(", "));
+                    }
+                    console.log("benchmark: scan complete, suggestedSequences:", suggestedSequences);
+                    if (onComplete) onComplete();
+                }
             }
 
             var combo = combinations[index];
@@ -930,7 +1526,8 @@ function initBenchmark(globals) {
             setPOV(combo.pov);
             globals.model.step();
 
-            updateStatus("Scan: fold " + combo.fold + "% pov " + combo.pov +
+            var povLabel = Array.isArray(combo.pov) ? "[" + combo.pov.join(",") + "]" : combo.pov;
+            updateStatus("Scan: fold " + combo.fold + "% pov " + povLabel +
                          " (" + (index + 1) + "/" + combinations.length + ")");
 
             setTimeout(function () {
@@ -1030,7 +1627,7 @@ function initBenchmark(globals) {
                         if (cfg.autoCapture) {
                             var endPov = (Array.isArray(kf) && kf.length > 0) ? kf[kf.length - 1].pov : (anim.pov || "iso");
                             updateStatus("Capturing end state…");
-                            captureScreenshot(stepLabel(anim.to != null ? anim.to : 90, endPov), function () {
+                            captureFinalWithBothStyles(stepLabel(anim.to != null ? anim.to : 90, endPov), stepLabel(anim.to != null ? anim.to : 90, endPov), cfg.labelStyle, function () {
                                 console.log("benchmark: fold animation complete");
                                 if (onComplete) onComplete();
                             });
@@ -1098,10 +1695,10 @@ function initBenchmark(globals) {
         if (cfg.previewRotation) {
             var previewFold = cfg.fold != null ? cfg.fold : (cfg.steps && cfg.steps[0] ? cfg.steps[0].fold : 0);
             runPreviewRotation(cfg.previewRotation, previewFold, false, false, function () {
-                runStep(cfg.steps, 0, cfg.pauseDuration, cfg.autoCapture, cfg.hidePointsDuringAnimation, onComplete);
+                runStep(cfg.steps, 0, cfg.pauseDuration, cfg.autoCapture, cfg.hidePointsDuringAnimation, cfg.labelStyle, onComplete);
             });
         } else {
-            runStep(cfg.steps, 0, cfg.pauseDuration, cfg.autoCapture, cfg.hidePointsDuringAnimation, onComplete);
+            runStep(cfg.steps, 0, cfg.pauseDuration, cfg.autoCapture, cfg.hidePointsDuringAnimation, cfg.labelStyle, onComplete);
         }
     }
 

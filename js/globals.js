@@ -112,7 +112,8 @@ function initGlobals(){
         showFacePointNumbers: true,
         facePoints3D: false,
         hideFacePointsDuringAnimation: false,
-        revealHiddenPoints: false
+        revealHiddenPoints: false,
+        labelStyle: "circle"
     };
 
     function setCreasePercent(percent){

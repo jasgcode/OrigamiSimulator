@@ -61,6 +61,15 @@ The physics simulation runs on the GPU via fragment shaders. GLSL shader source 
 
 jQuery + jQuery UI + Bootstrap + Flat UI. DOM manipulation uses `$()` selectors throughout. No templating or component framework.
 
+### Point annotations
+
+`labelStyle: "arrow"` uses a screen-space overlay (`#pointAnnotationCanvas`) for robust labels/arrows.
+
+- Anchors are projected from true 3D point positions after model rotation
+- Visibility uses `facePoints.isPointVisible()` (facing + occlusion)
+- Labels are text-only and grouped by side (front/back lanes)
+- PNG capture includes this overlay so benchmark outputs match what you see
+
 ## File Structure
 
 ```
@@ -69,6 +78,7 @@ js/
   main.js                 — Initialization and startup sequence
   globals.js              — Shared state and simulation parameters
   model.js                — 3D mesh geometry and materials (Three.js)
+  pointAnnotations.js     — Screen-space arrow label overlay for face points
   threeView.js            — Three.js scene, camera, renderer setup
   controls.js             — UI event handlers and DOM bindings
   pattern.js              — Crease pattern logic
@@ -110,9 +120,18 @@ The benchmark system runs configurable sequences: load a model, apply view/color
 | `pointB` | number | Face ID for highlight/point B. |
 | `facePoints` | object \| array | Points on faces. See [Face points](#face-points) below. |
 | `showPointNumbers` | boolean | Show numbers on face points. Default: true. |
+| `labelStyle` | string | Point label style: `"circle"` (default), `"arrow"` (screen-space connector labels), or `"both"` (final capture saves `stepNN.png` with circle labels and `stepNN_arrow.png` with arrow labels). |
 | `autoCapture` | boolean | Capture PNG at each step (steps flow only). |
 | `autoRun` | boolean | Start sequence automatically after load. |
-| `steps` | array | Step-by-step sequence: `[{ fold, pov }, ...]`. See [Steps](#steps). |
+| `scanMode` | boolean | Run scan/evaluation mode to discover high-visibility sequences (no direct step playback). |
+| `targetPointLabels` | array \| string | Prioritize visibility for specific point labels (e.g. `["A","C"]` or `"A,C"`) when building progressions. |
+| `targetPointIndices` | array \| string | Same as above using zero-based indices (e.g. `[0,2]` or `"0,2"`). |
+| `minPointSeparationPx` | number | Minimum required screen-space separation (px) between tracked points at final step when evaluating candidate progressions. |
+| `rotationYawMax` | number | Max yaw (radians) for auto rotation profiles used during progression evaluation. |
+| `rotationPitchMax` | number | Max pitch (radians) for auto rotation profiles used during progression evaluation. |
+| `rotationRollMax` | number | Max roll (radians) for auto rotation profiles used during progression evaluation. |
+| `rotationProfileCount` | number | Number of built-in rotation profile variants to test per candidate trajectory (1–6). |
+| `steps` | array | Step-by-step sequence: `[{ fold, pov, rotation }, ...]`. See [Steps](#steps). |
 | `previewRotation` | object | Rotate view at fixed fold before fold animation. See [Preview rotation](#preview-rotation). |
 | `foldAnimation` | object | Animate fold over time. See [Fold animation](#fold-animation). |
 
@@ -153,7 +172,7 @@ Step sequence when not using `foldAnimation`. Each step sets fold % and camera P
 ```json
 "steps": [
   { "fold": 0,   "pov": "iso" },
-  { "fold": 50,  "pov": "z" },
+  { "fold": 50,  "pov": "z", "rotation": [0, 0.5, 0] },
   { "fold": 100, "pov": "-z" }
 ]
 ```
@@ -162,6 +181,7 @@ Step sequence when not using `foldAnimation`. Each step sets fold % and camera P
 |-------|------|-------------|
 | `fold` | number | Fold percentage 0–100. |
 | `pov` | string \| array | Camera POV: `iso`, `x`, `-x`, `y`, `-y`, `z`, `-z`, or a continuous direction as `[x, y, z]` array or `"x,y,z"` string (e.g. `[1, 0.5, 0.3]` or `"1,0.5,0.3"`). |
+| `rotation` | array \| object | Optional model rotation as Euler XYZ radians: `[x, y, z]` or `{"x": 0, "y": 1.57, "z": 0}`. Applied after POV (independent of camera). Also supported in `foldAnimation.povKeyframes` and `previewRotation.povKeyframes` for interpolated rotation. |
 
 ### Preview rotation
 
@@ -183,6 +203,10 @@ Rotate the view around the model at a fixed fold (no folding). Runs before `fold
 | `duration` | number | Duration in seconds. Default: 2. |
 | `povKeyframes` | array | `[{ progress, pov }, ...]` — progress 0–100. |
 | `fold` | number | Optional override for fold % during preview (otherwise uses top-level `fold`). |
+| `trackModel` | boolean | Rotate model (camera fixed) during preview so points stay in view. |
+| `fitAllPoints` | boolean | Zoom out so entire model stays in view during camera-orbit preview. |
+
+`previewRotation.trackModel` and `previewRotation.fitAllPoints` apply in both steps mode and fold-animation mode.
 
 ### Fold animation
 
@@ -219,6 +243,23 @@ Animate fold from one % to another over time, with optional POV transition.
 ### URL parameters
 
 Any JSON parameter can be overridden via URL: `?benchmark=waterbomb-animate&color1=ff0000&pauseDuration=5`. See `js/benchmark.js` for the full URL parameter list.
+
+### Scaling up front/back sequences
+
+Use scan mode to auto-discover high-visibility step sequences (POV + rotation) that keep tracked points visible.
+
+1. Create a seed preset with model, face points, and scan options:
+   - `scanMode: true`
+   - `scanFoldSteps` for desired fold frames
+   - `povGridSize` (e.g. 100–160)
+   - `buildProgressions` target count
+   - `targetPointLabels` (e.g. `["A","C"]`)
+   - `minPointSeparationPx` (e.g. `70–100`)
+   - rotation bounds (`rotationYawMax`, `rotationPitchMax`, `rotationRollMax`)
+
+2. Run the preset. The benchmark system writes `screenshots/<preset-name>/scan.json` containing `diverseProgressions`.
+
+3. Copy selected `diverseProgressions[*].steps` into new fixed presets for dataset generation.
 
 ---
 
