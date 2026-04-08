@@ -1,0 +1,5 @@
+name: internvl3.5-latest
+base_url: https://chat.intern-ai.org.cn/api/v1
+api_key_env: API_KEY
+context_window: 32768
+max_output_tokens: 32768

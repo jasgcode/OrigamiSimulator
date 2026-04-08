@@ -88,6 +88,60 @@ function initThreeView(globals) {
         controls.reset(new THREE.Vector3(1,1,1));
     }
 
+    // Minimum distance so the entire model fits in the camera view (no clipping).
+    // Uses bounding sphere of mesh geometry and camera FOV.
+    function getMinCameraDistanceToFitModel() {
+        var meshArray = globals.model && globals.model.getMesh ? globals.model.getMesh() : null;
+        if (!meshArray || !meshArray[0] || !meshArray[0].geometry) return null;
+        var geo = meshArray[0].geometry;
+        if (!geo.computeBoundingSphere) return null;
+        geo.computeBoundingSphere();
+        var R = geo.boundingSphere.radius;
+        if (R <= 0) return null;
+        var fovRad = (camera.fov || 60) * Math.PI / 180;
+        var minDist = R / Math.tan(fovRad / 2);
+        var margin = 1.08;
+        return Math.max(minDist * margin, controls.minDistance);
+    }
+
+    // Set camera to an arbitrary position vector (direction from origin).
+    // Used for smooth POV transitions during benchmark animation.
+    // fitAllPoints: if true, scales distance so the entire model always stays in view.
+    function setCameraToPosition(positionVec, fitAllPoints, preserveModelRotation) {
+        if (!preserveModelRotation) resetModel();
+        var pos = positionVec.clone();
+        if (fitAllPoints) {
+            var minDist = getMinCameraDistanceToFitModel();
+            if (minDist != null) pos.normalize().multiplyScalar(minDist);
+        }
+        controls.reset(pos);
+    }
+
+    // Fixed camera for "track model" mode: camera stays at iso, zoomed to fit entire model.
+    // Use with setModelRotationForPOV — the model rotates, camera tracks (always sees all points).
+    function setCameraFixedForTracking() {
+        var isoDir = new THREE.Vector3(1, 1, 1).normalize();
+        var minDist = getMinCameraDistanceToFitModel();
+        var pos = isoDir.clone().multiplyScalar(minDist != null ? minDist : 7);
+        resetModel();
+        controls.reset(pos);
+    }
+
+    // Rotate the model so that POV direction faces the camera.
+    // Camera stays fixed at iso; model rotates to achieve the requested view.
+    // povDir: normalized direction (where "camera would be" for that POV).
+    function setModelRotationForPOV(povDir) {
+        var isoDir = new THREE.Vector3(1, 1, 1).normalize();
+        var d = povDir.clone().normalize();
+        if (d.lengthSq() < 0.0001) return;
+        if (Math.abs(d.dot(isoDir)) > 0.9999) {
+            modelWrapper.rotation.set(0, 0, 0);
+            return;
+        }
+        var q = new THREE.Quaternion().setFromUnitVectors(d, isoDir);
+        modelWrapper.rotation.setFromQuaternion(q);
+    }
+
     function startAnimation(){
         console.log("starting animation");
         renderer.animate(_loop);
@@ -110,15 +164,35 @@ function initThreeView(globals) {
             return;
         }
         renderer.render(scene, camera);
+        if (globals.pointAnnotations && globals.pointAnnotations.render) globals.pointAnnotations.render();
         if (globals.capturer) {
             if (globals.capturer == "png"){
                 var canvas = globals.threeView.renderer.domElement;
-                canvas.toBlob(function(blob) {
-                    saveAs(blob, globals.screenRecordFilename + ".png");
-                }, "image/png");
+                var annotationCanvas = (globals.pointAnnotations && globals.pointAnnotations.getCanvas)
+                    ? globals.pointAnnotations.getCanvas()
+                    : null;
+                var _captureCallback = globals.captureCallback || null;
                 globals.capturer = null;
+                globals.captureCallback = null;
                 globals.shouldScaleCanvas = false;
                 globals.shouldAnimateFoldPercent = false;
+                var sourceCanvas = canvas;
+                if (annotationCanvas && annotationCanvas.style.display !== "none") {
+                    var merged = document.createElement("canvas");
+                    merged.width = canvas.width;
+                    merged.height = canvas.height;
+                    var mergedCtx = merged.getContext("2d");
+                    mergedCtx.drawImage(canvas, 0, 0);
+                    mergedCtx.drawImage(annotationCanvas, 0, 0, merged.width, merged.height);
+                    sourceCanvas = merged;
+                }
+                sourceCanvas.toBlob(function(blob) {
+                    if (_captureCallback) {
+                        _captureCallback(blob);
+                    } else {
+                        saveAs(blob, globals.screenRecordFilename + ".png");
+                    }
+                }, "image/png");
                 globals.threeView.onWindowResize();
                 return;
             }
@@ -170,6 +244,7 @@ function initThreeView(globals) {
         if (globals.shouldScaleCanvas) scale = globals.capturerScale;
         renderer.setSize(scale*window.innerWidth, scale*window.innerHeight);
         controls.handleResize();
+        if (globals.pointAnnotations && globals.pointAnnotations.onResize) globals.pointAnnotations.onResize();
     }
 
     function enableControls(state){
@@ -213,6 +288,10 @@ function initThreeView(globals) {
         modelWrapper.rotation.set(0,0,0);
     }
 
+    function setModelRotation(x, y, z){
+        modelWrapper.rotation.set(x, y, z);
+    }
+
     function setBackgroundColor(color){
         if (color === undefined) color = globals.backgroundColor;
         scene.background.setStyle( "#" + color);
@@ -238,9 +317,13 @@ function initThreeView(globals) {
         setCameraY: setCameraY,
         setCameraZ: setCameraZ,
         setCameraIso: setCameraIso,
+        setCameraToPosition: setCameraToPosition,
+        setCameraFixedForTracking: setCameraFixedForTracking,
+        setModelRotationForPOV: setModelRotationForPOV,
 
         resetModel: resetModel,//reset model orientation
         resetCamera:resetCamera,
-        setBackgroundColor: setBackgroundColor
+        setBackgroundColor: setBackgroundColor,
+        setModelRotation: setModelRotation
     }
 }

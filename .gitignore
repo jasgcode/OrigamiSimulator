@@ -5,3 +5,5 @@ todo.rtf
 node_modules
 CreasePatternScripts/**/*.pdf
 CreasePatternScripts/**/*.svg
+screenshots
+.env*
