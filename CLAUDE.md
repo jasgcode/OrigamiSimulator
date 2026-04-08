@@ -123,6 +123,7 @@ The benchmark system runs configurable sequences: load a model, apply view/color
 | `labelStyle` | string | Point label style: `"circle"` (default), `"arrow"` (screen-space connector labels), or `"both"` (final capture saves `stepNN.png` with circle labels and `stepNN_arrow.png` with arrow labels). |
 | `autoCapture` | boolean | Capture PNG at each step (steps flow only). |
 | `autoRun` | boolean | Start sequence automatically after load. |
+| `difficulty` | number | Difficulty tier 1–5 (1 = easiest, 5 = hardest). Metadata for dataset labeling. |
 | `scanMode` | boolean | Run scan/evaluation mode to discover high-visibility sequences (no direct step playback). |
 | `targetPointLabels` | array \| string | Prioritize visibility for specific point labels (e.g. `["A","C"]` or `"A,C"`) when building progressions. |
 | `targetPointIndices` | array \| string | Same as above using zero-based indices (e.g. `[0,2]` or `"0,2"`). |
