@@ -108,8 +108,12 @@ function initGlobals(){
         highlightedFaceA: -1,
         highlightedFaceB: -1,
 
-        highlightedTriFaceA: -1,
-        highlightedTriFaceB: -1
+        clickToAddFacePoints: false,
+        showFacePointNumbers: true,
+        facePoints3D: false,
+        hideFacePointsDuringAnimation: false,
+        revealHiddenPoints: false,
+        labelStyle: "circle"
     };
 
     function setCreasePercent(percent){

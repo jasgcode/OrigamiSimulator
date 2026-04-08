@@ -563,20 +563,20 @@ function initControls(globals){
         globals.ambientOcclusion = val;
     });
 
-    if (globals.colorMode == "color") $("#coloredMaterialOptions").show();
+    if (globals.colorMode == "color" || globals.colorMode == "greyscale") $("#coloredMaterialOptions").show();
     else $("#coloredMaterialOptions").hide();
     if (globals.colorMode == "axialStrain") $("#axialStrainMaterialOptions").show();
     else $("#axialStrainMaterialOptions").hide();
     if (globals.colorMode == "faceID") $("#faceIDOptions").show();
     else $("#faceIDOptions").hide();
-    if (globals.colorMode == "faceTriangleID") $("#faceTriangleIDOptions").show();
+    if (globals.colorMode == "faceTriangleID" || globals.colorMode == "labelOnly") $("#faceTriangleIDOptions").show();
     else $("#faceTriangleIDOptions").hide();
     if (globals.colorMode == "labelOnly") $("#labelOnlyOptions").show();
     else $("#labelOnlyOptions").hide();
 
     function setColorMode(val){
         globals.colorMode = val;
-        if (val == "color") {
+        if (val == "color" || val == "greyscale") {
             $("#coloredMaterialOptions").show();
             $("#colorToggle>div").addClass("active");
             $("#strainToggle>div").removeClass("active");
@@ -590,8 +590,10 @@ function initControls(globals){
         else $("#axialStrainMaterialOptions").hide();
         if (val == "faceID") $("#faceIDOptions").show();
         else $("#faceIDOptions").hide();
-        if (val == "faceTriangleID") $("#faceTriangleIDOptions").show();
-        else $("#faceTriangleIDOptions").hide();
+        if (val == "faceTriangleID" || val == "labelOnly") {
+            $("#faceTriangleIDOptions").show();
+            if (typeof refreshFacePointList === "function") refreshFacePointList();
+        } else $("#faceTriangleIDOptions").hide();
         if (val == "labelOnly") $("#labelOnlyOptions").show();
         else $("#labelOnlyOptions").hide();
         $(".radio>input[value="+val+"]").prop("checked", true);
@@ -623,21 +625,44 @@ function initControls(globals){
         onHighlightChange();
     });
 
-    $("#highlightTriFaceA, #labelOnlyFaceA").on("change", function(){
-        var val = $(this).val();
-        globals.highlightedTriFaceA = (val === "" || isNaN(parseInt(val))) ? -1 : parseInt(val);
-        //sync both inputs
-        $("#highlightTriFaceA").val(globals.highlightedTriFaceA >= 0 ? globals.highlightedTriFaceA : "");
-        $("#labelOnlyFaceA").val(globals.highlightedTriFaceA >= 0 ? globals.highlightedTriFaceA : "");
+    function refreshFacePointList(){
+        if (!globals.facePoints) return;
+        var pts = globals.facePoints.getPoints();
+        var html = "";
+        for (var i = 0; i < pts.length; i++){
+            html += "<span class=\"facePointItem\" data-index=\"" + i + "\">" + (i + 1) + ": Face " + pts[i].faceId + " <a href=\"#\" class=\"facePointRemove\">×</a></span><br/>";
+        }
+        $("#facePointList").html(html || "(none)");
+        $("#facePointList .facePointRemove").on("click", function(e){
+            e.preventDefault();
+            var idx = parseInt($(this).closest(".facePointItem").data("index"), 10);
+            globals.facePoints.removePoint(idx);
+            refreshFacePointList();
+            onHighlightChange();
+        });
+    }
+    $("#addFacePoint").on("click", function(e){
+        e.preventDefault();
+        if (!globals.facePoints) return;
+        var val = $("#facePointFaceId").val();
+        var faceId = (val === "" || isNaN(parseInt(val))) ? 0 : parseInt(val);
+        var N = globals.model.getFaces().length * 2;
+        if (faceId < 0 || faceId >= N) return;
+        globals.facePoints.addPoint(faceId);
+        refreshFacePointList();
         onHighlightChange();
     });
-    $("#highlightTriFaceB, #labelOnlyFaceB").on("change", function(){
-        var val = $(this).val();
-        globals.highlightedTriFaceB = (val === "" || isNaN(parseInt(val))) ? -1 : parseInt(val);
-        //sync both inputs
-        $("#highlightTriFaceB").val(globals.highlightedTriFaceB >= 0 ? globals.highlightedTriFaceB : "");
-        $("#labelOnlyFaceB").val(globals.highlightedTriFaceB >= 0 ? globals.highlightedTriFaceB : "");
-        onHighlightChange();
+
+    setCheckbox("#clickToAddFacePoints", globals.clickToAddFacePoints, function(val){
+        globals.clickToAddFacePoints = val;
+    });
+    setCheckbox("#showFacePointNumbers", globals.showFacePointNumbers, function(val){
+        globals.showFacePointNumbers = val;
+        if (globals.colorMode === "faceTriangleID" || globals.colorMode === "labelOnly") globals.model.updateFaceColors();
+    });
+    setCheckbox("#facePoints3D", globals.facePoints3D, function(val){
+        globals.facePoints3D = val;
+        if (globals.colorMode === "faceTriangleID" || globals.colorMode === "labelOnly") globals.model.updateFaceColors();
     });
 
     setHexInput("#labelOnlyColor1", globals.color1, function(val){
@@ -692,6 +717,24 @@ function initControls(globals){
         globals.model.updateMeshVisibility();
         if (globals.meshVisible) $("#meshMaterialOptions").show();
         else $("#meshMaterialOptions").hide();
+    });
+
+    setLink("#runBenchmark", function(){
+        if (globals.benchmark) globals.benchmark.run();
+    });
+    setLink("#runAllBenchmarks", function(){
+        if (globals.benchmark && globals.benchmark.runAll) {
+            var path = $("#benchmarkJsonPath").length ? $("#benchmarkJsonPath").val() || "benchmarks.json" : "benchmarks.json";
+            globals.benchmark.runAll(path);
+        }
+    });
+    $("#benchmarkJsonPath").on("change", function(){
+        var path = $(this).val();
+        if (globals.benchmark && globals.benchmark.loadJson) globals.benchmark.loadJson(path);
+    });
+    $("#benchmarkPresetSelect").on("change", function(){
+        var val = $(this).val();
+        if (globals.benchmark && globals.benchmark.selectPreset) globals.benchmark.selectPreset(val || null);
     });
 
     setLink("#aboutError", function(){
@@ -998,7 +1041,7 @@ function initControls(globals){
     return {
         setDeltaT: setDeltaT,
         updateCreasePercent: updateCreasePercent,
-        setSliderInputVal: setSliderInputVal
+        setSliderInputVal: setSliderInputVal,
+        refreshFacePointList: refreshFacePointList
     }
 }
-
