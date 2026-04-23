@@ -1,0 +1,22 @@
+name: origami_tracking
+answer_type: list
+answer_key: initialPoints
+
+question_template: |
+  [Task]
+  You are solving origami point tracking.
+  In this task, you must identify which labeled points on a folded piece of paper correspond to the unmarked dots placed on the original flat (unfolded) paper. The first image shows the flat paper with {num_initial} unmarked dot(s) printed on it. The following images show the same paper being folded step by step. The final image shows the fully folded result, with every visible point labeled using the letters {all_labels}. Paper is opaque: points on the back side may be hidden by overlying layers, and the same physical dot may appear in different positions across steps as the paper folds. You must track each unmarked dot through the fold sequence and report the letter(s) in the final image that correspond to the original unmarked dot(s).
+
+  The visual evidence for this question is provided as the attached images, in order from flat to fully folded.
+
+  [Rules]
+  1. Use only the images and text provided in this prompt.
+  2. If answer options are provided, choose only from the provided options.
+  3. Do not output explanation beyond the required final answer.
+
+  [Question]
+  Which lettered point(s) in the final folded image correspond to the unmarked dot(s) shown on the flat paper in the first image? List the matching letter(s).
+  [image]
+  [Answer Format]
+  Output exactly one JSON object: {{"answer": <json_answer_value>}} and nothing else.
+  Replace <json_answer_value> with a JSON array of uppercase letters chosen from [{all_labels}], with no duplicates, e.g. ["A", "C"].

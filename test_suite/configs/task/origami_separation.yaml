@@ -1,0 +1,22 @@
+name: origami_separation
+answer_type: lists
+answer_key: sides
+
+question_template: |
+  [Task]
+  You are solving origami front/back separation.
+  In this task, you must determine, for each labeled point on a folded piece of paper, which side of the folded result it lies on — the front (the side facing the camera in the final image) or the back (the opposite side). The first image shows the flat, unfolded paper with {num_initial} unmarked dot(s) printed on it. The following images show the paper being folded step by step. The final image shows the fully folded result with every point labeled using the letters {all_labels}. Paper is opaque: a point on the back side may be hidden by overlying layers in the final image, and you must infer its side from the fold sequence rather than from visibility alone. "Front" means the surface of the paper visible from the camera's viewpoint in the final image; "back" means the opposite surface of the paper.
+  If this task depends on a specific visual definition, use this definition exactly: Front = the paper surface facing the camera in the final folded image; Back = the opposite paper surface.
+  The visual evidence for this question is provided as the attached images, in order from flat to fully folded.
+
+  [Rules]
+  1. Use only the images and text provided in this prompt.
+  2. If answer options are provided, choose only from the provided options.
+  3. Do not output explanation beyond the required final answer.
+
+  [Question]
+  For each labeled point in the final folded image, state which side of the folded paper it lies on — front or back.
+
+  [Answer Format]
+  Output exactly one JSON object: {{"answer": "Front: <letters> | Back: <letters>"}} and nothing else.
+  Replace <letters> with a comma-separated list of uppercase letters chosen from [{all_labels}]. Each label must appear exactly once, on either the Front or the Back side. If a side has no labels, write an empty list after its colon (e.g. "Front:  | Back: A, B, C").

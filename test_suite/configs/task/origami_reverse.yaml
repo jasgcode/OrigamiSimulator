@@ -1,0 +1,22 @@
+name: origami_reverse
+answer_type: list
+answer_key: initialPoints
+
+question_template: |
+  [Task]
+  You are solving origami reverse point tracking.
+  In this task, you must identify which labeled points on a folded piece of paper will end up at the location of the unmarked dot(s) once the paper is unfolded back to flat. The first image shows the fully folded paper with every visible point labeled using the letters {all_labels}. The following images show the paper being reversed (unfolded) step by step. The final image shows the flat, unfolded paper with {num_initial} unmarked dot(s) printed on it. Paper is opaque: in the folded state, points on the back side may be hidden by overlying layers, and the same physical point may appear in different positions across steps as the paper unfolds. You must track each labeled point back through the unfold sequence and report which letter(s) land on the unmarked dot(s) in the flat image.
+  If this task depends on a specific visual definition, use this definition exactly: not applicable
+  The visual evidence for this question is provided as the attached images, in order from fully folded to flat.
+
+  [Rules]
+  1. Use only the images and text provided in this prompt.
+  2. If answer options are provided, choose only from the provided options.
+  3. Do not output explanation beyond the required final answer.
+
+  [Question]
+  Which lettered point(s) from the folded first image correspond to the unmarked dot(s) on the flat paper in the final image? List the matching letter(s).
+
+  [Answer Format]
+  Output exactly one JSON object: {{"answer": <json_answer_value>}} and nothing else.
+  Replace <json_answer_value> with a JSON array of uppercase letters chosen from [{all_labels}], with no duplicates, e.g. ["A", "C"].

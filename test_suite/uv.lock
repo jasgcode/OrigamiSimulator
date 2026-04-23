@@ -492,6 +492,7 @@ dependencies = [
     { name = "hydra-core" },
     { name = "openai" },
     { name = "python-dotenv" },
+    { name = "tqdm" },
     { name = "wandb" },
 ]
 
@@ -500,6 +501,7 @@ requires-dist = [
     { name = "hydra-core" },
     { name = "openai" },
     { name = "python-dotenv" },
+    { name = "tqdm" },
     { name = "wandb" },
 ]
 
