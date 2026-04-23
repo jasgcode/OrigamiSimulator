@@ -7,5 +7,6 @@ dependencies = [
     "hydra-core",
     "openai",
     "python-dotenv",
+    "tqdm",
     "wandb",
 ]

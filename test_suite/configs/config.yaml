@@ -1,9 +1,16 @@
 defaults:
   - model: internvl_baseline
   - wandb: default
+  - task: origami_separation
   - _self_
 
 eval:
   max_tokens: 32768
   temperature: 0.0
-  max_concurrency: 1
+  max_concurrency: 5
+  color_mode_success:
+    enabled: true
+    modes: [labelOnly, faceTriangleID, greyscaleLabel]
+    benchmark_json_paths:
+      - candidates/bird-frontback.json
+      - benchmarks.json

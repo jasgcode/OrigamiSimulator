@@ -1,7 +1,7 @@
-mode: off
+mode: auto
 project: origami-eval
 entity: null
-name: null
+name: Origami_reverse_internvl_baseline
 tags: []
 group: null
 job_type: eval
