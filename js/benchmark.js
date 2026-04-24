@@ -22,6 +22,10 @@
  *   povEnd       — camera POV at last step
  *   fold         — initial fold % (0-100) before any animation; use top-level, not inside animation blocks
  *   pauseDuration — seconds to wait before starting (animation flow) or at each step (steps flow); default 2
+ *   stepLabelPrefix — prefix text for step overlay (default: "Step")
+ *   stepLabelFontSize — step overlay font size in px
+ *   stepLabelShowTotal — "false" to show only current index (e.g. "State 2") instead of "2/5"
+ *   trackingEvalMode — tracking strictness: "strictAllSteps" (default) or "finalStepOnly"
  *   autoCapture  — "true" to capture PNG at each step
  *   autoRun      — "true" to start sequence automatically after load
  *   foldAnimation — "true" to animate fold 0→90 over 4s (or use foldAnimFrom/foldAnimTo/foldAnimDuration).
@@ -50,6 +54,9 @@ function initBenchmark(globals) {
     var stateAccumulator = [];   // collects { fold, pov, visiblePoints } per captured step
     var capturedFiles = [];      // ordered PNG filenames saved this run (for dataset JSON)
     var datasetSampleCounter = 0; // monotonic integer ID across all benchmark runs in session
+    var stepLabelPrefix = "STATE";
+    var stepLabelFontSize = null;
+    var stepLabelShowTotal = true;
 
     // ── URL parameter helpers ──
 
@@ -168,6 +175,8 @@ function initBenchmark(globals) {
     // ── Apply settings (colorMode, highlights) ──
 
     function applySettings(cfg) {
+        applyStepOverlayConfig(cfg);
+
         if (cfg.colorMode) {
             globals.colorMode = cfg.colorMode;
             // update radio UI
@@ -176,7 +185,7 @@ function initBenchmark(globals) {
             $("#coloredMaterialOptions").toggle(cfg.colorMode === "color" || cfg.colorMode === "greyscale");
             $("#axialStrainMaterialOptions").toggle(cfg.colorMode === "axialStrain");
             $("#faceIDOptions").toggle(cfg.colorMode === "faceID");
-            $("#faceTriangleIDOptions").toggle(cfg.colorMode === "faceTriangleID" || cfg.colorMode === "labelOnly");
+            $("#faceTriangleIDOptions").toggle(cfg.colorMode === "faceTriangleID" || cfg.colorMode === "labelOnly" || cfg.colorMode === "greyscaleLabel");
             $("#labelOnlyOptions").toggle(cfg.colorMode === "labelOnly");
             globals.model.setMeshMaterial();
         }
@@ -184,7 +193,7 @@ function initBenchmark(globals) {
         if (cfg.pointA !== undefined && cfg.pointA !== null) {
             var val = parseInt(cfg.pointA);
             if (!isNaN(val)) {
-                if (globals.colorMode === "faceTriangleID" || globals.colorMode === "labelOnly") {
+                if (globals.colorMode === "faceTriangleID" || globals.colorMode === "labelOnly" || globals.colorMode === "greyscaleLabel") {
                     if (globals.facePoints) {
                         globals.facePoints.clearPoints();
                         globals.facePoints.addPoint(val);
@@ -201,7 +210,7 @@ function initBenchmark(globals) {
         if (cfg.pointB !== undefined && cfg.pointB !== null) {
             var val = parseInt(cfg.pointB);
             if (!isNaN(val)) {
-                if (globals.colorMode === "faceTriangleID" || globals.colorMode === "labelOnly") {
+                if (globals.colorMode === "faceTriangleID" || globals.colorMode === "labelOnly" || globals.colorMode === "greyscaleLabel") {
                     if (globals.facePoints) globals.facePoints.addPoint(val);
                     if (globals.controls && globals.controls.refreshFacePointList) globals.controls.refreshFacePointList();
                 } else {
@@ -212,7 +221,7 @@ function initBenchmark(globals) {
             }
         }
 
-        if (cfg.facePoints && globals.facePoints && (globals.colorMode === "faceTriangleID" || globals.colorMode === "labelOnly")) {
+        if (cfg.facePoints && globals.facePoints && (globals.colorMode === "faceTriangleID" || globals.colorMode === "labelOnly" || globals.colorMode === "greyscaleLabel")) {
             globals.facePoints.initFromConfig(cfg.facePoints);
             if (globals.controls && globals.controls.refreshFacePointList) globals.controls.refreshFacePointList();
             globals.model.updateFaceColors();
@@ -249,7 +258,7 @@ function initBenchmark(globals) {
             if ($("#labelOnlyColor2").length) $("#labelOnlyColor2").val(c2);
         }
         if ((cfg.color1 !== undefined && cfg.color1 !== null) || (cfg.color2 !== undefined && cfg.color2 !== null)) {
-            if (globals.colorMode === "labelOnly" || globals.colorMode === "color" || globals.colorMode === "greyscale") globals.model.setMeshMaterial();
+            if (globals.colorMode === "labelOnly" || globals.colorMode === "greyscaleLabel" || globals.colorMode === "color" || globals.colorMode === "greyscale") globals.model.setMeshMaterial();
         }
     }
 
@@ -272,6 +281,48 @@ function initBenchmark(globals) {
     // e.g. index 0 → "step01", index 4 → "step05"
     function stepFilename(index) {
         return "step" + padNum(index + 1, 2);
+    }
+
+    // ── Step number overlay ──
+    var $stepOverlay = null;
+    function getStepNumberText(index, total) {
+        var stepNumber = index + 1;
+        return stepLabelPrefix + " " + (stepLabelShowTotal ? (stepNumber + "/" + total) : stepNumber);
+    }
+    function applyStepOverlayConfig(cfg) {
+        var labelPrefix = cfg && cfg.stepLabelPrefix;
+        if (labelPrefix !== undefined && labelPrefix !== null && String(labelPrefix).trim() !== "") {
+            stepLabelPrefix = String(labelPrefix).trim();
+        } else {
+            stepLabelPrefix = "Step";
+        }
+
+        var fontSize = cfg ? parseFloat(cfg.stepLabelFontSize) : NaN;
+        if (!isNaN(fontSize) && fontSize > 0) {
+            stepLabelFontSize = fontSize;
+        } else {
+            stepLabelFontSize = null;
+        }
+
+        stepLabelShowTotal = !(cfg && cfg.stepLabelShowTotal === false);
+
+        if (!$stepOverlay) $stepOverlay = $("#stepNumberOverlay");
+        if (stepLabelFontSize !== null) {
+            $stepOverlay.css("font-size", stepLabelFontSize + "px");
+        } else {
+            $stepOverlay.css("font-size", "");
+        }
+    }
+    function showStepNumber(index, total) {
+        if (!$stepOverlay) $stepOverlay = $("#stepNumberOverlay");
+        var text = getStepNumberText(index, total);
+        $stepOverlay.text(text).show();
+        globals.stepNumberText = text;
+    }
+    function hideStepNumber() {
+        if (!$stepOverlay) $stepOverlay = $("#stepNumberOverlay");
+        $stepOverlay.hide();
+        globals.stepNumberText = null;
     }
 
     // ── Screenshot capture ──
@@ -330,10 +381,10 @@ function initBenchmark(globals) {
         }
 
         var hiddenPoints = globals.facePoints.getHiddenIndices ? globals.facePoints.getHiddenIndices() : [];
-        // Map hidden point indices to their letter labels (A, B, C, ...)
+        // Map hidden point indices to labels (A, B, ..., Z, AA, AB, ...)
         var hiddenPointLabels = {};
         for (var hi = 0; hi < hiddenPoints.length; hi++) {
-            hiddenPointLabels[hiddenPoints[hi]] = String.fromCharCode(65 + (hi % 26));
+            hiddenPointLabels[hiddenPoints[hi]] = pointIndexToLabel(hiddenPoints[hi]);
         }
 
         var summary = {
@@ -358,73 +409,70 @@ function initBenchmark(globals) {
                 console.warn("benchmark: could not save summary (server unavailable)");
             });
 
-        saveDatasetJson(name, summary);
+        saveMetadataJson(name, summary);
     }
 
-    // Generates a DESIGN_PROTOCOL-compliant dataset JSON alongside the summary.
-    // One sample per benchmark: asks which lettered points in the final folded state
-    // correspond to the original unmarked dots on the flat paper.
-    function saveDatasetJson(name, summary) {
+    // Saves metadata JSON (no eval questions/answers — those are in Hydra config).
+    // One entry per benchmark with images, point info, and difficulty.
+    function saveMetadataJson(name, summary) {
         if (capturedFiles.length === 0) return;
-        var samples = [];
         var images = capturedFiles.slice();
-        var task = "order_origami_tracking";
 
-        // Build the list of ALL letter labels in the final state (A, B, C, ...)
+        // Build the list of ALL labels in the final state (A, B, ..., Z, AA, AB, ...)
         // and identify which are the "initial" (non-hidden) points.
         var allLabels = [];
         var initialLabels = [];
-        var letterIndex = 0;
         for (var i = 0; i < summary.totalPoints; i++) {
-            var letter = String.fromCharCode(65 + (letterIndex % 26));
+            var letter = pointIndexToLabel(i);
             allLabels.push(letter);
-            letterIndex++;
             var isHidden = summary.hiddenPoints.indexOf(i) !== -1;
             if (!isHidden) {
                 initialLabels.push(letter);
             }
         }
 
-        var optionsList = allLabels.slice().sort();
-        var answerSorted = initialLabels.slice().sort();
-        var numInitial = initialLabels.length;
-
-        samples.push({
-            id:            datasetSampleCounter++,
-            question:      "The first image show an unfolded paper with " + numInitial +
-                           " unmarked dot(s). The paper is then folded through a sequence of steps." +
-                           " The last image shows the folded result with all points labeled " +
-                           optionsList.join(", ") + "." +
-                           " Which lettered point(s) correspond to the original unmarked dot(s)?" +
-                           " List the letter(s) separated by commas.",
-            answer:        answerSorted.join(", "),
-            images:        images,
-            task:          task,
-            category:      "order",
-            level:         "perception",
-            question_type: "origami_point_tracking",
-            answer_type:   "list",
-            options:       optionsList,
-            metadata: {
-                benchmark:         name,
-                totalPoints:       summary.totalPoints,
-                initialPoints:     initialLabels,
-                hiddenPoints:      summary.hiddenPoints,
-                allLabels:         allLabels,
-                hiddenPointLabels: summary.hiddenPointLabels
+        // Separate points by side: front (faceId < N) vs back (faceId >= N)
+        var frontPoints = [];
+        var backPoints = [];
+        var pts = globals.facePoints && globals.facePoints.getPoints ? globals.facePoints.getPoints() : [];
+        var faces = globals.model && globals.model.getFaces ? globals.model.getFaces() : [];
+        var N = faces.length;
+        for (var pi = 0; pi < pts.length; pi++) {
+            var label = allLabels[pi] || pointIndexToLabel(pi);
+            if (pts[pi].faceId < N) {
+                frontPoints.push(label);
+            } else {
+                backPoints.push(label);
             }
-        });
+        }
+        frontPoints.sort();
+        backPoints.sort();
+
+        var samples = [{
+            id:                datasetSampleCounter++,
+            images:            images,
+            benchmark:         name,
+            colorMode:         globals.colorMode || null,
+            difficulty:        config && config.difficulty != null ? config.difficulty : null,
+            totalPoints:       summary.totalPoints,
+            initialPoints:     initialLabels,
+            hiddenPoints:      summary.hiddenPoints,
+            allLabels:         allLabels,
+            hiddenPointLabels: summary.hiddenPointLabels,
+            frontPoints:       frontPoints,
+            backPoints:        backPoints
+        }];
 
         var blob = new Blob([JSON.stringify(samples, null, 2)], { type: "application/json" });
         var formData = new FormData();
-        formData.append("file", blob, "dataset.json");
+        formData.append("file", blob, "metadata.json");
         fetch("/api/screenshot?folder=" + encodeURIComponent(name), { method: "POST", body: formData })
             .then(function (res) {
                 if (!res.ok) throw new Error("server error");
-                console.log("benchmark: saved screenshots/" + name + "/dataset.json");
+                console.log("benchmark: saved screenshots/" + name + "/metadata.json");
             })
             .catch(function () {
-                console.warn("benchmark: could not save dataset JSON (server unavailable)");
+                console.warn("benchmark: could not save metadata JSON (server unavailable)");
             });
     }
 
@@ -661,6 +709,7 @@ function initBenchmark(globals) {
         if (index >= steps.length) {
             globals.hideFacePointsDuringAnimation = false;
             running = false;
+            hideStepNumber();
             updateStatus("Benchmark complete (" + steps.length + " steps).");
             console.log("benchmark: sequence complete");
             saveBenchmarkSummary(currentBenchmarkName || globals.filename || "benchmark");
@@ -672,6 +721,7 @@ function initBenchmark(globals) {
         currentStep = index;
         var step = steps[index];
 
+        showStepNumber(index, steps.length);
         updateStatus("Step " + (index + 1) + "/" + steps.length +
                      " — fold " + step.fold + "%" +
                      (step.pov ? ", POV " + step.pov : ""));
@@ -781,6 +831,17 @@ function initBenchmark(globals) {
         var pauseDuration = getParamFloat("pauseDuration");
         if (pauseDuration !== null) cfg.pauseDuration = pauseDuration;
 
+        var trackingEvalMode = getParam("trackingEvalMode");
+        if (trackingEvalMode) cfg.trackingEvalMode = trackingEvalMode;
+
+        var stepLabelPrefixParam = getParam("stepLabelPrefix");
+        if (stepLabelPrefixParam !== null && stepLabelPrefixParam !== undefined) cfg.stepLabelPrefix = stepLabelPrefixParam;
+
+        var stepLabelFontSizeParam = getParamFloat("stepLabelFontSize");
+        if (stepLabelFontSizeParam !== null) cfg.stepLabelFontSize = stepLabelFontSizeParam;
+
+        if (getParam("stepLabelShowTotal") !== null) cfg.stepLabelShowTotal = getParamBool("stepLabelShowTotal");
+
         if (getParam("autoCapture") !== null) cfg.autoCapture = getParamBool("autoCapture");
         if (getParam("autoRun") !== null) cfg.autoRun = getParamBool("autoRun");
         if (getParam("showPointNumbers") !== null) cfg.showPointNumbers = getParamBool("showPointNumbers");
@@ -812,6 +873,20 @@ function initBenchmark(globals) {
         if (rotationRollMax !== null) cfg.rotationRollMax = rotationRollMax;
         var rotationProfileCount = getParamInt("rotationProfileCount");
         if (rotationProfileCount !== null) cfg.rotationProfileCount = rotationProfileCount;
+        var maxTrajectoryCandidates = getParamInt("maxTrajectoryCandidates");
+        if (maxTrajectoryCandidates !== null) cfg.maxTrajectoryCandidates = maxTrajectoryCandidates;
+        var phase2LogEveryMs = getParamInt("phase2LogEveryMs");
+        if (phase2LogEveryMs !== null) cfg.phase2LogEveryMs = phase2LogEveryMs;
+        var phase2StallWarnMs = getParamInt("phase2StallWarnMs");
+        if (phase2StallWarnMs !== null) cfg.phase2StallWarnMs = phase2StallWarnMs;
+        if (getParam("enforceSeparationAllSteps") !== null) cfg.enforceSeparationAllSteps = getParamBool("enforceSeparationAllSteps");
+        if (getParam("phase2VerboseRejects") !== null) cfg.phase2VerboseRejects = getParamBool("phase2VerboseRejects");
+        var minFaceQualityParam = getParamFloat("minFaceQuality");
+        if (minFaceQualityParam !== null) cfg.minFaceQuality = minFaceQualityParam;
+        var phase2MaxTargetFaces = getParamInt("phase2MaxTargetFaces");
+        if (phase2MaxTargetFaces !== null) cfg.phase2MaxTargetFaces = phase2MaxTargetFaces;
+        var difficultyParam = getParamInt("difficulty");
+        if (difficultyParam !== null) cfg.difficulty = difficultyParam;
 
         // fold animation: 0→90 over 4s (preset or URL)
         var foldAnimFrom = getParamFloat("foldAnimFrom");
@@ -889,7 +964,12 @@ function initBenchmark(globals) {
     // Generate candidate trajectory POV lists from grid scan data.
     // Returns array of trajectories, each is array of { fold, pov } steps.
     // These are NOT validated — they need live evaluation in phase 2.
-    function generateCandidateTrajectories(scanStates, foldSteps, count) {
+    //
+    // Static POV is mandatory: every step uses the same endpoint POV
+    // (no iso-start lerp). Motion is expressed via object rotation.
+    // This keeps phase-2 validation aligned with emitted presets.
+    function generateCandidateTrajectories(scanStates, foldSteps, count, opts) {
+        var staticPov = true;
         var isoVec = [1, 1, 1];
         function normalize(v) {
             var mag = Math.sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
@@ -908,16 +988,44 @@ function initBenchmark(globals) {
             if (mA === 0 || mB === 0) return Math.PI;
             return Math.acos(Math.max(-1, Math.min(1, dot/(mA*mB))));
         }
+        function endpointFromPov(pov) {
+            var dir = getPOVDirection(pov);
+            if (!dir) return null;
+            var n = dir.normalize();
+            return round2([n.x, n.y, n.z]);
+        }
 
         // Collect all unique continuous POVs scanned at the last fold step as potential endpoints
         var lastFold = foldSteps[foldSteps.length - 1];
         var endpoints = [];
         var seen = {};
+        // In staticPov mode, the same POV is used at every fold step. POVs that
+        // can't see the tracked face at fold=0 (flat paper, only upper-hemisphere
+        // POVs see the front) will fail validation at step 1. Pre-filter to
+        // endpoints whose fold=0 scan state has at least one visible face.
+        var fold0VisiblePovs = null;
+        if (staticPov) {
+            fold0VisiblePovs = {};
+            var firstFold = foldSteps[0];
+            for (var si0 = 0; si0 < scanStates.length; si0++) {
+                var st0 = scanStates[si0];
+                if (st0.fold !== firstFold) continue;
+                if (!st0.visibleFaceIds || st0.visibleFaceIds.length === 0) continue;
+                var povKey0 = Array.isArray(st0.pov) ? st0.pov.join(",") : String(st0.pov);
+                fold0VisiblePovs[povKey0] = true;
+            }
+        }
         for (var si = 0; si < scanStates.length; si++) {
             var st = scanStates[si];
-            if (st.fold !== lastFold || !Array.isArray(st.pov)) continue;
-            var k = st.pov.join(",");
-            if (!seen[k]) { seen[k] = true; endpoints.push(st.pov); }
+            if (st.fold !== lastFold) continue;
+            if (staticPov) {
+                var povKey = Array.isArray(st.pov) ? st.pov.join(",") : String(st.pov);
+                if (!fold0VisiblePovs[povKey]) continue;
+            }
+            var endpoint = endpointFromPov(st.pov);
+            if (!endpoint) continue;
+            var k = endpoint.join(",");
+            if (!seen[k]) { seen[k] = true; endpoints.push(endpoint); }
         }
 
         // t-curves: control how fast camera moves from iso toward endpoint
@@ -950,6 +1058,17 @@ function initBenchmark(globals) {
             }
             if (tooClose) continue;
 
+            if (staticPov) {
+                // One trajectory per endpoint: every step uses the endpoint
+                // POV directly. Rotation-profile sweep in Phase 2 is what
+                // provides motion variety.
+                var staticSteps = [];
+                for (var fsi = 0; fsi < foldSteps.length; fsi++) {
+                    staticSteps.push({ fold: foldSteps[fsi], pov: ep.slice() });
+                }
+                trajectories.push(staticSteps);
+                continue;
+            }
             for (var ci = 0; ci < tCurves.length; ci++) {
                 var steps = [{ fold: foldSteps[0], pov: "iso" }];
                 for (var fi = 1; fi < foldSteps.length; fi++) {
@@ -964,6 +1083,22 @@ function initBenchmark(globals) {
         if (trajectories.length < count * 3) {
             for (var ei2 = 0; ei2 < sorted.length; ei2++) {
                 var ep2 = sorted[ei2];
+                if (staticPov) {
+                    var dupeEp = false;
+                    for (var di0 = 0; di0 < trajectories.length; di0++) {
+                        var la = trajectories[di0][trajectories[di0].length - 1].pov;
+                        if (Array.isArray(la) && la[0] === ep2[0] && la[1] === ep2[1] && la[2] === ep2[2]) {
+                            dupeEp = true; break;
+                        }
+                    }
+                    if (dupeEp) continue;
+                    var staticSteps2 = [];
+                    for (var fsi2 = 0; fsi2 < foldSteps.length; fsi2++) {
+                        staticSteps2.push({ fold: foldSteps[fsi2], pov: ep2.slice() });
+                    }
+                    trajectories.push(staticSteps2);
+                    continue;
+                }
                 for (var ci2 = 0; ci2 < tCurves.length; ci2++) {
                     var steps2 = [{ fold: foldSteps[0], pov: "iso" }];
                     for (var fi2 = 1; fi2 < foldSteps.length; fi2++) {
@@ -991,13 +1126,28 @@ function initBenchmark(globals) {
         return trajectories;
     }
 
+    function pointIndexToLabel(index) {
+        var n = parseInt(index, 10);
+        if (isNaN(n) || n < 0) return null;
+        var label = "";
+        n += 1;
+        while (n > 0) {
+            var rem = (n - 1) % 26;
+            label = String.fromCharCode(65 + rem) + label;
+            n = Math.floor((n - 1) / 26);
+        }
+        return label;
+    }
+
     function pointLabelToIndex(label) {
         if (label === undefined || label === null) return null;
         var s = String(label).trim().toUpperCase();
-        if (!s || s.length !== 1) return null;
-        var code = s.charCodeAt(0);
-        if (code < 65 || code > 90) return null;
-        return code - 65;
+        if (!s || !/^[A-Z]+$/.test(s)) return null;
+        var value = 0;
+        for (var i = 0; i < s.length; i++) {
+            value = value * 26 + (s.charCodeAt(i) - 64);
+        }
+        return value - 1;
     }
 
     function parseIndexList(list) {
@@ -1043,6 +1193,77 @@ function initBenchmark(globals) {
         return getTargetPointIndicesForCfg(cfg);
     }
 
+    // Returns the subset of point indices that are NOT hidden.
+    // Used to enforce "initial visible anchors must be visible at step 0"
+    // even when trackingEvalMode is finalStepOnly.
+    function getNonHiddenPointIndices(indices) {
+        if (!Array.isArray(indices) || indices.length === 0) return [];
+        var out = [];
+        for (var i = 0; i < indices.length; i++) {
+            var idx = indices[i];
+            var hidden = globals.facePoints && globals.facePoints.isPointHidden
+                ? globals.facePoints.isPointHidden(idx) : false;
+            if (!hidden && out.indexOf(idx) === -1) out.push(idx);
+        }
+        return out;
+    }
+
+    function normalizeTrackingEvalMode(mode) {
+        var s = mode == null ? "strictallsteps" : String(mode).trim().toLowerCase();
+        if (s === "finalsteponly" || s === "finalstep" || s === "final" || s === "final-only" || s === "final_step_only") {
+            return "finalStepOnly";
+        }
+        if (s === "strict" || s === "all" || s === "allsteps" || s === "strict-all-steps" || s === "strictallsteps") {
+            return "strictAllSteps";
+        }
+        return "strictAllSteps";
+    }
+
+    function normalizeDifficultyTier(difficulty) {
+        var d = parseInt(difficulty, 10);
+        if (isNaN(d)) return null;
+        if (d < 1) return 1;
+        if (d > 4) return 4;
+        return d;
+    }
+
+    function getRotationBoundsForDifficulty(difficulty) {
+        var tier = normalizeDifficultyTier(difficulty);
+        if (tier === 1) return { yaw: 0, pitch: 0, roll: 0 };
+        if (tier === 2) return { yaw: 0.2, pitch: 0.2, roll: 0.05 };
+        if (tier === 3) return { yaw: 0.5, pitch: 0.15, roll: 0.08 };
+        if (tier === 4) return { yaw: 0.6, pitch: 0.6, roll: 0.15 };
+        // Fallback for custom/manual scan configs without a difficulty.
+        return { yaw: 1.5, pitch: 0.35, roll: 0.18 };
+    }
+
+    function getRotationMotionThresholdsForDifficulty(difficulty) {
+        var tier = normalizeDifficultyTier(difficulty);
+        if (tier === 4) return { end: 0.45, total: 0.95 };
+        if (tier === 3) return { end: 0.20, total: 0.45 };
+        // d1/d2: no default rotation gate. d1 is static; d2 can be
+        // geometry-constrained on thin back pools, so keep permissive.
+        return { end: 0, total: 0 };
+    }
+
+    function normalizeFaceIdToFront(faceId, faceCount) {
+        var id = parseInt(faceId, 10);
+        if (isNaN(id) || faceCount <= 0) return null;
+        if (id >= 0 && id < faceCount) return id;
+        if (id >= faceCount && id < faceCount * 2) return id - faceCount;
+        return null;
+    }
+
+    function normalizeFaceIdList(faceIds, faceCount) {
+        var out = [];
+        if (!Array.isArray(faceIds)) return out;
+        for (var i = 0; i < faceIds.length; i++) {
+            var normalized = normalizeFaceIdToFront(faceIds[i], faceCount);
+            if (normalized !== null && out.indexOf(normalized) === -1) out.push(normalized);
+        }
+        return out;
+    }
+
     function angularDistanceBetweenDirs(a, b) {
         if (!a || !b) return 0;
         var dot = a.x * b.x + a.y * b.y + a.z * b.z;
@@ -1057,28 +1278,66 @@ function initBenchmark(globals) {
         return dir.normalize();
     }
 
+    function getRotationForStep(step) {
+        var r = parseRotation(step && step.rotation);
+        if (!r) return { x: 0, y: 0, z: 0 };
+        return r;
+    }
+
+    function rotationDistanceBetweenSteps(a, b) {
+        var ra = getRotationForStep(a);
+        var rb = getRotationForStep(b);
+        var dx = ra.x - rb.x;
+        var dy = ra.y - rb.y;
+        var dz = ra.z - rb.z;
+        return Math.sqrt(dx * dx + dy * dy + dz * dz);
+    }
+
     function getProgressionMotionMetrics(steps) {
-        if (!steps || steps.length < 2) return { endAngle: 0, totalAngle: 0 };
+        if (!steps || steps.length < 2) {
+            return {
+                endAngle: 0,
+                totalAngle: 0,
+                rotationEndAngle: 0,
+                rotationTotalAngle: 0
+            };
+        }
         var first = getPovDirectionForStep(steps[0]);
         var last = getPovDirectionForStep(steps[steps.length - 1]);
         var endAngle = angularDistanceBetweenDirs(first, last);
         var totalAngle = 0;
+        var rotationEndAngle = rotationDistanceBetweenSteps(steps[0], steps[steps.length - 1]);
+        var rotationTotalAngle = 0;
         for (var i = 1; i < steps.length; i++) {
             totalAngle += angularDistanceBetweenDirs(getPovDirectionForStep(steps[i - 1]), getPovDirectionForStep(steps[i]));
+            rotationTotalAngle += rotationDistanceBetweenSteps(steps[i - 1], steps[i]);
         }
-        return { endAngle: endAngle, totalAngle: totalAngle };
+        return {
+            endAngle: endAngle,
+            totalAngle: totalAngle,
+            rotationEndAngle: rotationEndAngle,
+            rotationTotalAngle: rotationTotalAngle
+        };
     }
 
     function progressionDistance(aSteps, bSteps) {
         if (!aSteps || !bSteps || aSteps.length === 0 || bSteps.length === 0) return 0;
         var len = Math.min(aSteps.length, bSteps.length);
-        var total = 0;
+        var totalPov = 0;
+        var totalRot = 0;
         var count = 0;
         for (var i = 0; i < len; i++) {
-            total += angularDistanceBetweenDirs(getPovDirectionForStep(aSteps[i]), getPovDirectionForStep(bSteps[i]));
+            totalPov += angularDistanceBetweenDirs(getPovDirectionForStep(aSteps[i]), getPovDirectionForStep(bSteps[i]));
+            totalRot += rotationDistanceBetweenSteps(aSteps[i], bSteps[i]);
             count++;
         }
-        return count > 0 ? total / count : 0;
+        if (count === 0) return 0;
+        var meanPov = totalPov / count;
+        var meanRot = totalRot / count;
+        // Static-POV progressions have zero POV distance by definition;
+        // in that case use rotation distance for diversity selection.
+        if (meanPov < 1e-8) return meanRot;
+        return Math.max(meanPov, meanRot * 0.75);
     }
 
     function selectDiverseProgressions(candidates, maxCount, minPairDistance) {
@@ -1109,9 +1368,25 @@ function initBenchmark(globals) {
                 steps: p.steps,
                 consistentFaces: p.consistentFaces,
                 score: p.score,
-                metrics: p.metrics
+                finalViewScore: p.finalViewScore,
+                metrics: p.metrics,
+                // Preserve per-step visibility timeline for trajectory-first
+                // face-point selection in presetGenerator.js. Without this,
+                // selectFacePointsFromTrajectory sees no timeline and returns
+                // [], collapsing every trajectory to "empty config".
+                visibilityTimeline: p.visibilityTimeline
             };
         });
+    }
+
+    function formatDurationMs(ms) {
+        var totalSec = Math.max(0, Math.round(ms / 1000));
+        var h = Math.floor(totalSec / 3600);
+        var m = Math.floor((totalSec % 3600) / 60);
+        var s = totalSec % 60;
+        if (h > 0) return h + "h" + (m < 10 ? "0" : "") + m + "m" + (s < 10 ? "0" : "") + s + "s";
+        if (m > 0) return m + "m" + (s < 10 ? "0" : "") + s + "s";
+        return s + "s";
     }
 
     function stableStringify(value) {
@@ -1144,29 +1419,16 @@ function initBenchmark(globals) {
     }
 
     function buildScanCacheKey(cfg, foldSteps) {
+        // Only phase-1 fields affect scanStates (visible faces per fold/pov).
+        // Phase-2 params (targets, tracking, rotation profiles, separations)
+        // re-evaluate on top of the cached scan and must not invalidate it.
         var payload = {
-            version: 2,
+            version: 3,
             model: cfg.model || "",
-            facePoints: cfg.facePoints || null,
             scanFoldSteps: foldSteps,
             scanPovs: cfg.scanPovs || null,
             povGridSize: cfg.povGridSize || null,
-            minFaceQuality: cfg.minFaceQuality != null ? cfg.minFaceQuality : 0.6,
-            buildProgressions: cfg.buildProgressions || 0,
-            targetFaces: cfg.targetFaces || [],
-            targetPointLabels: cfg.targetPointLabels || null,
-            targetPointIndices: cfg.targetPointIndices || null,
-            primaryTargetPointLabels: cfg.primaryTargetPointLabels || null,
-            primaryTargetPointIndices: cfg.primaryTargetPointIndices || null,
-            minPointSeparationPx: cfg.minPointSeparationPx != null ? cfg.minPointSeparationPx : 70,
-            minProgressionEndAngle: cfg.minProgressionEndAngle != null ? cfg.minProgressionEndAngle : 0.85,
-            minProgressionTotalAngle: cfg.minProgressionTotalAngle != null ? cfg.minProgressionTotalAngle : 1.75,
-            minProgressionPairDistance: cfg.minProgressionPairDistance != null ? cfg.minProgressionPairDistance : 0.22,
-            rotationYawMax: cfg.rotationYawMax != null ? cfg.rotationYawMax : 1.5,
-            rotationPitchMax: cfg.rotationPitchMax != null ? cfg.rotationPitchMax : 0.35,
-            rotationRollMax: cfg.rotationRollMax != null ? cfg.rotationRollMax : 0.18,
-            rotationProfileCount: cfg.rotationProfileCount != null ? cfg.rotationProfileCount : 6,
-            rotationProfiles: cfg.rotationProfiles || null
+            minFaceQuality: cfg.minFaceQuality != null ? cfg.minFaceQuality : 0.35
         };
         return "scan_" + hashString(stableStringify(payload));
     }
@@ -1212,6 +1474,17 @@ function initBenchmark(globals) {
         var stepCount = templateSteps ? templateSteps.length : 0;
         if (stepCount === 0) return [{ name: "none", rotations: [] }];
 
+        function sampleEnvelope(points, t) {
+            if (!points || points.length === 0) return 1;
+            if (points.length === 1) return points[0];
+            var clamped = Math.max(0, Math.min(1, t));
+            var pos = clamped * (points.length - 1);
+            var i0 = Math.floor(pos);
+            var i1 = Math.min(points.length - 1, i0 + 1);
+            var frac = pos - i0;
+            return points[i0] + (points[i1] - points[i0]) * frac;
+        }
+
         if (cfg && Array.isArray(cfg.rotationProfiles) && cfg.rotationProfiles.length > 0) {
             var parsedProfiles = [];
             for (var pi = 0; pi < cfg.rotationProfiles.length; pi++) {
@@ -1229,18 +1502,223 @@ function initBenchmark(globals) {
             if (parsedProfiles.length > 0) return parsedProfiles;
         }
 
-        var yawMax = cfg && cfg.rotationYawMax != null ? cfg.rotationYawMax : 1.5;
-        var pitchMax = cfg && cfg.rotationPitchMax != null ? cfg.rotationPitchMax : 0.35;
-        var rollMax = cfg && cfg.rotationRollMax != null ? cfg.rotationRollMax : 0.18;
-        var requested = cfg && cfg.rotationProfileCount != null ? cfg.rotationProfileCount : 6;
-        var templates = [
-            { name: "cw-soft", sign: 1, amp: 0.75 },
-            { name: "cw-med", sign: 1, amp: 1.0 },
-            { name: "cw-strong", sign: 1, amp: 1.2 },
-            { name: "ccw-soft", sign: -1, amp: 0.75 },
-            { name: "ccw-med", sign: -1, amp: 1.0 },
-            { name: "ccw-strong", sign: -1, amp: 1.2 }
+        var difficulty = cfg && cfg.difficulty != null ? parseInt(cfg.difficulty, 10) : NaN;
+        var tierBounds = getRotationBoundsForDifficulty(difficulty);
+        var yawMax = cfg && cfg.rotationYawMax != null ? cfg.rotationYawMax : tierBounds.yaw;
+        var pitchMax = cfg && cfg.rotationPitchMax != null ? cfg.rotationPitchMax : tierBounds.pitch;
+        var rollMax = cfg && cfg.rotationRollMax != null ? cfg.rotationRollMax : tierBounds.roll;
+        // When hidden points only need to be visible at fold=70
+        // (finalStepOnly), pitch/roll must END at their peak — not
+        // return to zero — so back-side faces are exposed at the
+        // final state. Without this, yaw-only at final step keeps
+        // the underside hidden and static-POV back-reveal fails.
+        var tm = cfg && cfg.trackingEvalMode ? String(cfg.trackingEvalMode).trim().toLowerCase() : "";
+        var exposeBackside = (tm === "finalsteponly" || tm === "finalstep" || tm === "final" || tm === "final-only" || tm === "final_step_only");
+
+        // d1: static camera + static model. Tier semantics require ZERO
+        // motion BETWEEN steps, but the model can sit at any fixed pose.
+        // We sample multiple constant-rotation profiles (every step gets
+        // the same non-zero rotation) to gain visual diversity beyond the
+        // legacy "always flat from above" view. Per CLAUDE.md: d1 has no
+        // motion across fold steps — frozen rotation respects this.
+        //
+        // Borrowing rotation magnitudes from d3 (yaw=0.5, pitch=0.15) so
+        // d1 explores the same angular space d3 uses. Phase 2 will accept
+        // the (POV, frozen-rotation) pairs that keep the anchor visible
+        // at every fold; users see "same fold sequence from various tilted
+        // angles" rather than the single boring default view.
+        if (!isNaN(difficulty) && difficulty === 1) {
+            // Use d3's rotation bounds for diversity sampling (yaw=0.5,
+            // pitch=0.15, roll=0.08) unless the caller overrides via cfg.
+            var d1YawMag = (cfg && cfg.rotationYawMax != null) ? Math.abs(cfg.rotationYawMax) : 0.5;
+            var d1PitchMag = (cfg && cfg.rotationPitchMax != null) ? Math.abs(cfg.rotationPitchMax) : 0.15;
+            var d1RollMag = (cfg && cfg.rotationRollMax != null) ? Math.abs(cfg.rotationRollMax) : 0.08;
+            var d1Templates = [
+                { name: "d1-static-zero",    yaw:  0,    pitch:  0,    roll:  0 },
+                { name: "d1-static-yaw-pos", yaw:  1.0,  pitch:  0,    roll:  0 },
+                { name: "d1-static-yaw-neg", yaw: -1.0,  pitch:  0,    roll:  0 },
+                { name: "d1-static-pitch",   yaw:  0,    pitch:  1.0,  roll:  0 },
+                { name: "d1-static-yp-pos",  yaw:  0.7,  pitch:  0.7,  roll:  0.5 },
+                { name: "d1-static-yp-neg",  yaw: -0.7,  pitch:  0.7,  roll: -0.5 }
+            ];
+            var requestedD1 = (cfg && cfg.rotationProfileCount != null) ? cfg.rotationProfileCount : 6;
+            var d1Count = Math.max(1, Math.min(requestedD1, d1Templates.length));
+            var d1Profiles = [];
+            for (var d1ti = 0; d1ti < d1Count; d1ti++) {
+                var d1Tpl = d1Templates[d1ti];
+                var d1Yaw   = Math.round(d1Tpl.yaw   * d1YawMag   * 1000) / 1000;
+                var d1Pitch = Math.round(d1Tpl.pitch * d1PitchMag * 1000) / 1000;
+                var d1Roll  = Math.round(d1Tpl.roll  * d1RollMag  * 1000) / 1000;
+                var d1Rots = [];
+                for (var d1si = 0; d1si < stepCount; d1si++) {
+                    // Same rotation at every step = no inter-step motion.
+                    d1Rots.push({ x: d1Pitch, y: d1Yaw, z: d1Roll });
+                }
+                d1Profiles.push({ name: d1Tpl.name, rotations: d1Rots });
+            }
+            return d1Profiles;
+        }
+
+        // d2: static POV + small rotation (hidden-back reveal semantics).
+        if (!isNaN(difficulty) && difficulty === 2) {
+            var d2YawEnv = [0.00, 0.12, 0.24, 0.36, 0.50, 0.64, 0.78, 0.90, 1.00, 1.00];
+            var d2PitchEnv = [0.00, 0.10, 0.20, 0.32, 0.46, 0.62, 0.78, 0.90, 1.00, 1.00];
+            var d2RollEnv = [0.00, 0.02, 0.05, 0.08, 0.11, 0.14, 0.17, 0.20, 0.24, 0.22];
+            var d2Templates = [
+                { name: "d2-cw",            yaw:  1.00, pitch:  1.00, roll:  0.35 },
+                { name: "d2-ccw",           yaw: -1.00, pitch:  1.00, roll: -0.35 },
+                { name: "d2-cw-pitch-neg",  yaw:  0.90, pitch: -0.75, roll:  0.25 },
+                { name: "d2-ccw-pitch-neg", yaw: -0.90, pitch: -0.75, roll: -0.25 },
+                { name: "d2-cw-soft",       yaw:  0.70, pitch:  0.60, roll:  0.15 },
+                { name: "d2-ccw-soft",      yaw: -0.70, pitch:  0.60, roll: -0.15 }
+            ];
+            var requestedD2 = cfg && cfg.rotationProfileCount != null ? cfg.rotationProfileCount : 6;
+            var d2Count = Math.max(1, Math.min(requestedD2, d2Templates.length));
+            var d2Profiles = [];
+            for (var d2t = 0; d2t < d2Count; d2t++) {
+                var d2Tpl = d2Templates[d2t];
+                var d2Rots = [];
+                for (var d2s = 0; d2s < stepCount; d2s++) {
+                    var d2Norm = stepCount <= 1 ? 1 : (d2s / (stepCount - 1));
+                    var d2Yaw = d2Tpl.yaw * yawMax * sampleEnvelope(d2YawEnv, d2Norm);
+                    var d2Pitch = d2Tpl.pitch * pitchMax * sampleEnvelope(d2PitchEnv, d2Norm);
+                    var d2Roll = d2Tpl.roll * rollMax * sampleEnvelope(d2RollEnv, d2Norm);
+                    d2Rots.push({
+                        x: Math.round(d2Pitch * 1000) / 1000,
+                        y: Math.round(d2Yaw * 1000) / 1000,
+                        z: Math.round(d2Roll * 1000) / 1000
+                    });
+                }
+                d2Profiles.push({ name: d2Tpl.name, rotations: d2Rots });
+            }
+            return d2Profiles;
+        }
+
+        // d3 (single-side moderate motion): keep a fixed POV and use a
+        // compact, low-amplitude rotation family with a mild late crest.
+        // This preserves trackability while still creating clearly
+        // meaningful object motion across fold steps.
+        if (!exposeBackside && !isNaN(difficulty) && difficulty === 3) {
+            var d3YawEnv = [0.00, 0.10, 0.22, 0.34, 0.48, 0.62, 0.76, 0.86, 0.95, 0.88];
+            var d3PitchEnv = [0.00, 0.07, 0.13, 0.20, 0.28, 0.36, 0.44, 0.50, 0.54, 0.48];
+            var d3RollEnv = [0.00, 0.01, 0.04, 0.07, 0.11, 0.15, 0.19, 0.23, 0.25, 0.21];
+
+            var d3Templates = [
+                { name: "d3-cw",         yaw:  1.00, pitch: 0.75, roll:  0.65 },
+                { name: "d3-ccw",        yaw: -1.00, pitch: 0.75, roll: -0.65 },
+                { name: "d3-cw-strong",  yaw:  1.08, pitch: 0.85, roll:  0.75 },
+                { name: "d3-ccw-strong", yaw: -1.08, pitch: 0.85, roll: -0.75 },
+                { name: "d3-cw-soft",    yaw:  0.72, pitch: 0.45, roll:  0.35 },
+                { name: "d3-ccw-soft",   yaw: -0.72, pitch: 0.45, roll: -0.35 }
+            ];
+
+            var requestedD3 = cfg && cfg.rotationProfileCount != null ? cfg.rotationProfileCount : 6;
+            var d3Count = Math.max(1, Math.min(requestedD3, d3Templates.length));
+            var d3Profiles = [];
+            for (var dti = 0; dti < d3Count; dti++) {
+                var dt = d3Templates[dti];
+                var d3Rots = [];
+                for (var dsi = 0; dsi < stepCount; dsi++) {
+                    var dtNorm = stepCount <= 1 ? 1 : (dsi / (stepCount - 1));
+                    var dYaw = dt.yaw * yawMax * sampleEnvelope(d3YawEnv, dtNorm);
+                    var dPitch = dt.pitch * pitchMax * sampleEnvelope(d3PitchEnv, dtNorm);
+                    var dRoll = dt.roll * rollMax * sampleEnvelope(d3RollEnv, dtNorm);
+                    d3Rots.push({
+                        x: Math.round(dPitch * 1000) / 1000,
+                        y: Math.round(dYaw * 1000) / 1000,
+                        z: Math.round(dRoll * 1000) / 1000
+                    });
+                }
+                d3Profiles.push({ name: dt.name, rotations: d3Rots });
+            }
+            return d3Profiles;
+        }
+
+        // d4 uses a compact bird-frontback style profile family. Per CLAUDE.md
+        // "ramps monotonically (not bell-curve) so the final step reaches
+        // full rotation magnitude — essential for the hidden-back-reveal
+        // model." Earlier envelopes peaked mid-trajectory and *retracted*
+        // at the final step (yaw 1.10 at index 8 → 1.00 at index 9), causing
+        // back faces to slip back out of view exactly when the reveal should
+        // be most visible. New envelopes ramp monotonically to 1.0 at final.
+        if (exposeBackside && !isNaN(difficulty) && difficulty >= 4) {
+            var birdYawEnv = [0.00, 0.10, 0.22, 0.34, 0.46, 0.58, 0.70, 0.82, 0.92, 1.00];
+            var birdPitchEnv = [0.00, 0.10, 0.22, 0.34, 0.46, 0.58, 0.70, 0.82, 0.92, 1.00];
+            var birdRollEnv = [0.00, 0.04, 0.10, 0.18, 0.28, 0.40, 0.54, 0.70, 0.86, 1.00];
+
+            // d4: moderate two-sided motion.
+            var birdTemplates = [
+                { name: "bird-d4-cw",            yaw:  1.00, pitch:  1.00, roll:  0.95 },
+                { name: "bird-d4-ccw",           yaw: -1.00, pitch: -1.00, roll: -0.95 },
+                { name: "bird-d4-cw-strong",     yaw:  1.12, pitch:  1.00, roll:  1.00 },
+                { name: "bird-d4-ccw-strong",    yaw: -1.12, pitch: -1.00, roll: -1.00 },
+                { name: "bird-d4-cw-pitch-neg",  yaw:  1.05, pitch: -0.60, roll:  0.82 },
+                { name: "bird-d4-ccw-pitch-neg", yaw: -1.05, pitch:  0.60, roll: -0.82 }
+            ];
+
+            var requestedBird = cfg && cfg.rotationProfileCount != null ? cfg.rotationProfileCount : 6;
+            var birdCount = Math.max(1, Math.min(requestedBird, birdTemplates.length));
+            var birdProfiles = [];
+
+            for (var bti = 0; bti < birdCount; bti++) {
+                var bt = birdTemplates[bti];
+                var birdRots = [];
+                for (var bsi = 0; bsi < stepCount; bsi++) {
+                    var btNorm = stepCount <= 1 ? 1 : (bsi / (stepCount - 1));
+                    var yaw = bt.yaw * yawMax * sampleEnvelope(birdYawEnv, btNorm);
+                    var pitch = bt.pitch * pitchMax * sampleEnvelope(birdPitchEnv, btNorm);
+                    var roll = bt.roll * rollMax * sampleEnvelope(birdRollEnv, btNorm);
+                    birdRots.push({
+                        x: Math.round(pitch * 1000) / 1000,
+                        y: Math.round(yaw * 1000) / 1000,
+                        z: Math.round(roll * 1000) / 1000
+                    });
+                }
+                birdProfiles.push({ name: bt.name, rotations: birdRots });
+            }
+            return birdProfiles;
+        }
+
+        // Templates describe signed per-axis amplitudes as fractions of
+        // {yawMax, pitchMax, rollMax}. Each template produces one profile
+        // whose final-step rotation is (yaw*yawMax, pitch*pitchMax,
+        // roll*rollMax) when exposeBackside=true (monotonic ramp).
+        //
+        // The default 6 templates remain yaw-dominant CW/CCW. When
+        // exposeBackside=true (d2-hidden / d4), 4 extra templates
+        // cover pitch-dominant + negative-pitch + roll-dominant — these
+        // reach thin back pools (2–3 back faces) where a specific axis
+        // direction is the only way to bring a back face into view.
+        var baseTemplates = [
+            { name: "cw-soft",   yaw:  0.75, pitch:  0.75, roll:  0.75 },
+            { name: "cw-med",    yaw:  1.0,  pitch:  1.0,  roll:  1.0  },
+            { name: "cw-strong", yaw:  1.2,  pitch:  1.2,  roll:  1.2  },
+            { name: "ccw-soft",  yaw: -0.75, pitch:  0.75, roll: -0.75 },
+            { name: "ccw-med",   yaw: -1.0,  pitch:  1.0,  roll: -1.0  },
+            { name: "ccw-strong",yaw: -1.2,  pitch:  1.2,  roll: -1.2  }
         ];
+        var expositionTemplates = exposeBackside ? [
+            // Pitch-dominant (paper tips forward) — reveals back faces
+            // under the leading edge from an above POV.
+            { name: "pitch-pos",       yaw:  0.3, pitch:  1.2, roll:  0.0 },
+            // Pitch-negative (paper tips back) — reveals back faces
+            // under the trailing edge.
+            { name: "pitch-neg",       yaw:  0.3, pitch: -1.2, roll:  0.0 },
+            // Pitch-negative with opposite yaw — complements pitch-neg
+            // to sweep more of the back hemisphere.
+            { name: "pitch-neg-ccw",   yaw: -0.3, pitch: -1.2, roll:  0.0 },
+            // Roll-dominant — rotates paper in its plane; useful when
+            // back faces are along a diagonal axis.
+            { name: "roll-pos",        yaw:  0.3, pitch:  0.3, roll:  1.2 }
+        ] : [];
+        var templates = baseTemplates.concat(expositionTemplates);
+        // Default profile count: 6 (backwards compatible). When
+        // expose-backside extras are present, bump the default to
+        // cover them — the 4 exposition templates are the primary
+        // reason this fix exists. User override via rotationProfileCount
+        // still takes precedence.
+        var defaultCount = exposeBackside ? Math.min(templates.length, 10) : 6;
+        var requested = cfg && cfg.rotationProfileCount != null ? cfg.rotationProfileCount : defaultCount;
         var count = Math.max(1, Math.min(requested, templates.length));
         var profiles = [];
         for (var ti = 0; ti < count; ti++) {
@@ -1248,9 +1726,13 @@ function initBenchmark(globals) {
             var rots = [];
             for (var si2 = 0; si2 < stepCount; si2++) {
                 var t = stepCount <= 1 ? 1 : (si2 / (stepCount - 1));
-                var yaw = tplt.sign * yawMax * tplt.amp * t;
-                var pitch = pitchMax * 4 * t * (1 - t);
-                var roll = tplt.sign * rollMax * Math.sin(t * Math.PI);
+                var yaw = tplt.yaw * yawMax * t;
+                var pitch = exposeBackside
+                    ? tplt.pitch * pitchMax * t                 // monotonic ramp — peaks at final
+                    : Math.abs(tplt.pitch) * pitchMax * 4 * t * (1 - t); // bell curve (non-expose keeps legacy shape)
+                var roll = exposeBackside
+                    ? tplt.roll * rollMax * t
+                    : tplt.roll * rollMax * Math.sin(t * Math.PI);
                 rots.push({
                     x: Math.round(pitch * 1000) / 1000,
                     y: Math.round(yaw * 1000) / 1000,
@@ -1282,29 +1764,65 @@ function initBenchmark(globals) {
         };
     }
 
-    function evaluateTrackedPoints(targetPointIndices, stepIndex, totalSteps, minPointSeparation) {
+    // Evaluate tracked-point visibility + screen-space separation at a step.
+    //
+    // Invariants (do NOT break):
+    //   - Non-hidden tracked points MUST be visible at every step when
+    //     mode === "strictAllSteps" (the default). This matches the human
+    //     trackability requirement: "if a person couldn't follow the point
+    //     with their eyes, the trajectory is invalid."
+    //   - Hidden (pop-up) points are by design only checked at the final
+    //     step — they are picked from the final-step visible set via the
+    //     two-pass selection in presetGenerator.addHiddenPointsFromFinalStep.
+    //   - `hidePointsDuringAnimation` is a RENDERING toggle only and must
+    //     never influence this function. Visibility here is measured against
+    //     geometry, not render state.
+    function evaluateTrackedPoints(targetPointIndices, stepIndex, totalSteps, minPointSeparation, trackingEvalMode, enforceSeparationAllSteps) {
+        var mode = normalizeTrackingEvalMode(trackingEvalMode);
+        var isFinalStep = (stepIndex === totalSteps - 1);
+
         if (!targetPointIndices || targetPointIndices.length === 0) {
-            return { ok: true, requiredCount: 0, visibleCount: 0, minSep: Infinity };
+            return {
+                ok: true,
+                requiredCount: 0,
+                visibleCount: 0,
+                missingCount: 0,
+                minSep: Infinity,
+                mode: mode,
+                reason: null
+            };
         }
 
         var required = [];
         for (var i = 0; i < targetPointIndices.length; i++) {
             var idx = targetPointIndices[i];
             var hidden = globals.facePoints && globals.facePoints.isPointHidden ? globals.facePoints.isPointHidden(idx) : false;
-            if (!hidden || stepIndex === totalSteps - 1) required.push(idx);
+            if (!hidden || isFinalStep) required.push(idx);
         }
 
         var visibleScreens = [];
+        var missingCount = 0;
         for (var ri = 0; ri < required.length; ri++) {
             var rIdx = required[ri];
-            if (!(globals.facePoints && globals.facePoints.isPointVisible && globals.facePoints.isPointVisible(rIdx))) {
-                return { ok: false, requiredCount: required.length, visibleCount: visibleScreens.length, minSep: 0 };
-            }
-            var screen = getPointScreenPosition(rIdx);
-            if (!screen) {
-                return { ok: false, requiredCount: required.length, visibleCount: visibleScreens.length, minSep: 0 };
+            var isVisible = !!(globals.facePoints && globals.facePoints.isPointVisible && globals.facePoints.isPointVisible(rIdx));
+            var screen = isVisible ? getPointScreenPosition(rIdx) : null;
+            if (!isVisible || !screen) {
+                missingCount++;
+                continue;
             }
             visibleScreens.push(screen);
+        }
+
+        if (missingCount > 0 && (mode === "strictAllSteps" || isFinalStep)) {
+            return {
+                ok: false,
+                requiredCount: required.length,
+                visibleCount: visibleScreens.length,
+                missingCount: missingCount,
+                minSep: 0,
+                mode: mode,
+                reason: "visibility"
+            };
         }
 
         var minSep = Infinity;
@@ -1317,27 +1835,178 @@ function initBenchmark(globals) {
             }
         }
 
-        if (stepIndex === totalSteps - 1 && visibleScreens.length >= 2 && minSep < minPointSeparation) {
-            return { ok: false, requiredCount: required.length, visibleCount: visibleScreens.length, minSep: minSep };
+        var checkSeparation = isFinalStep || (mode === "strictAllSteps" && enforceSeparationAllSteps === true);
+        if (checkSeparation && visibleScreens.length >= 2 && minSep < minPointSeparation) {
+            return {
+                ok: false,
+                requiredCount: required.length,
+                visibleCount: visibleScreens.length,
+                missingCount: missingCount,
+                minSep: minSep,
+                mode: mode,
+                reason: "separation"
+            };
         }
-        return { ok: true, requiredCount: required.length, visibleCount: visibleScreens.length, minSep: minSep };
+
+        return {
+            ok: true,
+            requiredCount: required.length,
+            visibleCount: visibleScreens.length,
+            missingCount: missingCount,
+            minSep: minSep,
+            mode: mode,
+            reason: null
+        };
     }
 
     // ── Phase 2: live trajectory evaluation ──
     // Sets camera to each interpolated POV, measures actual face quality via getFaceViewQualities.
     // Keeps trajectories where all targetFaces stay >= minQuality at every step.
 
+    // Cap how many face IDs participate in the per-step view-quality gate.
+    // When cap === 2 and more faces are tracked, keep the lowest and highest
+    // face indices so adjacent strip triangles (0,1,2) don't all have to
+    // simultaneously satisfy a tight grazing-angle threshold.
+    function capPhase2TargetFaces(faceIds, cap) {
+        if (!faceIds || cap <= 0) return [];
+        if (faceIds.length <= cap) return faceIds.slice();
+        var sorted = faceIds.slice().sort(function (a, b) { return a - b; });
+        if (cap === 2 && sorted.length >= 2) {
+            return [sorted[0], sorted[sorted.length - 1]];
+        }
+        return sorted.slice(0, cap);
+    }
+
     function evaluateTrajectoriesLive(candidates, targetFaces, minQuality, maxCount, settleMs, cfg, callback) {
         var validProgressions = [];
         var targetPointIndices = getTargetPointIndicesForCfg(cfg || {});
         var primaryTargetPointIndices = getPrimaryTargetPointIndicesForCfg(cfg || {});
+        var initialTargetPointIndices = getNonHiddenPointIndices(targetPointIndices);
+        var initialPrimaryTargetPointIndices = getNonHiddenPointIndices(primaryTargetPointIndices);
         var minPointSeparation = (cfg && cfg.minPointSeparationPx != null) ? cfg.minPointSeparationPx : 70;
+        var enforceSeparationAllSteps = !!(cfg && cfg.enforceSeparationAllSteps);
+        // Defaults to true: even in finalStepOnly modes, step 0 should show
+        // the non-hidden anchor points so trajectories are trackable from the
+        // beginning.
+        var enforceInitialTrackedVisible = !(cfg && cfg.enforceInitialTrackedVisible === false);
+        var trackingEvalMode = normalizeTrackingEvalMode(cfg && cfg.trackingEvalMode);
+        // Verbose per-reject logs (reason=quality|tracked|primaryTracked|initialTracked|motion).
+        // Default ON unless cfg.phase2VerboseRejects === false (quiet CI / prod runs).
+        var phase2VerboseRejects = !(cfg && cfg.phase2VerboseRejects === false);
+        // One-time diagnostic: log the target indices and tracking mode.
+        // Phase 2 rejects every trajectory at step 1 when point indices are
+        // empty/mis-aligned; this log line surfaces the state.
+        try {
+            var dbgPts = globals.facePoints && globals.facePoints.getPoints
+                ? globals.facePoints.getPoints() : [];
+            var dbgHidden = [];
+            for (var _di = 0; _di < dbgPts.length; _di++) {
+                if (dbgPts[_di] && dbgPts[_di].hidden) dbgHidden.push(_di);
+            }
+            console.log("benchmark: evaluateTrajectoriesLive: mode=" + trackingEvalMode +
+                        " targets=[" + targetPointIndices.join(",") + "]" +
+                        " primary=[" + primaryTargetPointIndices.join(",") + "]" +
+                        " initialTargets=[" + initialTargetPointIndices.join(",") + "]" +
+                        " initialPrimary=[" + initialPrimaryTargetPointIndices.join(",") + "]" +
+                        " pointCount=" + dbgPts.length +
+                        " hiddenIdx=[" + dbgHidden.join(",") + "]" +
+                        " targetFaces=[" + (targetFaces || []).join(",") + "]" +
+                        " minSepPx=" + minPointSeparation);
+        } catch (_e) {}
+        var phase2LogEveryMs = (cfg && cfg.phase2LogEveryMs != null) ? cfg.phase2LogEveryMs : 5000;
+        var phase2StallWarnMs = (cfg && cfg.phase2StallWarnMs != null) ? cfg.phase2StallWarnMs : 30000;
         var minProgressionEndAngle = (cfg && cfg.minProgressionEndAngle != null) ? cfg.minProgressionEndAngle : 0.85;
         var minProgressionTotalAngle = (cfg && cfg.minProgressionTotalAngle != null) ? cfg.minProgressionTotalAngle : 1.75;
+        var motionThresholds = getRotationMotionThresholdsForDifficulty(cfg && cfg.difficulty);
+        var minRotationEndAngle = (cfg && cfg.minRotationEndAngle != null) ? cfg.minRotationEndAngle : motionThresholds.end;
+        var minRotationTotalAngle = (cfg && cfg.minRotationTotalAngle != null) ? cfg.minRotationTotalAngle : motionThresholds.total;
         var minProgressionPairDistance = (cfg && cfg.minProgressionPairDistance != null) ? cfg.minProgressionPairDistance : 0.22;
+        // Per-scan-candidate early-stop: once we have this many valid
+        // progressions from the current evaluateTrajectoriesLive call,
+        // skip the remaining trajectory/profile combos. Each scan
+        // candidate only needs a handful of progressions for the outer
+        // preset generator's diverse-select pass; evaluating all 40×6
+        // combos per scan is typically 4–6× more work than needed.
+        // Default: min(maxCount, 5) — enough diversity to feed selectDiverse
+        // without over-spending time on a single face-pair.
+        var phase2EarlyStopCount = (cfg && cfg.phase2EarlyStopCount != null)
+            ? (cfg.phase2EarlyStopCount | 0)
+            : Math.min(Math.max(3, maxCount | 0), 5);
         var rotationProfiles = buildAutoRotationProfiles(candidates[0] || [], cfg || {});
         var candidateCount = candidates.length;
         var profileCount = rotationProfiles.length;
+        var totalProfiles = Math.max(1, candidateCount * profileCount);
+        var phase2StartedAt = Date.now();
+        var lastAdvanceAt = phase2StartedAt;
+        var lastStallWarnAt = 0;
+        var heartbeatTimer = null;
+        var evaluationStats = {
+            trackingEvalMode: trackingEvalMode,
+            completedProfiles: 0,
+            rejectedByQuality: 0,
+            rejectedByTrackedPoints: 0,
+            rejectedByPrimaryTrackedPoints: 0,
+            rejectedByInitialTrackedPoints: 0,
+            rejectedByMotionThresholds: 0,
+            acceptedByMotionThresholds: 0,
+            validBeforeDiversity: 0,
+            selectedAfterDiversity: 0
+        };
+
+        function getCurrentStepCount() {
+            if (currentTraj >= candidates.length) return 0;
+            var traj = candidates[currentTraj] || [];
+            return traj.length || 0;
+        }
+
+        function getCurrentProfileProgress() {
+            var stepCount = getCurrentStepCount();
+            if (stepCount <= 0) return 0;
+            return Math.max(0, Math.min(1, currentStep / stepCount));
+        }
+
+        function emitPhase2Heartbeat() {
+            var now = Date.now();
+            var doneProfiles = Math.max(0, Math.min(totalProfiles, evaluationStats.completedProfiles));
+            var partial = getCurrentProfileProgress();
+            var estimatedDone = Math.max(0, Math.min(totalProfiles, doneProfiles + partial));
+            var ratio = totalProfiles > 0 ? (estimatedDone / totalProfiles) : 0;
+            var elapsedMs = now - phase2StartedAt;
+            var etaMs = ratio > 0.0001 ? (elapsedMs * (1 - ratio) / ratio) : null;
+
+            console.log(
+                "benchmark: phase2 heartbeat " +
+                "profiles " + doneProfiles + "/" + totalProfiles +
+                " (~" + Math.round(ratio * 100) + "%)" +
+                ", traj " + (Math.min(currentTraj + 1, candidateCount)) + "/" + candidateCount +
+                ", profile " + (Math.min(currentProfile + 1, profileCount)) + "/" + profileCount +
+                ", step " + (currentStep + 1) + "/" + Math.max(1, getCurrentStepCount()) +
+                ", valid=" + validProgressions.length +
+                ", elapsed=" + formatDurationMs(elapsedMs) +
+                (etaMs !== null ? ", eta~" + formatDurationMs(etaMs) : "")
+            );
+
+            if (phase2StallWarnMs > 0 && (now - lastAdvanceAt) > phase2StallWarnMs && (now - lastStallWarnAt) > Math.max(5000, Math.floor(phase2StallWarnMs / 2))) {
+                lastStallWarnAt = now;
+                console.warn(
+                    "benchmark: phase2 slow/stalled for " + formatDurationMs(now - lastAdvanceAt) +
+                    " at traj " + (Math.min(currentTraj + 1, candidateCount)) + "/" + candidateCount +
+                    ", profile " + (Math.min(currentProfile + 1, profileCount)) + "/" + profileCount +
+                    ", step " + (currentStep + 1) + "/" + Math.max(1, getCurrentStepCount())
+                );
+            }
+        }
+
+        if (phase2LogEveryMs > 0) {
+            heartbeatTimer = setInterval(emitPhase2Heartbeat, phase2LogEveryMs);
+        }
+
+        function stopPhase2Heartbeat() {
+            if (heartbeatTimer) {
+                clearInterval(heartbeatTimer);
+                heartbeatTimer = null;
+            }
+        }
 
         // Flatten all trajectory steps into a sequential evaluation queue.
         // We evaluate one trajectory at a time, step by step.
@@ -1345,8 +2014,49 @@ function initBenchmark(globals) {
         var currentStep = 0;
         var currentProfile = 0;
         var currentFaceStats = {}; // fid -> { worst, seenSteps }
+        // Final-step viewability score (0..1). Set when the final step's
+        // quality/tracked/primary checks pass; read at the validProgressions
+        // push site so selectDiverseProgressions prefers clearer poses.
+        var currentFinalViewScore = 0;
+        // Per-step visibility records for the trajectory currently under
+        // evaluation. Populated by recordStepVisibility() at every step
+        // (and replaced by the 800ms recheck values at the final step).
+        // Attached to the accepted progression at validProgressions.push
+        // so callers can do post-hoc face-point selection from the timeline
+        // instead of pre-baking face IDs into Phase 2's input.
+        var currentVisibilityTimeline = [];
 
-        function skipCurrentTrajectoryProfile() {
+        // Used by trajectory-first selection (selectFacePointsFromTrajectory in
+        // presetGenerator.js). Lightweight: only stores the face IDs visible at
+        // each step and their quality scores — already computed for the quality
+        // gate, so no extra GPU work.
+        function recordStepVisibility(step, stepRot, visibleFaceIds, qualityMap) {
+            currentVisibilityTimeline.push({
+                stepIndex: currentStep,
+                fold: step.fold,
+                pov: step.pov,
+                rotation: stepRot ? [stepRot.x, stepRot.y, stepRot.z] : null,
+                visibleFaceIds: (visibleFaceIds || []).slice(),
+                qualities: qualityMap ? Object.assign({}, qualityMap) : {}
+            });
+        }
+
+        function skipCurrentTrajectoryProfile(reason) {
+            evaluationStats.completedProfiles++;
+            lastAdvanceAt = Date.now();
+            if (reason === "quality") evaluationStats.rejectedByQuality++;
+            if (reason === "tracked") evaluationStats.rejectedByTrackedPoints++;
+            if (reason === "primaryTracked") evaluationStats.rejectedByPrimaryTrackedPoints++;
+            if (reason === "initialTracked") evaluationStats.rejectedByInitialTrackedPoints++;
+            if (reason === "motion") evaluationStats.rejectedByMotionThresholds++;
+            if (phase2VerboseRejects) {
+                try {
+                    console.log("benchmark: Phase 2: reject traj " + (currentTraj + 1) +
+                                " profile " + (currentProfile + 1) +
+                                " at step " + (currentStep + 1) +
+                                " reason=" + (reason || "unknown"));
+                } catch (_ee) {}
+            }
             currentProfile++;
             if (currentProfile >= profileCount) {
                 currentProfile = 0;
@@ -1354,6 +2064,114 @@ function initBenchmark(globals) {
             }
             currentStep = 0;
             currentFaceStats = {};
+            currentFinalViewScore = 0;
+            currentVisibilityTimeline = [];
+        }
+
+        // Score the final-pose viewability of tracked points.
+        // Returns a scalar in [0, 1].
+        //
+        // Base term (all tiers): mean per-point clarity where each visible
+        // tracked point contributes:
+        //   edge-margin * nearest-neighbor-separation * face-quality
+        //
+        // Both-side term (two-sided tracking configs): add a balance-aware
+        // term so "one side excellent, other side barely visible" ranks low.
+        // Side grouping uses two strategies:
+        //   1) hidden-vs-visible split (preferred). For two-pass d4
+        //      presets, revealed points are encoded as hidden=true and often
+        //      live on front-indexed face IDs, so faceId sign alone cannot
+        //      detect the two sides reliably.
+        //   2) front-vs-back faceId split (fallback).
+        // This keeps both-side ranking active for d4 even when hidden
+        // reveal points use normalized face IDs.
+        //
+        // Back-side points read 0 from getFaceViewQualities (that function
+        // uses front normals), so we treat visible back-side points as a
+        // neutral quality baseline of 0.5 to avoid unfairly penalising them.
+        function computeFinalViewScore(qualityMap) {
+            if (!targetPointIndices || targetPointIndices.length === 0) return 0;
+            var canvas = globals.threeView && globals.threeView.renderer ? globals.threeView.renderer.domElement : null;
+            var canvasW = canvas && canvas.width ? canvas.width : 1024;
+            var canvasH = canvas && canvas.height ? canvas.height : 1024;
+            var faces = globals.model && globals.model.getFaces ? globals.model.getFaces() : [];
+            var modelN = faces ? faces.length : 0;
+            var pts = globals.facePoints && globals.facePoints.getPoints ? globals.facePoints.getPoints() : [];
+            var screens = [];
+            var trackedSides = { front: false, back: false };
+            var trackedHidden = { hidden: false, visible: false };
+            for (var fi = 0; fi < targetPointIndices.length; fi++) {
+                var idx = targetPointIndices[fi];
+                var pt = pts[idx];
+                var fid = pt && pt.faceId != null ? pt.faceId : -1;
+                var hidden = globals.facePoints && globals.facePoints.isPointHidden
+                    ? !!globals.facePoints.isPointHidden(idx) : false;
+                var side = null;
+                if (fid >= 0 && fid < modelN) {
+                    side = "front";
+                    trackedSides.front = true;
+                } else if (fid >= modelN && fid < modelN * 2) {
+                    side = "back";
+                    trackedSides.back = true;
+                }
+                if (hidden) trackedHidden.hidden = true;
+                else trackedHidden.visible = true;
+                if (!globals.facePoints || !globals.facePoints.isPointVisible || !globals.facePoints.isPointVisible(idx)) continue;
+                var scr = getPointScreenPosition(idx);
+                if (!scr) continue;
+                var triIdx = (fid >= modelN) ? (fid - modelN) : fid;
+                var rawQ = (qualityMap && qualityMap[triIdx] != null) ? qualityMap[triIdx] : 0;
+                screens.push({ x: scr.x, y: scr.y, q: rawQ, side: side, hidden: hidden });
+            }
+            if (screens.length === 0) return 0;
+            var sum = 0;
+            var sideSums = {};
+            var sideCounts = {};
+            var useHiddenSplit = trackedHidden.hidden && trackedHidden.visible;
+            var useFaceSplit = !useHiddenSplit && trackedSides.front && trackedSides.back;
+            for (var j = 0; j < screens.length; j++) {
+                var s = screens[j];
+                var edge = Math.min(s.x, s.y, Math.max(0, canvasW - s.x), Math.max(0, canvasH - s.y));
+                var minN = Infinity;
+                for (var k = 0; k < screens.length; k++) {
+                    if (k === j) continue;
+                    var dx = s.x - screens[k].x;
+                    var dy = s.y - screens[k].y;
+                    var d = Math.sqrt(dx * dx + dy * dy);
+                    if (d < minN) minN = d;
+                }
+                if (!isFinite(minN)) minN = minPointSeparation * 2;
+                var eClamp = Math.max(0, Math.min(1, edge / 120));
+                var nClamp = Math.max(0, Math.min(1, minN / Math.max(1, minPointSeparation * 1.25)));
+                var q = s.q > 0 ? s.q : 0.5;
+                var qClamp = Math.pow(Math.max(0, Math.min(1, q)), 0.75);
+                var pointScore = eClamp * nClamp * qClamp;
+                sum += pointScore;
+                var sideKey = null;
+                if (useHiddenSplit) sideKey = s.hidden ? "reveal" : "initial";
+                else if (useFaceSplit && (s.side === "front" || s.side === "back")) sideKey = s.side;
+                if (sideKey !== null) {
+                    if (sideSums[sideKey] == null) sideSums[sideKey] = 0;
+                    if (sideCounts[sideKey] == null) sideCounts[sideKey] = 0;
+                    sideSums[sideKey] += pointScore;
+                    sideCounts[sideKey]++;
+                }
+            }
+            var meanScore = sum / screens.length;
+            var expectsBothSides = useHiddenSplit || useFaceSplit;
+            if (!expectsBothSides) return meanScore;
+
+            // If both sides are tracked, reward trajectories where BOTH are
+            // strong and balanced. A weak side drags the score down sharply.
+            var sideAKey = useHiddenSplit ? "initial" : "front";
+            var sideBKey = useHiddenSplit ? "reveal" : "back";
+            var sideA = sideCounts[sideAKey] > 0 ? (sideSums[sideAKey] / sideCounts[sideAKey]) : 0;
+            var sideB = sideCounts[sideBKey] > 0 ? (sideSums[sideBKey] / sideCounts[sideBKey]) : 0;
+            var sideGeom = Math.sqrt(Math.max(0, sideA) * Math.max(0, sideB));
+            var hi = Math.max(sideA, sideB);
+            var lo = Math.min(sideA, sideB);
+            var balanceRatio = hi > 1e-8 ? (lo / hi) : 0;
+            return (0.35 * meanScore) + (0.45 * sideGeom) + (0.20 * balanceRatio);
         }
 
         function evaluateNext() {
@@ -1366,7 +2184,7 @@ function initBenchmark(globals) {
                 for (var fid2 in currentFaceStats) {
                     if (!currentFaceStats.hasOwnProperty(fid2)) continue;
                     var stat = currentFaceStats[fid2];
-                    if (stat.seenSteps === totalSteps && stat.worst >= 0.6) {
+                    if (stat.seenSteps === totalSteps && stat.worst >= minQuality) {
                         consistentFaces[fid2] = Math.round(stat.worst * 1000) / 1000;
                     }
                 }
@@ -1380,31 +2198,72 @@ function initBenchmark(globals) {
                 });
                 var metrics = getProgressionMotionMetrics(cleanSteps);
                 var trackedStepBonus = primaryTargetPointIndices.length > 0 ? 0.2 : 0;
+                var finalViewScore = currentFinalViewScore || 0;
                 var score = 0;
                 score += Math.min(1, metrics.endAngle / Math.max(0.1, minProgressionEndAngle));
                 score += Math.min(1, metrics.totalAngle / Math.max(0.1, minProgressionTotalAngle));
+                if (minRotationEndAngle > 0) {
+                    score += Math.min(1, metrics.rotationEndAngle / Math.max(0.1, minRotationEndAngle));
+                }
+                if (minRotationTotalAngle > 0) {
+                    score += Math.min(1, metrics.rotationTotalAngle / Math.max(0.1, minRotationTotalAngle));
+                }
                 score += Object.keys(consistentFaces).length * 0.02;
                 score += trackedStepBonus;
+                // Final-pose viewability: favour trajectories whose tracked
+                // points sit well inside the canvas, away from each other,
+                // on faces that face the camera. This replaces the old
+                // "first valid profile wins" bias with a clarity-based rank.
+                score += finalViewScore * 1.5;
 
-                if (metrics.endAngle >= minProgressionEndAngle && metrics.totalAngle >= minProgressionTotalAngle) {
+                var meetsPovMotion = (metrics.endAngle >= minProgressionEndAngle && metrics.totalAngle >= minProgressionTotalAngle);
+                var meetsRotationMotion = (metrics.rotationEndAngle >= minRotationEndAngle && metrics.rotationTotalAngle >= minRotationTotalAngle);
+                if (meetsPovMotion && meetsRotationMotion) {
                     validProgressions.push({
                         steps: cleanSteps,
                         consistentFaces: consistentFaces,
                         score: Math.round(score * 1000) / 1000,
+                        finalViewScore: Math.round(finalViewScore * 1000) / 1000,
                         metrics: {
                             endAngle: Math.round(metrics.endAngle * 1000) / 1000,
-                            totalAngle: Math.round(metrics.totalAngle * 1000) / 1000
-                        }
+                            totalAngle: Math.round(metrics.totalAngle * 1000) / 1000,
+                            rotationEndAngle: Math.round(metrics.rotationEndAngle * 1000) / 1000,
+                            rotationTotalAngle: Math.round(metrics.rotationTotalAngle * 1000) / 1000
+                        },
+                        // Per-step {visibleFaceIds, qualities} for the trajectory.
+                        // Used by trajectory-first face-point selection in
+                        // presetGenerator.js (selectFacePointsFromTrajectory).
+                        visibilityTimeline: currentVisibilityTimeline.slice()
                     });
+                    evaluationStats.acceptedByMotionThresholds++;
+                } else {
+                    evaluationStats.rejectedByMotionThresholds++;
                 }
 
                 skipCurrentTrajectoryProfile();
+
+                // Early-stop: if we have enough valid progressions from
+                // this face-pair, skip remaining trajectories. Jump
+                // currentTraj to candidates.length so the next loop iter
+                // falls into the "done" branch. (Diversity is preserved —
+                // outer loop will try other face-pair scan candidates.)
+                if (phase2EarlyStopCount > 0 && validProgressions.length >= phase2EarlyStopCount && currentTraj < candidates.length) {
+                    var skipped = candidates.length - currentTraj;
+                    if (skipped > 0) {
+                        console.log("benchmark: phase2 early-stop — " + validProgressions.length + " valid progressions collected, skipping " + skipped + " remaining trajector(y/ies)");
+                    }
+                    currentTraj = candidates.length;
+                }
             }
 
             if (currentTraj >= candidates.length) {
+                stopPhase2Heartbeat();
                 var selected = selectDiverseProgressions(validProgressions, maxCount, minProgressionPairDistance);
+                evaluationStats.validBeforeDiversity = validProgressions.length;
+                evaluationStats.selectedAfterDiversity = selected.length;
+                emitPhase2Heartbeat();
                 console.log("evaluateTrajectoriesLive: " + validProgressions.length + " valid candidates out of " + candidates.length + ", selected " + selected.length);
-                callback(selected);
+                callback(selected, evaluationStats);
                 return;
             }
 
@@ -1436,49 +2295,153 @@ function initBenchmark(globals) {
                 var faceQualities = globals.facePoints && globals.facePoints.getFaceViewQualities
                     ? globals.facePoints.getFaceViewQualities(allVisibleFaceIds) : {};
 
-                // Check target faces pass quality threshold (skip fold=0, always passes)
-                if (step.fold > 0) {
+                var isFinalStep = (currentStep === candidates[currentTraj].length - 1);
+                var validationSettleMs = 800;
+                var extraSettle = Math.max(0, validationSettleMs - settleMs);
+
+                // Final-step correctness gate. The first 300ms Phase 2
+                // settle is too short to measure final-pose quality and
+                // back-face visibility reliably — the mesh is still
+                // transitioning. Defer all final-step checks to the
+                // recheck block at 800ms settle (matching the validator's
+                // settle time) to avoid rejecting correct trajectories
+                // that haven't finished settling yet.
+                //
+                // Quality gate: only applied for strictAllSteps mode.
+                // finalStepOnly accepts any trajectory whose tracked
+                // points are visible and well-separated at the final
+                // pose — face view quality (an angle-to-camera proxy)
+                // is a legitimate concern only when we require ALL steps
+                // to look clean. isPointVisible already enforces the
+                // stricter frontfacing + occlusion test that matters.
+                if (isFinalStep && extraSettle > 0) {
+                    setTimeout(function () {
+                        try {
+                            var reVisibleFaceIds = globals.facePoints && globals.facePoints.getVisibleFaceIds
+                                ? globals.facePoints.getVisibleFaceIds() : [];
+                            var reFaceQualities = globals.facePoints && globals.facePoints.getFaceViewQualities
+                                ? globals.facePoints.getFaceViewQualities(reVisibleFaceIds) : {};
+                            if (step.fold > 0 && trackingEvalMode !== "finalStepOnly") {
+                                for (var rti = 0; rti < targetFaces.length; rti++) {
+                                    var rq = reFaceQualities[targetFaces[rti]] || 0;
+                                    if (rq < minQuality) {
+                                        skipCurrentTrajectoryProfile("quality");
+                                        evaluateNext();
+                                        return;
+                                    }
+                                }
+                            }
+                            faceQualities = reFaceQualities;
+                            var recheckTracked = evaluateTrackedPoints(targetPointIndices, currentStep, candidates[currentTraj].length, minPointSeparation, trackingEvalMode, enforceSeparationAllSteps);
+                            if (!recheckTracked.ok) {
+                                skipCurrentTrajectoryProfile("tracked");
+                                evaluateNext();
+                                return;
+                            }
+                            var recheckPrimary = evaluateTrackedPoints(primaryTargetPointIndices, currentStep, candidates[currentTraj].length, minPointSeparation, trackingEvalMode, enforceSeparationAllSteps);
+                            if (!recheckPrimary.ok) {
+                                skipCurrentTrajectoryProfile("primaryTracked");
+                                evaluateNext();
+                                return;
+                            }
+                            if (enforceInitialTrackedVisible && currentStep === 0) {
+                                var recheckInitialTracked = evaluateTrackedPoints(initialTargetPointIndices, currentStep, candidates[currentTraj].length, minPointSeparation, "strictAllSteps", enforceSeparationAllSteps);
+                                if (!recheckInitialTracked.ok) {
+                                    skipCurrentTrajectoryProfile("initialTracked");
+                                    evaluateNext();
+                                    return;
+                                }
+                                var recheckInitialPrimary = evaluateTrackedPoints(initialPrimaryTargetPointIndices, currentStep, candidates[currentTraj].length, minPointSeparation, "strictAllSteps", enforceSeparationAllSteps);
+                                if (!recheckInitialPrimary.ok) {
+                                    skipCurrentTrajectoryProfile("initialTracked");
+                                    evaluateNext();
+                                    return;
+                                }
+                            }
+                            currentFinalViewScore = computeFinalViewScore(reFaceQualities);
+                            recordStepVisibility(step, stepRot, reVisibleFaceIds, reFaceQualities);
+                            recordFaceStatsAndAdvance();
+                        } catch (err2) {
+                            console.warn("benchmark: final-step recheck error; skipping candidate", err2);
+                            skipCurrentTrajectoryProfile("error");
+                            evaluateNext();
+                        }
+                    }, extraSettle);
+                    return;
+                }
+
+                // Non-final step checks. For finalStepOnly, skip quality
+                // and tracked checks at intermediate steps — the back
+                // face may be partially occluded mid-transition and
+                // that is fine. For strictAllSteps, enforce quality at
+                // all non-zero steps (except the final, handled above).
+                var qualityGateActive = (step.fold > 0) &&
+                    (trackingEvalMode !== "finalStepOnly");
+                if (qualityGateActive) {
                     for (var ti = 0; ti < targetFaces.length; ti++) {
                         var q = faceQualities[targetFaces[ti]] || 0;
                         if (q < minQuality) {
-                            // Trajectory fails — skip to next
-                            skipCurrentTrajectoryProfile();
+                            skipCurrentTrajectoryProfile("quality");
                             evaluateNext();
                             return;
                         }
                     }
                 }
 
-                var trackedEval = evaluateTrackedPoints(targetPointIndices, currentStep, candidates[currentTraj].length, minPointSeparation);
+                var trackedEval = evaluateTrackedPoints(targetPointIndices, currentStep, candidates[currentTraj].length, minPointSeparation, trackingEvalMode, enforceSeparationAllSteps);
                 if (!trackedEval.ok) {
-                    skipCurrentTrajectoryProfile();
+                    skipCurrentTrajectoryProfile("tracked");
                     evaluateNext();
                     return;
                 }
 
-                var primaryTrackedEval = evaluateTrackedPoints(primaryTargetPointIndices, currentStep, candidates[currentTraj].length, minPointSeparation);
+                var primaryTrackedEval = evaluateTrackedPoints(primaryTargetPointIndices, currentStep, candidates[currentTraj].length, minPointSeparation, trackingEvalMode, enforceSeparationAllSteps);
                 if (!primaryTrackedEval.ok) {
-                    skipCurrentTrajectoryProfile();
+                    skipCurrentTrajectoryProfile("primaryTracked");
                     evaluateNext();
                     return;
                 }
 
-                for (var fid3 in faceQualities) {
-                    if (!faceQualities.hasOwnProperty(fid3)) continue;
-                    var q3 = faceQualities[fid3] || 0;
-                    if (q3 <= 0) continue;
-                    if (!currentFaceStats[fid3]) {
-                        currentFaceStats[fid3] = { worst: q3, seenSteps: 1 };
-                    } else {
-                        if (q3 < currentFaceStats[fid3].worst) currentFaceStats[fid3].worst = q3;
-                        currentFaceStats[fid3].seenSteps++;
+                if (enforceInitialTrackedVisible && currentStep === 0) {
+                    var initialTrackedEval = evaluateTrackedPoints(initialTargetPointIndices, currentStep, candidates[currentTraj].length, minPointSeparation, "strictAllSteps", enforceSeparationAllSteps);
+                    if (!initialTrackedEval.ok) {
+                        skipCurrentTrajectoryProfile("initialTracked");
+                        evaluateNext();
+                        return;
+                    }
+                    var initialPrimaryTrackedEval = evaluateTrackedPoints(initialPrimaryTargetPointIndices, currentStep, candidates[currentTraj].length, minPointSeparation, "strictAllSteps", enforceSeparationAllSteps);
+                    if (!initialPrimaryTrackedEval.ok) {
+                        skipCurrentTrajectoryProfile("initialTracked");
+                        evaluateNext();
+                        return;
                     }
                 }
-                currentStep++;
-                evaluateNext();
+
+                if (isFinalStep) {
+                    currentFinalViewScore = computeFinalViewScore(faceQualities);
+                }
+                recordStepVisibility(step, stepRot, allVisibleFaceIds, faceQualities);
+                recordFaceStatsAndAdvance();
+
+                function recordFaceStatsAndAdvance() {
+                    for (var fid3 in faceQualities) {
+                        if (!faceQualities.hasOwnProperty(fid3)) continue;
+                        var q3 = faceQualities[fid3] || 0;
+                        if (q3 <= 0) continue;
+                        if (!currentFaceStats[fid3]) {
+                            currentFaceStats[fid3] = { worst: q3, seenSteps: 1 };
+                        } else {
+                            if (q3 < currentFaceStats[fid3].worst) currentFaceStats[fid3].worst = q3;
+                            currentFaceStats[fid3].seenSteps++;
+                        }
+                    }
+                    currentStep++;
+                    lastAdvanceAt = Date.now();
+                    evaluateNext();
+                }
                 } catch (err) {
                     console.warn("benchmark: trajectory eval error; skipping candidate", err);
-                    skipCurrentTrajectoryProfile();
+                    skipCurrentTrajectoryProfile("error");
                     evaluateNext();
                 }
             }, settleMs);
@@ -1490,6 +2453,11 @@ function initBenchmark(globals) {
     // ── Scan mode: dense fold × POV face-visibility discovery (no screenshots) ──
 
     function runScan(cfg, onComplete) {
+        // Apply colorMode + facePoints so phase-2 trajectory evaluation can
+        // actually see the tracked points. Without this, runScan never
+        // initializes globals.facePoints from cfg.facePoints and
+        // isPointVisible() rejects every trajectory at step 1.
+        applySettings(cfg);
         var foldSteps = cfg.scanFoldSteps || [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
         var povs      = cfg.scanPovs      || ["y", "-y", "z", "-z", "x", "-x", "iso"];
         // If povGridSize is set, generate a continuous POV grid instead
@@ -1503,6 +2471,7 @@ function initBenchmark(globals) {
         var useScanCache = cfg.useScanCache !== false;
         var forceRescan = cfg.forceRescan === true;
         var cacheKey = buildScanCacheKey(cfg, foldSteps);
+        var maxTrajectoryCandidates = (cfg.maxTrajectoryCandidates != null) ? parseInt(cfg.maxTrajectoryCandidates, 10) : 0;
 
         // Build flat list of {fold, pov} combinations
         var combinations = [];
@@ -1688,25 +2657,44 @@ function initBenchmark(globals) {
 
                 // Phase 2: live trajectory evaluation
                 if (cfg.buildProgressions) {
-                    var targetFaces = cfg.targetFaces || [];
+                    var faceCount = (globals.model && globals.model.getFaces) ? globals.model.getFaces().length : 0;
+                    var targetFaces = normalizeFaceIdList(cfg.targetFaces || [], faceCount);
                     if (targetFaces.length === 0 && cfg.facePoints) {
                         if (Array.isArray(cfg.facePoints)) {
                             cfg.facePoints.forEach(function (p) {
-                                if (p.faceId != null && targetFaces.indexOf(p.faceId) === -1) targetFaces.push(p.faceId);
+                                if (p.faceId != null) {
+                                    var normalizedId = normalizeFaceIdToFront(p.faceId, faceCount);
+                                    if (normalizedId !== null && targetFaces.indexOf(normalizedId) === -1) targetFaces.push(normalizedId);
+                                }
                             });
                         } else {
                             Object.keys(cfg.facePoints).forEach(function (k) {
-                                var id = parseInt(k);
-                                if (!isNaN(id) && targetFaces.indexOf(id) === -1) targetFaces.push(id);
+                                var normalizedId = normalizeFaceIdToFront(k, faceCount);
+                                if (normalizedId !== null && targetFaces.indexOf(normalizedId) === -1) targetFaces.push(normalizedId);
                             });
                         }
                     }
-                    var progQuality = cfg.minFaceQuality != null ? cfg.minFaceQuality : 0.6;
+                    var progQuality = cfg.minFaceQuality != null ? cfg.minFaceQuality : 0.35;
+                    var maxTargetFaces = cfg.phase2MaxTargetFaces;
+                    if ((maxTargetFaces === undefined || maxTargetFaces === null) && cfg.difficulty === 1) {
+                        maxTargetFaces = 2;
+                    }
+                    if (maxTargetFaces != null && maxTargetFaces > 0 && targetFaces.length > maxTargetFaces) {
+                        var beforeCap = targetFaces.slice();
+                        targetFaces = capPhase2TargetFaces(targetFaces, maxTargetFaces);
+                        console.log("benchmark: Phase 2: capped targetFaces from [" + beforeCap.join(",") + "] to [" + targetFaces.join(",") + "] (phase2MaxTargetFaces=" + maxTargetFaces + ")");
+                    }
                     var progCount = typeof cfg.buildProgressions === "number" ? cfg.buildProgressions : 20;
-                    var candidates = generateCandidateTrajectories(scanStates, foldSteps, progCount);
+                    var candidates = generateCandidateTrajectories(scanStates, foldSteps, progCount, {
+                        staticPov: true
+                    });
+                    if (!isNaN(maxTrajectoryCandidates) && maxTrajectoryCandidates > 0 && candidates.length > maxTrajectoryCandidates) {
+                        console.log("benchmark: capping phase 2 trajectories from " + candidates.length + " to " + maxTrajectoryCandidates);
+                        candidates = candidates.slice(0, maxTrajectoryCandidates);
+                    }
 
                     updateStatus("Phase 2: evaluating " + candidates.length + " trajectories live…");
-                    evaluateTrajectoriesLive(candidates, targetFaces, progQuality, progCount, settleMs, cfg, function (diverseProgressions) {
+                    evaluateTrajectoriesLive(candidates, targetFaces, progQuality, progCount, settleMs, cfg, function (diverseProgressions, progressionStats) {
                         if (useScanCache && !forceRescan) {
                             saveScanCache(cacheKey, {
                                 cacheKey: cacheKey,
@@ -1716,7 +2704,7 @@ function initBenchmark(globals) {
                                 scanStates: scanStates
                             });
                         }
-                        finishScan(suggestedSequences, diverseProgressions);
+                        finishScan(suggestedSequences, diverseProgressions, progressionStats);
                     });
                     return;
                 }
@@ -1731,10 +2719,10 @@ function initBenchmark(globals) {
                     });
                 }
 
-                finishScan(suggestedSequences, []);
+                finishScan(suggestedSequences, [], null);
                 return;
 
-                function finishScan(suggestedSequences, diverseProgressions) {
+                function finishScan(suggestedSequences, diverseProgressions, progressionStats) {
                     var result = {
                         benchmark:          name,
                         model:              cfg.model || null,
@@ -1743,20 +2731,23 @@ function initBenchmark(globals) {
                         scanFoldSteps:      foldSteps,
                         suggestedSequences: suggestedSequences,
                         diverseProgressions: diverseProgressions.length > 0 ? diverseProgressions : undefined,
+                        progressionStats:   progressionStats || undefined,
                         povAnalysis:        cfg.povGridSize ? undefined : povAnalysis
                     };
 
-                    var blob = new Blob([JSON.stringify(result, null, 2)], { type: "application/json" });
-                    var formData = new FormData();
-                    formData.append("file", blob, "scan.json");
-                    fetch("/api/screenshot?folder=" + encodeURIComponent(name), { method: "POST", body: formData })
-                        .then(function (res) {
-                            if (!res.ok) throw new Error("server error");
-                            console.log("benchmark: saved screenshots/" + name + "/scan.json");
-                        })
-                        .catch(function () {
-                            console.warn("benchmark: could not save scan (server unavailable)");
-                        });
+                    if (cfg.saveScanResult !== false) {
+                        var blob = new Blob([JSON.stringify(result, null, 2)], { type: "application/json" });
+                        var formData = new FormData();
+                        formData.append("file", blob, "scan.json");
+                        fetch("/api/screenshot?folder=" + encodeURIComponent(name), { method: "POST", body: formData })
+                            .then(function (res) {
+                                if (!res.ok) throw new Error("server error");
+                                console.log("benchmark: saved screenshots/" + name + "/scan.json");
+                            })
+                            .catch(function () {
+                                console.warn("benchmark: could not save scan (server unavailable)");
+                            });
+                    }
 
                     running = false;
                     if (diverseProgressions.length > 0) {
@@ -1767,7 +2758,7 @@ function initBenchmark(globals) {
                         updateStatus("Scan complete. Suggested sequences: " + count);
                     }
                     console.log("benchmark: scan complete, suggestedSequences:", suggestedSequences);
-                    if (onComplete) onComplete();
+                    if (onComplete) onComplete(result);
                 }
             }
 
@@ -1912,12 +2903,15 @@ function initBenchmark(globals) {
                         // points are re-shown by runFoldAnimation before this callback
                         if (cfg.autoCapture) {
                             var endPov = (Array.isArray(kf) && kf.length > 0) ? kf[kf.length - 1].pov : (anim.pov || "iso");
+                            showStepNumber(1, 2);
                             updateStatus("Capturing end state…");
                             captureFinalWithBothStyles(stepLabel(anim.to != null ? anim.to : 90, endPov), stepLabel(anim.to != null ? anim.to : 90, endPov), cfg.labelStyle, function () {
+                                hideStepNumber();
                                 console.log("benchmark: fold animation complete");
                                 if (onComplete) onComplete();
                             });
                         } else {
+                            hideStepNumber();
                             console.log("benchmark: fold animation complete");
                             if (onComplete) onComplete();
                         }
@@ -1934,6 +2928,7 @@ function initBenchmark(globals) {
                     updateStatus("Settling " + (settleMs / 1000) + "s before start capture…");
                     setTimeout(function () {
                         var startPov = (Array.isArray(kf) && kf.length > 0) ? kf[0].pov : (anim.pov || "iso");
+                        showStepNumber(0, 2);
                         updateStatus("Capturing start state…");
                         captureScreenshot(stepLabel(foldFrom, startPov), function () {
                             doAnimation();
@@ -2037,9 +3032,32 @@ function initBenchmark(globals) {
     }
 
     // Load a preset by name and config, then callback when model is ready.
+    //
+    // Model cache: if the requested model is already loaded (same path AND
+    // mesh faces present), skip importDemoFile and just apply settings.
+    // Saves ~1-2s per preset on shards that share a model, which is the
+    // common case in dataset rendering (e.g. a 50-preset birdBase shard
+    // re-parses the SVG 50 times today). run() resets fold + rotation on
+    // its first call, so simulation state from the previous preset doesn't
+    // leak through.
     function selectPresetFromConfig(name, cfg, callback) {
+        currentBenchmarkName = name;
+        config = cfg;
         if (cfg.model) {
-            globals.loadedModel = cfg.model.replace(/'/g, '');
+            var requestedModel = cfg.model.replace(/'/g, '');
+            var modelAlreadyLoaded = false;
+            try {
+                var faces = (globals.model && globals.model.getFaces) ? globals.model.getFaces() : null;
+                modelAlreadyLoaded = (globals.loadedModel === requestedModel) && faces && faces.length > 0;
+            } catch (_e) {}
+
+            if (modelAlreadyLoaded) {
+                applySettings(cfg);
+                if (callback) callback();
+                return;
+            }
+
+            globals.loadedModel = requestedModel;
             globals.importer.importDemoFile(globals.loadedModel);
             waitForModelLoad(function () {
                 applySettings(cfg);
@@ -2051,24 +3069,83 @@ function initBenchmark(globals) {
         }
     }
 
+    function ensureJsonPathOption(path) {
+        if (!path || !$("#benchmarkJsonPath").length) return;
+        var $sel = $("#benchmarkJsonPath");
+        var exists = false;
+        $sel.find("option").each(function () {
+            if ($(this).val() === path) {
+                exists = true;
+                return false;
+            }
+        });
+        if (!exists) {
+            $sel.append($("<option></option>").attr("value", path).text(path));
+        }
+    }
+
+    function refreshJsonPaths(selectedPath, callback) {
+        var $sel = $("#benchmarkJsonPath");
+        var pathFromUrl = getParam("benchmarks");
+        var targetPath = selectedPath || pathFromUrl || ($sel.length ? $sel.val() : null) || "benchmarks.json";
+
+        if (!$sel.length) {
+            if (callback) callback(targetPath);
+            return;
+        }
+
+        var basePaths = [];
+        $sel.find("option").each(function () {
+            var v = $(this).val();
+            if (v && basePaths.indexOf(v) === -1) basePaths.push(v);
+        });
+        if (basePaths.length === 0) basePaths.push("benchmarks.json");
+
+        $.getJSON("/api/candidates?_=" + Date.now())
+            .done(function (resp) {
+                var candidates = (resp && Array.isArray(resp.files)) ? resp.files : [];
+                var allPaths = basePaths.slice();
+                candidates.forEach(function (path) {
+                    if (allPaths.indexOf(path) === -1) allPaths.push(path);
+                });
+                if (targetPath && allPaths.indexOf(targetPath) === -1) allPaths.push(targetPath);
+
+                $sel.empty();
+                allPaths.forEach(function (path) {
+                    $sel.append($("<option></option>").attr("value", path).text(path));
+                });
+                $sel.val(targetPath);
+            })
+            .fail(function () {
+                ensureJsonPathOption(targetPath);
+                $sel.val(targetPath);
+            })
+            .always(function () {
+                if (callback) callback($sel.val() || targetPath || "benchmarks.json");
+            });
+    }
+
     // ── Public: initialize — called from main.js before model load ──
     // loadModelCallback(modelPath) is called once config is parsed,
     // passing the model path to load (from benchmark preset, URL, or null for default).
 
     function init(cb) {
         loadModelCallback = cb;
-        $.getJSON("benchmarks.json")
-            .done(function (loaded) {
-                presets = loaded;
-                config = buildConfig(presets);
-                populatePresetDropdown();
-                onConfigReady(cb);
-            })
-            .fail(function () {
-                presets = null;
-                config = buildConfig(null);
-                updateStatus("No benchmarks.json found.");
-                onConfigReady(cb);
+        refreshJsonPaths(null, function (jsonPath) {
+            $.getJSON(jsonPath + "?_=" + Date.now())
+                .done(function (loaded) {
+                    presets = loaded;
+                    config = buildConfig(presets);
+                    populatePresetDropdown();
+                    startWatching(jsonPath);
+                    onConfigReady(cb);
+                })
+                .fail(function () {
+                    presets = null;
+                    config = buildConfig(null);
+                    updateStatus("No benchmark JSON found at " + jsonPath + ".");
+                    onConfigReady(cb);
+                });
             });
     }
 
@@ -2080,6 +3157,23 @@ function initBenchmark(globals) {
         names.forEach(function (name) {
             $sel.append($("<option></option>").attr("value", name).text(name));
         });
+    }
+
+    function populateStepSelect() {
+        var $sel = $("#benchmarkStepSelect");
+        if (!$sel.length) return;
+        $sel.empty();
+        if (!config || !config.steps || config.steps.length === 0) {
+            $sel.append("<option value=''>— no steps —</option>");
+            return;
+        }
+        for (var i = 0; i < config.steps.length; i++) {
+            var s = config.steps[i];
+            var desc = "Step " + (i + 1) + ": fold " + s.fold + "%";
+            if (s.pov) desc += ", " + (Array.isArray(s.pov) ? "[" + s.pov.join(",") + "]" : s.pov);
+            if (s.rotation) desc += " +rot";
+            $sel.append($("<option></option>").attr("value", i).text(desc));
+        }
     }
 
     function selectPreset(name) {
@@ -2098,10 +3192,12 @@ function initBenchmark(globals) {
             waitForModelLoad(function () {
                 applySettings(config);
                 updateStatus("Preset \"" + name + "\" ready. " + config.steps.length + " steps.");
+                populateStepSelect();
             });
         } else {
             applySettings(config);
             updateStatus("Preset \"" + name + "\" applied. " + config.steps.length + " steps.");
+            populateStepSelect();
         }
     }
 
@@ -2112,6 +3208,7 @@ function initBenchmark(globals) {
         }
         var benchmarksPath = getParam("benchmarks");
         if (benchmarksPath && $("#benchmarkJsonPath").length) {
+            ensureJsonPathOption(benchmarksPath);
             $("#benchmarkJsonPath").val(benchmarksPath);
         }
         var benchmarkModel = config ? config.model : null;
@@ -2122,7 +3219,12 @@ function initBenchmark(globals) {
         waitForModelLoad(function () {
             if (config) {
                 applySettings(config);
-                updateStatus("Benchmark ready: " + config.steps.length + " steps.");
+                var readyStepCount = (config.steps && config.steps.length) ? config.steps.length : 0;
+                if (config.scanMode) {
+                    updateStatus("Benchmark ready: scan mode (" + readyStepCount + " steps).");
+                } else {
+                    updateStatus("Benchmark ready: " + readyStepCount + " steps.");
+                }
                 if (config.autoRun) {
                     setTimeout(function () { run(config); }, 500);
                 }
@@ -2134,30 +3236,167 @@ function initBenchmark(globals) {
         });
     }
 
-    function loadJson(path) {
+    function loadJson(path, silent) {
         if (!path) return;
-        $.getJSON(path)
+        $.getJSON(path + "?_=" + Date.now())
             .done(function (loaded) {
                 presets = loaded;
+                var prevPreset = currentBenchmarkName;
                 populatePresetDropdown();
-                updateStatus("Loaded " + Object.keys(loaded).length + " presets from " + path);
+                // re-select and refresh current preset if it still exists
+                if (prevPreset && presets[prevPreset]) {
+                    var prevStep = parseInt($("#benchmarkStepSelect").val(), 10);
+                    config = $.extend(true, {}, presets[prevPreset]);
+                    if (!config.pauseDuration) config.pauseDuration = 2;
+                    if (!config.steps) config.steps = [{ fold: 0, pov: "iso" }];
+                    $("#benchmarkPresetSelect").val(prevPreset);
+                    populateStepSelect();
+                    if (!isNaN(prevStep) && prevStep >= 0 && config.steps && prevStep < config.steps.length) {
+                        $("#benchmarkStepSelect").val(prevStep);
+                    }
+                    if (!silent) updateStatus("Reloaded \"" + prevPreset + "\" (" + config.steps.length + " steps).");
+                } else {
+                    if (!silent) updateStatus("Loaded " + Object.keys(loaded).length + " presets from " + path);
+                }
             })
             .fail(function () {
-                presets = null;
-                populatePresetDropdown();
-                updateStatus("Could not load " + path);
+                if (!silent) {
+                    presets = null;
+                    populatePresetDropdown();
+                    updateStatus("Could not load " + path);
+                }
             });
+    }
+
+    // Auto-reload JSON on file change (polls every 2s via Last-Modified header)
+    var _watchPath = null;
+    var _watchLastModified = null;
+    var _watchTimer = null;
+
+    function startWatching(path) {
+        stopWatching();
+        _watchPath = path;
+        _watchLastModified = null;
+        _watchTimer = setInterval(function () {
+            if (!_watchPath) return;
+            $.ajax({
+                url: _watchPath + "?_=" + Date.now(),
+                type: "HEAD",
+                success: function (data, status, xhr) {
+                    var lm = xhr.getResponseHeader("Last-Modified");
+                    if (!lm) return;
+                    if (_watchLastModified === null) {
+                        _watchLastModified = lm;
+                        return;
+                    }
+                    if (lm !== _watchLastModified) {
+                        _watchLastModified = lm;
+                        loadJson(_watchPath, true);
+                        updateStatus("JSON reloaded (file changed).");
+                    }
+                }
+            });
+        }, 2000);
+    }
+
+    function stopWatching() {
+        if (_watchTimer) { clearInterval(_watchTimer); _watchTimer = null; }
+        _watchPath = null;
+        _watchLastModified = null;
+    }
+
+    function goToStep(index) {
+        if (!config || !config.steps) return;
+        var steps = config.steps;
+        if (index < 0 || index >= steps.length) return;
+        var step = steps[index];
+        currentStep = index;
+
+        // set fold
+        globals.setCreasePercent(step.fold / 100);
+        globals.shouldChangeCreasePercent = true;
+
+        // set camera POV
+        setPOV(step.pov);
+
+        // apply rotation
+        if (step.rotation !== undefined && step.rotation !== null) {
+            applyRotation(step.rotation);
+        } else {
+            globals.threeView.resetModel();
+        }
+
+        // reveal hidden points only on last step
+        globals.revealHiddenPoints = (index === steps.length - 1);
+        globals.hideFacePointsDuringAnimation = false;
+
+        if (globals.model && globals.model.updateFaceColors) globals.model.updateFaceColors();
+        if (globals.controls && globals.controls.updateCreasePercent) globals.controls.updateCreasePercent();
+
+        updateStatus("Step " + (index + 1) + "/" + steps.length +
+                     " — fold " + step.fold + "%" +
+                     (step.pov ? ", POV " + (Array.isArray(step.pov) ? "[" + step.pov.join(", ") + "]" : step.pov) : ""));
+    }
+
+    function saveViewToStep(index) {
+        if (!config || !config.steps) return null;
+        var steps = config.steps;
+        if (index < 0 || index >= steps.length) return null;
+        var step = steps[index];
+
+        var cam = globals.threeView.camera;
+        var mw = globals.threeView.modelWrapper;
+        if (!cam || !mw) return null;
+
+        // Current camera direction → pov
+        var camPos = cam.position.clone().normalize();
+        var pov = [
+            parseFloat(camPos.x.toFixed(2)),
+            parseFloat(camPos.y.toFixed(2)),
+            parseFloat(camPos.z.toFixed(2))
+        ];
+        step.pov = pov;
+
+        // Current model rotation
+        var rx = parseFloat(mw.rotation.x.toFixed(2));
+        var ry = parseFloat(mw.rotation.y.toFixed(2));
+        var rz = parseFloat(mw.rotation.z.toFixed(2));
+        if (rx !== 0 || ry !== 0 || rz !== 0) {
+            step.rotation = [rx, ry, rz];
+        } else {
+            delete step.rotation;
+        }
+
+        // Also update the master presets object so it can be saved
+        if (presets && currentBenchmarkName && presets[currentBenchmarkName]) {
+            presets[currentBenchmarkName].steps[index] = $.extend(true, {}, step);
+        }
+
+        populateStepSelect();
+        $("#benchmarkStepSelect").val(index);
+
+        updateStatus("Saved view to step " + (index + 1) + ": pov [" + pov.join(", ") + "]" +
+            (step.rotation ? ", rot [" + step.rotation.join(", ") + "]" : ""));
+        return step;
     }
 
     return {
         init: init,
         run: run,
         runAll: runAll,
+        runScan: runScan,
         loadJson: loadJson,
+        startWatching: startWatching,
+        refreshJsonPaths: refreshJsonPaths,
         selectPreset: selectPreset,
+        goToStep: goToStep,
+        saveViewToStep: saveViewToStep,
         getConfig: function () { return config; },
         getPresets: function () { return presets; },
         isRunning: function () { return running; },
-        setPOV: setPOV
+        setPOV: setPOV,
+        applySettings: applySettings,
+        getPointScreenPosition: getPointScreenPosition,
+        evaluateTrackedPoints: evaluateTrackedPoints
     };
 }

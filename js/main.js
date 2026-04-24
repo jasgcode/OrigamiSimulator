@@ -66,6 +66,7 @@ $(function() {
 
     globals.curvedFolding = initCurvedFolding(globals);//for curved folding
     globals.benchmark = initBenchmark(globals);
+    globals.presetGenerator = initPresetGenerator(globals);
 
     // initialize benchmark system (loads JSON presets, applies URL params)
     // benchmark.init() returns the model to load (from preset or URL),

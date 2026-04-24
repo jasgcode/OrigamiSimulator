@@ -6,4 +6,10 @@ node_modules
 CreasePatternScripts/**/*.pdf
 CreasePatternScripts/**/*.svg
 screenshots
-.env*
+*.env
+wandb
+wandb/*
+eval*
+test_suite/m/*
+*.log
+*.json

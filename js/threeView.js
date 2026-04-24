@@ -157,6 +157,76 @@ function initThreeView(globals) {
         globals.simulationRunning = true;
     }
 
+    // ── Face ID overlay ──
+    var faceIdCanvas = document.getElementById("faceIdCanvas");
+    var faceIdCtx = faceIdCanvas ? faceIdCanvas.getContext("2d") : null;
+    var _faceIdVisible = false;
+
+    function hideFaceIdOverlay() {
+        if (_faceIdVisible && faceIdCanvas) {
+            faceIdCanvas.style.display = "none";
+            _faceIdVisible = false;
+        }
+    }
+
+    function renderFaceIdOverlay() {
+        if (!faceIdCanvas || !faceIdCtx || !globals.model) { hideFaceIdOverlay(); return; }
+        var faces = globals.model.getFaces();
+        if (!faces || faces.length === 0) { hideFaceIdOverlay(); return; }
+
+        // size canvas to match renderer
+        var base = renderer.domElement;
+        var w = base.width || window.innerWidth;
+        var h = base.height || window.innerHeight;
+        if (faceIdCanvas.width !== w) faceIdCanvas.width = w;
+        if (faceIdCanvas.height !== h) faceIdCanvas.height = h;
+        var cssW = base.clientWidth || window.innerWidth;
+        var cssH = base.clientHeight || window.innerHeight;
+        faceIdCanvas.style.width = cssW + "px";
+        faceIdCanvas.style.height = cssH + "px";
+        faceIdCanvas.style.display = "block";
+        _faceIdVisible = true;
+
+        faceIdCtx.clearRect(0, 0, w, h);
+
+        var cam = camera;
+        cam.updateMatrixWorld();
+        var camDir = new THREE.Vector3();
+        cam.getWorldDirection(camDir);
+
+        var scale = w / cssW;
+        var fontSize = Math.max(10, Math.round(11 * scale));
+        faceIdCtx.font = fontSize + "px Arial";
+        faceIdCtx.textAlign = "center";
+        faceIdCtx.textBaseline = "middle";
+
+        for (var i = 0; i < faces.length; i++) {
+            var centroid = globals.model.getFaceCentroid(i);
+            if (!centroid) continue;
+
+            // transform centroid through modelWrapper
+            var worldPos = centroid.clone();
+            modelWrapper.updateMatrixWorld();
+            worldPos.applyMatrix4(modelWrapper.matrixWorld);
+
+            // project to screen
+            var projected = worldPos.clone().project(cam);
+            if (projected.z < -1 || projected.z > 1) continue;
+            var sx = (projected.x * 0.5 + 0.5) * w;
+            var sy = (-projected.y * 0.5 + 0.5) * h;
+
+            // draw background pill + text
+            var text = String(i);
+            var metrics = faceIdCtx.measureText(text);
+            var pw = metrics.width + 6;
+            var ph = fontSize + 4;
+            faceIdCtx.fillStyle = "rgba(0,0,0,0.55)";
+            faceIdCtx.fillRect(sx - pw / 2, sy - ph / 2, pw, ph);
+            faceIdCtx.fillStyle = "#fff";
+            faceIdCtx.fillText(text, sx, sy);
+        }
+    }
+
     var captureStats = $("#stopRecord>span");
     function _render(){
         if (globals.vrEnabled){
@@ -165,6 +235,8 @@ function initThreeView(globals) {
         }
         renderer.render(scene, camera);
         if (globals.pointAnnotations && globals.pointAnnotations.render) globals.pointAnnotations.render();
+        if (globals.showFaceIds) renderFaceIdOverlay();
+        else hideFaceIdOverlay();
         if (globals.capturer) {
             if (globals.capturer == "png"){
                 var canvas = globals.threeView.renderer.domElement;
@@ -177,13 +249,35 @@ function initThreeView(globals) {
                 globals.shouldScaleCanvas = false;
                 globals.shouldAnimateFoldPercent = false;
                 var sourceCanvas = canvas;
-                if (annotationCanvas && annotationCanvas.style.display !== "none") {
+                var needsMerge = (annotationCanvas && annotationCanvas.style.display !== "none") || globals.stepNumberText;
+                if (needsMerge) {
                     var merged = document.createElement("canvas");
                     merged.width = canvas.width;
                     merged.height = canvas.height;
                     var mergedCtx = merged.getContext("2d");
                     mergedCtx.drawImage(canvas, 0, 0);
-                    mergedCtx.drawImage(annotationCanvas, 0, 0, merged.width, merged.height);
+                    if (annotationCanvas && annotationCanvas.style.display !== "none") {
+                        mergedCtx.drawImage(annotationCanvas, 0, 0, merged.width, merged.height);
+                    }
+                    if (globals.stepNumberText) {
+                        var scale = merged.width / (canvas.clientWidth || merged.width);
+                        var fontSize = Math.round(48 * scale);
+                        mergedCtx.font = "bold " + fontSize + "px Arial, sans-serif";
+                        var text = globals.stepNumberText;
+                        var metrics = mergedCtx.measureText(text);
+                        var padX = Math.round(12 * scale);
+                        var padY = Math.round(4 * scale);
+                        var tx = Math.round(16 * scale);
+                        var ty = Math.round(16 * scale);
+                        var boxW = metrics.width + padX * 2;
+                        var boxH = fontSize + padY * 2;
+                        mergedCtx.fillStyle = "rgba(255,255,255,0.75)";
+                        mergedCtx.beginPath();
+                        mergedCtx.roundRect(tx, ty, boxW, boxH, Math.round(6 * scale));
+                        mergedCtx.fill();
+                        mergedCtx.fillStyle = "#222";
+                        mergedCtx.fillText(text, tx + padX, ty + padY + fontSize * 0.85);
+                    }
                     sourceCanvas = merged;
                 }
                 sourceCanvas.toBlob(function(blob) {

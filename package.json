@@ -4,10 +4,10 @@
   "type": "module",
   "private": true,
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "puppeteer": "^24.40.0"
   },
-  "scripts":{
-
+  "scripts": {
     "dev": "bun server.js"
   },
   "peerDependencies": {

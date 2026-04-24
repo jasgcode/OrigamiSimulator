@@ -111,6 +111,7 @@ function initGlobals(){
         clickToAddFacePoints: false,
         showFacePointNumbers: true,
         facePoints3D: false,
+        showFaceIds: false,
         hideFacePointsDuringAnimation: false,
         revealHiddenPoints: false,
         labelStyle: "circle"

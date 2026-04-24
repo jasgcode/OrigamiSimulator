@@ -29,7 +29,7 @@ function initPointAnnotations(globals) {
         if (!overlayCanvas || !overlayCtx) return false;
         if (!globals || !globals.facePoints || !globals.model) return false;
         if (globals.labelStyle !== "arrow") return false;
-        if (!(globals.colorMode === "labelOnly" || globals.colorMode === "faceTriangleID")) return false;
+        if (!(globals.colorMode === "labelOnly" || globals.colorMode === "faceTriangleID" || globals.colorMode === "greyscaleLabel")) return false;
         if (globals.hideFacePointsDuringAnimation) return false;
         if (!globals.revealHiddenPoints) return false;
         return true;
@@ -159,8 +159,7 @@ function initPointAnnotations(globals) {
         var laneInset = 20 * styleScale;
         var connectorGap = 10 * styleScale;
 
-        var frontItems = [];
-        var backItems = [];
+        var visibleItems = [];
 
         for (var i = 0; i < points.length; i++) {
             var point = points[i];
@@ -179,36 +178,98 @@ function initPointAnnotations(globals) {
             var screen = worldToScreen(posWorld, camera, w, h);
             if (!screen) continue;
 
-            var side = point.faceId < totalFaces ? "front" : "back";
-            var item = {
+            visibleItems.push({
                 label: pointLetter(i),
                 anchorX: screen.x,
                 anchorY: screen.y,
-                side: side,
                 labelY: screen.y
-            };
-            if (side === "front") frontItems.push(item);
-            else backItems.push(item);
+            });
         }
 
-        layoutLane(frontItems, marginY, h - marginY, minGap);
-        layoutLane(backItems, marginY, h - marginY, minGap);
+        // Assign each label to left or right side based on anchor screen position
+        // Use centroid of all anchors as the dividing line
+        var leftItems = [];
+        var rightItems = [];
+        if (visibleItems.length > 0) {
+            var centroidX = 0;
+            for (var ci = 0; ci < visibleItems.length; ci++) centroidX += visibleItems[ci].anchorX;
+            centroidX /= visibleItems.length;
+            // Clamp centroid so we don't put all labels on one extreme edge
+            centroidX = clamp(centroidX, w * 0.25, w * 0.75);
 
-        var allItems = frontItems.concat(backItems);
-        var minAnchorX = w * 0.35;
-        var maxAnchorX = w * 0.65;
-        if (allItems.length > 0) {
-            minAnchorX = allItems[0].anchorX;
-            maxAnchorX = allItems[0].anchorX;
-            for (var ai = 1; ai < allItems.length; ai++) {
-                if (allItems[ai].anchorX < minAnchorX) minAnchorX = allItems[ai].anchorX;
-                if (allItems[ai].anchorX > maxAnchorX) maxAnchorX = allItems[ai].anchorX;
+            for (var si = 0; si < visibleItems.length; si++) {
+                if (visibleItems[si].anchorX <= centroidX) {
+                    visibleItems[si].side = "left";
+                    leftItems.push(visibleItems[si]);
+                } else {
+                    visibleItems[si].side = "right";
+                    rightItems.push(visibleItems[si]);
+                }
+            }
+            // If all items ended up on one side, split the outermost one to the other
+            if (leftItems.length === 0 && rightItems.length > 1) {
+                rightItems.sort(function(a, b) { return a.anchorX - b.anchorX; });
+                var moved = rightItems.shift();
+                moved.side = "left";
+                leftItems.push(moved);
+            } else if (rightItems.length === 0 && leftItems.length > 1) {
+                leftItems.sort(function(a, b) { return b.anchorX - a.anchorX; });
+                var moved2 = leftItems.shift();
+                moved2.side = "right";
+                rightItems.push(moved2);
             }
         }
 
+        layoutLane(leftItems, marginY, h - marginY, minGap);
+        layoutLane(rightItems, marginY, h - marginY, minGap);
+
+        // Resolve line crossings within each lane: if two labels' lines cross,
+        // swap their labelY positions to uncross them
+        function uncrossLane(items) {
+            if (items.length < 2) return;
+            var swapped = true;
+            var maxPasses = items.length * items.length;
+            while (swapped && maxPasses-- > 0) {
+                swapped = false;
+                for (var a = 0; a < items.length - 1; a++) {
+                    for (var b = a + 1; b < items.length; b++) {
+                        // Lines cross if label order and anchor order disagree
+                        var labelOrder = items[a].labelY - items[b].labelY;
+                        var anchorOrder = items[a].anchorY - items[b].anchorY;
+                        if (labelOrder * anchorOrder < 0) {
+                            var tmp = items[a].labelY;
+                            items[a].labelY = items[b].labelY;
+                            items[b].labelY = tmp;
+                            swapped = true;
+                        }
+                    }
+                }
+            }
+        }
+        uncrossLane(leftItems);
+        uncrossLane(rightItems);
+
+        // Compute lane X positions based on each side's anchors
         var lanePad = 84 * styleScale;
-        var laneLeftX = clamp(minAnchorX - lanePad, laneInset, w * 0.48);
-        var laneRightX = clamp(maxAnchorX + lanePad, w * 0.52, w - laneInset);
+        var laneLeftX, laneRightX;
+        if (leftItems.length > 0) {
+            var minLeftAnchor = leftItems[0].anchorX;
+            for (var li = 1; li < leftItems.length; li++) {
+                if (leftItems[li].anchorX < minLeftAnchor) minLeftAnchor = leftItems[li].anchorX;
+            }
+            laneLeftX = clamp(minLeftAnchor - lanePad, laneInset, w * 0.48);
+        } else {
+            laneLeftX = laneInset;
+        }
+        if (rightItems.length > 0) {
+            var maxRightAnchor = rightItems[0].anchorX;
+            for (var ri = 1; ri < rightItems.length; ri++) {
+                if (rightItems[ri].anchorX > maxRightAnchor) maxRightAnchor = rightItems[ri].anchorX;
+            }
+            laneRightX = clamp(maxRightAnchor + lanePad, w * 0.52, w - laneInset);
+        } else {
+            laneRightX = w - laneInset;
+        }
 
         overlayCtx.save();
         overlayCtx.lineWidth = 2 * styleScale;
@@ -221,7 +282,7 @@ function initPointAnnotations(globals) {
             var labelX;
             var connectorX;
 
-            if (item.side === "front") {
+            if (item.side === "left") {
                 overlayCtx.textAlign = "right";
                 labelX = laneLeftX - connectorGap;
                 connectorX = laneLeftX;
@@ -249,8 +310,8 @@ function initPointAnnotations(globals) {
             overlayCtx.fillText(item.label, labelX, item.labelY);
         }
 
-        for (var fi = 0; fi < frontItems.length; fi++) drawItem(frontItems[fi]);
-        for (var bi = 0; bi < backItems.length; bi++) drawItem(backItems[bi]);
+        for (var fi = 0; fi < leftItems.length; fi++) drawItem(leftItems[fi]);
+        for (var bi = 0; bi < rightItems.length; bi++) drawItem(rightItems[bi]);
 
         overlayCtx.restore();
     }

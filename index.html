@@ -799,6 +799,7 @@
     <script type="text/javascript" src="dependencies/svgpath.js"></script>
     <script type="text/javascript" src="js/curvedFolding.js"></script>
     <script type="text/javascript" src="js/benchmark.js"></script>
+    <script type="text/javascript" src="js/presetGenerator.js"></script>
 
     <script type="text/javascript" src="js/main.js"></script>
 </head>
@@ -1118,6 +1119,9 @@
 
 <div  id="threeContainer"></div>
 <canvas id="pointAnnotationCanvas"></canvas>
+<canvas id="faceIdCanvas"></canvas>
+<div id="stepNumberOverlay"></div>
+<div id="pointMoveModeIndicator" style="display:none; position:fixed; top:10px; left:50%; transform:translateX(-50%); background:rgba(0,0,0,0.75); color:#fff; padding:6px 16px; border-radius:4px; font:bold 14px Arial; z-index:100; pointer-events:none;">POINT MOVE MODE (V to toggle)</div>
 <canvas id="gpuMathCanvas"></canvas>
 <div id="basicUI">
     <!--<div class="inlineBlock fullWidth">-->
@@ -1327,6 +1331,10 @@
                             <input id="facePoints3D" data-toggle="checkbox" class="custom-checkbox" type="checkbox"><span class="icons"><span class="icon-unchecked"></span><span class="icon-checked"></span></span>
                             3D points (spheres)
                         </label><br/>
+                        <label class="checkbox" for="showFaceIds">
+                            <input id="showFaceIds" data-toggle="checkbox" class="custom-checkbox" type="checkbox"><span class="icons"><span class="icon-unchecked"></span><span class="icon-checked"></span></span>
+                            Show face IDs
+                        </label><br/>
                         <span class="smallTxt">When enabled, hover shows a preview; click on a face to place a point there. Disabled by default so rotation works without accidental placement. You can rotate (Rotate mode) or grab (Grab mode) while placing and moving points.</span><br/>
                         <div id="facePointList" class="smallTxt"></div>
                         <span class="smallTxt">Total faces: <span id="totalTriFaces">0</span> (0&ndash;<span id="triFrontMax"></span> front, <span id="triBackMin"></span>&ndash;<span id="triBackMax"></span> back)</span><br/>
@@ -1341,8 +1349,21 @@
                         <label>Color 2 (rgb hex): &nbsp;&nbsp;</label><input id="labelOnlyColor2" value="" placeholder="" class="hexVal form-control" type="text"><br/>
                         <span class="smallTxt">Points use the same list as Face (Triangle) ID Colors.</span>
                     </div>
+                    <label class="radio">
+                        <input name="colorMode" value="greyscaleLabel" data-toggle="radio" class="custom-radio" type="radio"><span class="icons"><span class="icon-unchecked"></span><span class="icon-checked"></span></span>
+                        Greyscale + Labels
+                    </label>
                 </div>
                 <br/>
+                <div>
+                    <a href="#" class="seeMore closed" data-id="viewStateSection"><span class="fui-triangle-down"></span>View State (for benchmarks)</a>:
+                </div>
+                <div id="viewStateSection" class="hide indent">
+                    <span class="smallTxt">Current camera &amp; model state for benchmark authoring.</span><br/>
+                    <div id="viewStateDisplay" class="smallTxt" style="font-family:monospace; margin:4px 0; padding:4px; background:#f8f8f8; border:1px solid #ddd; border-radius:3px; white-space:pre-wrap; max-height:120px; overflow-y:auto;"></div>
+                    <a href="#" id="copyViewState" class="btn btn-xs btn-default" style="margin-top:2px;">Copy Step JSON</a>
+                    <a href="#" id="copyViewStateRotationOnly" class="btn btn-xs btn-default" style="margin-top:2px;">Copy Rotation</a>
+                </div>
             </div><br/>
             <div>
                 <a href="#" class="seeMore closed" data-id="edgeVisibility"><span class="fui-triangle-down"></span>Edge Visibility</a>:
@@ -1403,8 +1424,51 @@
                 </select><br/><br/>
                 <a href="#" id="runBenchmark" class="btn btn-sm btn-inverse">Run</a>
                 <a href="#" id="runAllBenchmarks" class="btn btn-sm btn-inverse">Run All</a><br/><br/>
+                <label>Go to step: &nbsp;</label>
+                <a href="#" id="stepPrev" class="btn btn-xs btn-default">&larr;</a>
+                <select id="benchmarkStepSelect" class="form-control" style="width:auto; display:inline-block; min-width:160px;">
+                    <option value="">— load preset first —</option>
+                </select>
+                <a href="#" id="stepNext" class="btn btn-xs btn-default">&rarr;</a>
+                <a href="#" id="saveStepView" class="btn btn-xs btn-warning" style="margin-left:8px;">Save View to Step</a><br/>
+                <a href="#" id="exportPresetSteps" class="btn btn-xs btn-info" style="margin-top:4px;">Copy All Steps JSON</a><br/><br/>
                 <span id="benchmarkStatus">Select a preset or use URL params to configure.</span><br/>
                 <span class="smallTxt">Use URL params or benchmarks.json to configure.</span>
+                <hr style="margin:8px 0;"/>
+                <b>Preset Generator</b><br/>
+                <label>Model: &nbsp;</label>
+                <select id="genModel" class="form-control" style="width:auto; display:inline-block;">
+                    <option value="/Bases/birdBase.svg">birdBase</option>
+                    <option value="/Bases/waterbombBase.svg">waterbombBase</option>
+                    <option value="/Bases/frogBase.svg">frogBase</option>
+                    <option value="/Bases/boatBase.svg">boatBase</option>
+                    <option value="/Origami/traditionalCrane.svg">traditionalCrane</option>
+                    <option value="/Origami/flat_crane.svg">flat_crane</option>
+                    <option value="/Bases/squareBase.svg">squareBase</option>
+                    <option value="/Bases/pinwheelBase.svg">pinwheelBase</option>
+                </select><br/>
+                <label>Difficulty: &nbsp;</label>
+                <select id="genDifficulty" class="form-control" style="width:auto; display:inline-block;">
+                    <option value="1">1 — Static, one side</option>
+                    <option value="2">2 — Static, reveal</option>
+                    <option value="3">3 — Rotation, one side</option>
+                    <option value="4">4 — Cross-side</option>
+                    <option value="5" selected>5 — Full (bird-frontback)</option>
+                </select><br/>
+                <label>Count: &nbsp;</label>
+                <input id="genCount" type="number" value="7" min="1" max="50" style="width:50px;" class="form-control" style="display:inline-block;"/><br/>
+                <label>Base name: &nbsp;</label>
+                <input id="genBaseName" type="text" value="bird-frontback" style="width:140px;" class="form-control" style="display:inline-block;"/><br/>
+                <label>Start index: &nbsp;</label>
+                <input id="genStartIndex" type="number" value="9" min="1" max="999" style="width:60px;" class="form-control" style="display:inline-block;"/><br/>
+                <label>Templates: &nbsp;</label>
+                <input id="genTemplatePattern" type="text" value="bird-frontback-0*" style="width:160px;" class="form-control" style="display:inline-block;"/><br/>
+                <label>Seed: &nbsp;</label>
+                <input id="genSeed" type="number" value="42" style="width:80px;" class="form-control" style="display:inline-block;"/><br/>
+                <label><input type="checkbox" id="genValidate" checked/> Validate visibility</label><br/><br/>
+                <a href="#" id="runGenerator" class="btn btn-sm btn-success">Generate</a>
+                <a href="#" id="saveGeneratedPresets" class="btn btn-sm btn-inverse" style="display:none;">Save to benchmarks.json</a><br/>
+                <span id="generatorStatus" class="smallTxt"></span>
             </div><br/>
             <div>
                 <a href="#" class="seeMore closed" data-id="virtualReality"><span class="fui-triangle-down"></span>Virtual Reality:</a><a class="about floatRight" href="#" id="aboutVR"><span class="fui-question-circle"></span></a>
