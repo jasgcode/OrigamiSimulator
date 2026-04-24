@@ -963,14 +963,23 @@ function initBenchmark(globals) {
 
     // ── POV grid generation (Fibonacci sphere on upper hemisphere) ──
 
-    function generatePovGrid(count) {
-        // Fibonacci sphere sampling, filtered to y >= -0.3.
-        // count controls total sphere points before filtering; all passing points are kept.
+    function generatePovGrid(count, opts) {
+        // Fibonacci sphere sampling, filtered by y bounds. Default bounds
+        // (y in [0.3, 0.95]) keep every sampled POV in the "iso-ish" upper
+        // hemisphere — above the equator (y >= 0.3 ≈ 17°+ above horizon)
+        // but not pure top-down (y <= 0.95 leaves at least ~18° of off-axis
+        // tilt). iso is (1,1,1) normalized so y = 0.577. This guarantees
+        // the initial state of every preset is rendered from a BEV-ish
+        // angle that reads as 3D rather than top-down or edge-on.
+        // Override via opts.minY / opts.maxY (or cfg.minPovY / cfg.maxPovY
+        // upstream) if a preset needs a wider sphere.
+        var minY = (opts && opts.minY != null) ? opts.minY : 0.3;
+        var maxY = (opts && opts.maxY != null) ? opts.maxY : 0.95;
         var goldenAngle = Math.PI * (3 - Math.sqrt(5));
         var candidates = [];
         for (var i = 0; i < count; i++) {
             var y = 1 - (2 * i / (count - 1));
-            if (y < -0.3) continue;
+            if (y < minY || y > maxY) continue;
             var radius = Math.sqrt(1 - y * y);
             var theta = goldenAngle * i;
             var x = Math.cos(theta) * radius;
@@ -1230,29 +1239,33 @@ function initBenchmark(globals) {
             hiddenSet[summary.hiddenPoints[hi]] = true;
         }
 
-        var trajectory = [];
-        for (var si = 0; si < totalSteps; si++) {
+        // Build per-step visible-label arrays. Hidden indices are excluded
+        // from non-final steps and included at the final step (matches the
+        // reveal semantics).
+        function answerLabelsForStep(si, isFinal) {
             var st = stateAccumulator[si] || {};
-            var isFinal = (si === totalSteps - 1);
-            // Filter visiblePoints: hidden indices removed at non-final steps,
-            // included at the final step (matches the reveal semantics).
             var visIdx = (st.visiblePoints || []).slice().sort(function (a, b) { return a - b; });
-            var answerLabels = [];
+            var labels = [];
             for (var vi = 0; vi < visIdx.length; vi++) {
                 if (!isFinal && hiddenSet[visIdx[vi]]) continue;
                 var lbl = pointIndexToLabel(visIdx[vi]);
-                if (lbl) answerLabels.push(lbl);
+                if (lbl) labels.push(lbl);
             }
-            trajectory.push({
-                step_index: si,
-                current_images: ["images/" + id + "/" + jsonlStepFilename(si)],
-                state: isFinal ? "success" : "in progress",
-                answer: answerLabels,
-                invalid_response: false,
-                api_error: false,
-                illegal: false,
-                raw_response_text: JSON.stringify({ visible_points: answerLabels })
-            });
+            return labels;
+        }
+
+        var lastIdx = (totalSteps > 0) ? totalSteps - 1 : 0;
+        var initialState = {
+            image: "images/" + id + "/" + jsonlStepFilename(0),
+            visible_points: answerLabelsForStep(0, false)
+        };
+        var finalState = {
+            image: "images/" + id + "/" + jsonlStepFilename(lastIdx),
+            visible_points: answerLabelsForStep(lastIdx, true)
+        };
+        var intermediateImages = [];
+        for (var si = 1; si < lastIdx; si++) {
+            intermediateImages.push("images/" + id + "/" + jsonlStepFilename(si));
         }
 
         var d = parseInt(config && config.difficulty, 10);
@@ -1261,7 +1274,7 @@ function initBenchmark(globals) {
 
         return {
             id: id,
-            category: ["origami", "origami_point_tracking", "interactive"],
+            category: ["origami", "origami_point_tracking"],
             type: "episode_rollout",
             question: question,
             meta_info: {
@@ -1276,18 +1289,23 @@ function initBenchmark(globals) {
                 final_reason: "all_states_rendered",
                 total_steps: totalSteps
             },
-            trajectory: trajectory
+            initial_state: initialState,
+            final_state: finalState,
+            intermediate_images: intermediateImages
         };
     }
 
     function postJsonlEntry(entry) {
-        var fresh = !jsonlBatchStarted;
+        // Always append. Truncation is the CALLER's responsibility (e.g.
+        // the python parallel runner removes dataset.jsonl before launching
+        // shards). Per-process truncate-on-first-preset would race and
+        // silently drop entries when multiple shards run concurrently.
         jsonlBatchStarted = true;
         var line = JSON.stringify(entry);
         return fetch("/api/jsonl-append", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ path: "dataset.jsonl", line: line, fresh: fresh })
+            body: JSON.stringify({ path: "dataset.jsonl", line: line, fresh: false })
         })
         .then(function (res) {
             if (!res.ok) throw new Error("jsonl-append failed");
@@ -1721,20 +1739,28 @@ function initBenchmark(globals) {
             return d1Profiles;
         }
 
-        // d2: static POV + small rotation (hidden-back reveal semantics).
+        // d2: Phase 2 uses d4's RAMPING profiles (so it actually finds
+        // back-exposing trajectories — constant rotation from step 0 makes
+        // Phase 2 reject most trajectories because anchor fails visibility
+        // at flat-paper-plus-max-tilt). The "no inter-step motion" contract
+        // is enforced POST-PHASE-2 by normalizeStepsForDifficulty: for d2
+        // it overrides every step's rotation with the FINAL step's value,
+        // yielding a constant-rotation preset whose final pose matches
+        // Phase 2's proven back-exposing state. User insight: "for d2 we
+        // can use final states of d4 rather than manually finding angles."
         if (!isNaN(difficulty) && difficulty === 2) {
-            var d2YawEnv = [0.00, 0.12, 0.24, 0.36, 0.50, 0.64, 0.78, 0.90, 1.00, 1.00];
-            var d2PitchEnv = [0.00, 0.10, 0.20, 0.32, 0.46, 0.62, 0.78, 0.90, 1.00, 1.00];
-            var d2RollEnv = [0.00, 0.02, 0.05, 0.08, 0.11, 0.14, 0.17, 0.20, 0.24, 0.22];
+            var d2YawEnv = [0.00, 0.10, 0.22, 0.34, 0.46, 0.58, 0.70, 0.82, 0.92, 1.00];
+            var d2PitchEnv = [0.00, 0.10, 0.22, 0.34, 0.46, 0.58, 0.70, 0.82, 0.92, 1.00];
+            var d2RollEnv = [0.00, 0.04, 0.10, 0.18, 0.28, 0.40, 0.54, 0.70, 0.86, 1.00];
             var d2Templates = [
-                { name: "d2-cw",            yaw:  1.00, pitch:  1.00, roll:  0.35 },
-                { name: "d2-ccw",           yaw: -1.00, pitch:  1.00, roll: -0.35 },
-                { name: "d2-cw-pitch-neg",  yaw:  0.90, pitch: -0.75, roll:  0.25 },
-                { name: "d2-ccw-pitch-neg", yaw: -0.90, pitch: -0.75, roll: -0.25 },
-                { name: "d2-cw-soft",       yaw:  0.70, pitch:  0.60, roll:  0.15 },
-                { name: "d2-ccw-soft",      yaw: -0.70, pitch:  0.60, roll: -0.15 }
+                { name: "d2-cw",            yaw:  1.00, pitch:  1.00, roll:  0.95 },
+                { name: "d2-ccw",           yaw: -1.00, pitch: -1.00, roll: -0.95 },
+                { name: "d2-cw-strong",     yaw:  1.12, pitch:  1.00, roll:  1.00 },
+                { name: "d2-ccw-strong",    yaw: -1.12, pitch: -1.00, roll: -1.00 },
+                { name: "d2-cw-pitch-neg",  yaw:  1.05, pitch: -0.60, roll:  0.82 },
+                { name: "d2-ccw-pitch-neg", yaw: -1.05, pitch:  0.60, roll: -0.82 }
             ];
-            var requestedD2 = cfg && cfg.rotationProfileCount != null ? cfg.rotationProfileCount : 6;
+            var requestedD2 = (cfg && cfg.rotationProfileCount != null) ? cfg.rotationProfileCount : 6;
             var d2Count = Math.max(1, Math.min(requestedD2, d2Templates.length));
             var d2Profiles = [];
             for (var d2t = 0; d2t < d2Count; d2t++) {
@@ -2193,13 +2219,25 @@ function initBenchmark(globals) {
         // each step and their quality scores — already computed for the quality
         // gate, so no extra GPU work.
         function recordStepVisibility(step, stepRot, visibleFaceIds, qualityMap) {
+            // Also record faces whose BACK side is camera-facing — used by
+            // selectFacePointsFromTrajectory to detect d2/d4 hidden-back
+            // candidates. Without this the timeline only knows about
+            // front-facing faces and can't tell whether a back surface is
+            // exposed at the final step.
+            var backSideVisibleFaceIds = [];
+            try {
+                if (globals.facePoints && globals.facePoints.getBackSideVisibleFaceIds) {
+                    backSideVisibleFaceIds = globals.facePoints.getBackSideVisibleFaceIds();
+                }
+            } catch (_e) {}
             currentVisibilityTimeline.push({
                 stepIndex: currentStep,
                 fold: step.fold,
                 pov: step.pov,
                 rotation: stepRot ? [stepRot.x, stepRot.y, stepRot.z] : null,
                 visibleFaceIds: (visibleFaceIds || []).slice(),
-                qualities: qualityMap ? Object.assign({}, qualityMap) : {}
+                qualities: qualityMap ? Object.assign({}, qualityMap) : {},
+                backSideVisibleFaceIds: backSideVisibleFaceIds
             });
         }
 
@@ -2624,7 +2662,10 @@ function initBenchmark(globals) {
         var povs      = cfg.scanPovs      || ["y", "-y", "z", "-z", "x", "-x", "iso"];
         // If povGridSize is set, generate a continuous POV grid instead
         if (cfg.povGridSize && !cfg.scanPovs) {
-            var grid = generatePovGrid(cfg.povGridSize);
+            var grid = generatePovGrid(cfg.povGridSize, {
+                minY: cfg.minPovY != null ? cfg.minPovY : 0.3,
+                maxY: cfg.maxPovY != null ? cfg.maxPovY : 0.95
+            });
             // Include standard named POVs as well for completeness
             povs = ["y", "-y", "z", "-z", "x", "-x", "iso"].concat(grid);
         }

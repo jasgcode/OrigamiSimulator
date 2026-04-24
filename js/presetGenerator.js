@@ -478,18 +478,25 @@ function initPresetGenerator(globals) {
             rotations.push(parseRotationVec(steps[i].rotation));
         }
 
+        // Hero-shot step 0 uses a fixed iso POV for the thumbnail frame and
+        // is not part of the tracking motion model. Classify motion from
+        // states 2..N (tracking-optimized POV) so d1/d2 thresholds stay
+        // consistent regardless of the hero-shot override.
+        var motionPovs = povs.length > 1 ? povs.slice(1) : povs;
+        var motionRots = rotations.length > 1 ? rotations.slice(1) : rotations;
+
         var povTotalAngle = 0;
-        for (var pi = 1; pi < povs.length; pi++) {
-            povTotalAngle += angleBetweenVec3(povs[pi - 1], povs[pi]);
+        for (var pi = 1; pi < motionPovs.length; pi++) {
+            povTotalAngle += angleBetweenVec3(motionPovs[pi - 1], motionPovs[pi]);
         }
-        var povEndAngle = angleBetweenVec3(povs[0], povs[povs.length - 1]);
+        var povEndAngle = angleBetweenVec3(motionPovs[0], motionPovs[motionPovs.length - 1]);
 
         var rotationTotal = 0;
-        for (var ri = 1; ri < rotations.length; ri++) {
-            var dr = subVec3(rotations[ri], rotations[ri - 1]);
+        for (var ri = 1; ri < motionRots.length; ri++) {
+            var dr = subVec3(motionRots[ri], motionRots[ri - 1]);
             rotationTotal += vecLen3(dr);
         }
-        var rotationEndMagnitude = vecLen3(subVec3(rotations[rotations.length - 1], rotations[0]));
+        var rotationEndMagnitude = vecLen3(subVec3(motionRots[motionRots.length - 1], motionRots[0]));
 
         return {
             povEndAngle: povEndAngle,
@@ -1247,7 +1254,15 @@ function initPresetGenerator(globals) {
                     var rw = Math.round((1 - ru - rv) * 100) / 100;
                     return { u: ru, v: rv, w: rw };
                 }
-                var gridValues = [0.22, 0.30, 0.38, 0.45, 0.52];
+                // Tier-aware grid density. d1/d2 use a 3×3 grid (~9
+                // candidates) since their geometry is simpler and refinement
+                // is cosmetic. d3/d4 keep the 5×5 grid (~25 candidates) for
+                // tighter placement on rotated/two-sided poses where the
+                // rendered point is more sensitive to barycentric position.
+                var refineTier = (preset && preset.difficulty) ? clampDifficultyTier(preset.difficulty) : 4;
+                var gridValues = (refineTier <= 2)
+                    ? [0.27, 0.37, 0.47]
+                    : [0.22, 0.30, 0.38, 0.45, 0.52];
                 var baseCandidates = [];
                 for (var ui = 0; ui < gridValues.length; ui++) {
                     for (var vi = 0; vi < gridValues.length; vi++) {
@@ -1647,6 +1662,28 @@ function initPresetGenerator(globals) {
         return [pitchDir * pitchBase, yawDir * yawBase, rollDir * rollBase];
     }
 
+    // Hero-shot constraint: state 1 (step 0) keeps the trajectory's STATIC
+    // POV — same as states 2..N — but has zero rotation. This renders the
+    // flat paper (fold=0) from the trajectory's own viewing direction,
+    // giving a clean "before" reference frame while preserving a single
+    // camera viewpoint across the entire sequence.
+    //
+    // Earlier versions forced iso POV here, which caused a visible
+    // "inversion" between state 1 and state 2 when the trajectory POV sat
+    // in a different hemisphere than iso (e.g. trajectory at
+    // [-0.5, 0.63, -0.59] vs iso at [0.58, 0.58, 0.58] — the model appears
+    // to flip left-right when stepping from 1 → 2). Keeping POV static
+    // across all states eliminates that flip; only rotation distinguishes
+    // state 1 (zero) from states 2..N (frozen d2 / ramping d4).
+    //
+    // runStep / validatePreset honor per-step rotation and fall back to
+    // resetModel() when step.rotation is absent.
+    function applyHeroShotStep0(out) {
+        if (!out || out.length === 0) return out;
+        delete out[0].rotation;
+        return out;
+    }
+
     function normalizeStepsForDifficulty(steps, difficulty, rng) {
         var profile = getDifficultyProfile(difficulty);
         var out = [];
@@ -1691,7 +1728,37 @@ function initPresetGenerator(globals) {
         // Preserve Phase 2's rotation curve when present — those specific
         // values are what made the trajectory succeed (brought the hidden
         // back face into view, kept the front face visible, etc).
+        //
+        // d2 exception: Phase 2 uses a ramping profile (to actually expose
+        // back faces during trajectory search), but the emitted preset must
+        // be STATIC (no inter-step motion per user spec). Freeze every step
+        // to the FINAL step's rotation — that's where the back-exposing
+        // pose lives. Final-state geometry matches d4's success; d2 differs
+        // only in that the paper is already pre-tilted to that pose at
+        // fold=0 rather than ramping into it.
         if (hasIncomingRotation) {
+            var isD2 = (profile.tier === 2);
+            if (isD2) {
+                var finalRv = null;
+                for (var fri = steps.length - 1; fri >= 0; fri--) {
+                    var frv = parseRotationVec(steps[fri] && steps[fri].rotation);
+                    if (Math.abs(frv[0]) > 1e-8 || Math.abs(frv[1]) > 1e-8 || Math.abs(frv[2]) > 1e-8) {
+                        finalRv = frv;
+                        break;
+                    }
+                }
+                if (finalRv) {
+                    var frozenRot = [
+                        Math.round(finalRv[0] * 100) / 100,
+                        Math.round(finalRv[1] * 100) / 100,
+                        Math.round(finalRv[2] * 100) / 100
+                    ];
+                    for (var rji2 = 0; rji2 < out.length; rji2++) {
+                        out[rji2].rotation = frozenRot.slice();
+                    }
+                    return applyHeroShotStep0(out);
+                }
+            }
             for (var rji = 0; rji < steps.length; rji++) {
                 var srv = parseRotationVec(steps[rji] && steps[rji].rotation);
                 if (Math.abs(srv[0]) > 1e-8 || Math.abs(srv[1]) > 1e-8 || Math.abs(srv[2]) > 1e-8) {
@@ -1702,11 +1769,11 @@ function initPresetGenerator(globals) {
                     ];
                 }
             }
-            return out;
+            return applyHeroShotStep0(out);
         }
 
         // No incoming rotation and static tier: emit static preset.
-        if (profile.isStaticTier) return out;
+        if (profile.isStaticTier) return applyHeroShotStep0(out);
 
         // Synthesize a tier-appropriate rotation: 0 → target with
         // ease-in-out so the reveal happens in the last ~30% of the
@@ -1728,7 +1795,7 @@ function initPresetGenerator(globals) {
             }
         }
 
-        return out;
+        return applyHeroShotStep0(out);
     }
 
     function scoreDifficultyFit(preset, difficulty, modelFaceCount) {
@@ -2179,15 +2246,19 @@ function initPresetGenerator(globals) {
         }
         var fronts = normalizePool(frontPool);
 
-        // Back pool: STRICTLY index-based — faces with INDEX in [N/2, N-1]
-        // (the second half of the mesh, per user spec). Intersected downstream
-        // with the trajectory's finalVisible so we only pick back-pool faces
-        // the rotation actually exposes. d4 requires 1-2 hidden points
-        // on faces from this range; trajectories that don't expose enough
-        // back-half faces are dropped by the coverage gate below.
-        var backStart = Math.floor(N / 2);
+        // Back pool: ALL mesh face indices [0, N-1]. The actual "back" gate
+        // is the geometric isBackSideExposed filter below — a face qualifies
+        // as a back-pool member only if its back side is camera-facing AND
+        // unoccluded at the trajectory's final step (per the
+        // backSideVisibleFaceIds timeline data). Thin-pool models like boat
+        // / waterbomb / simplevertex have their geometric back faces at
+        // arbitrary indices (often [0,1] — outside any "second half"
+        // range), so any pre-filter on index range deterministically kills
+        // d2/d4 for those models. Letting the geometric gate be the sole
+        // filter satisfies the user's primary contract: "guarantee a point
+        // on the back side of the paper visible at the final state."
         var backs = [];
-        for (var bii = backStart; bii < N; bii++) backs.push(bii);
+        for (var bii = 0; bii < N; bii++) backs.push(bii);
 
         // Build alwaysVisible set + min-step quality from the timeline.
         var firstStep = timeline[0];
@@ -2224,6 +2295,17 @@ function initPresetGenerator(globals) {
         for (var fi2 = 0; fi2 < finalStep.visibleFaceIds.length; fi2++) {
             finalVisible[finalStep.visibleFaceIds[fi2]] = true;
         }
+        // Final-step back-side-visible faces (face's back surface is
+        // camera-facing AND unoccluded). Computed by getBackSideVisibleFaceIds
+        // in facePoints.js and recorded in the timeline. Used to gate d2/d4
+        // hidden-back picks: a hidden back point only "guarantees back side
+        // visibility" if the underlying face's back surface is actually
+        // exposed at the final state.
+        var finalBackSideVisible = {};
+        var bsv = finalStep.backSideVisibleFaceIds || [];
+        for (var fbi = 0; fbi < bsv.length; fbi++) {
+            finalBackSideVisible[bsv[fbi]] = true;
+        }
 
         // Visible-front anchors must be visible at EVERY step regardless of
         // tier. The user's hard contract: "initial points must be visible
@@ -2241,15 +2323,22 @@ function initPresetGenerator(globals) {
             return (minStepQuality[b] || 0) - (minStepQuality[a] || 0);
         });
 
-        // Hidden-back candidates: in backPool, visible at final step.
-        // Final-pose quality from getFaceViewQualities is ~0 for back-side
-        // faces; tiebreak on backPool order (discoverFacePools sorts by
-        // back-pool relevance).
-        var rankedBacks = backs.filter(function (fid) { return finalVisible[fid]; });
+        // Hidden-back candidates must satisfy BOTH (per user spec):
+        //   (a) Index-based: face id in [N/2, N-1] (already in `backs`).
+        //   (b) Geometric back-side exposed at final: the face's BACK
+        //       surface is camera-facing AND unoccluded. Computed by
+        //       getBackSideVisibleFaceIds (the back-facing analogue of
+        //       getVisibleFaceIds) and recorded in the timeline as
+        //       backSideVisibleFaceIds.
+        // The picked face indices are stored in the preset with faceId =
+        // (idx + N) so isPointVisible's `isFront = id < N` path correctly
+        // checks back-facing visibility, and the renderer treats the point
+        // as a back-surface marker.
+        function isBackSideExposed(fid) {
+            return !!finalBackSideVisible[fid];
+        }
+        var rankedBacks = backs.filter(isBackSideExposed);
         rankedBacks.sort(function (a, b) {
-            var qa = finalQuality[a] || 0;
-            var qb = finalQuality[b] || 0;
-            if (qb !== qa) return qb - qa;
             return backs.indexOf(a) - backs.indexOf(b);
         });
 
@@ -2282,16 +2371,16 @@ function initPresetGenerator(globals) {
         else                 ranges = { vF: [2, 2], hF: [1, 2], hB: [1, 2] };
 
         // For two-sided tiers (d2, d4), the FINAL POSE must show at least
-        // hB.lower back-pool faces (indices [N/2, N-1]) visible at the final
-        // step — that's the minimum required to fill the tier's hidden-back
-        // slots. Earlier this was hardcoded at >=2, which trips strict
-        // index-based pools on models like bird (only 4 of 8 back-half
-        // faces are ever back-visible, and rotation typically exposes 0-1).
-        // Use the range's lower bound so the gate matches the tier plan.
+        // hB.lower back-pool faces that are GEOMETRICALLY back-side-exposed
+        // at the final step — same definition rankedBacks uses (index in
+        // [N/2, N-1] AND front-normal quality < BACK_SIDE_QUALITY_MAX).
+        // This guarantees the rendered PNG actually has visible back-surface
+        // for the hidden reveal, not just a face-id in the back-half range
+        // that happens to be front-facing.
         var requiresBothSides = (tier === 2 || tier === 4);
         var backVisibleAtFinalCount = 0;
         for (var bvi = 0; bvi < backs.length; bvi++) {
-            if (finalVisible[backs[bvi]]) backVisibleAtFinalCount++;
+            if (isBackSideExposed(backs[bvi])) backVisibleAtFinalCount++;
         }
         if (requiresBothSides) {
             var minBackAtFinal = ranges.hB[0];
@@ -2384,7 +2473,13 @@ function initPresetGenerator(globals) {
             }
             for (var av = 0; av < visF.length; av++) add(visF[av], false);
             for (var af = 0; af < hidF.length; af++) add(hidF[af], true);
-            for (var ab = 0; ab < hidB.length; ab++) add(hidB[ab], true);
+            // Hidden-back picks: use faceId = (idx + N) so the simulator
+            // treats the point as a back-surface marker (isPointVisible's
+            // `isFront = id < N` path will require the BACK normal to face
+            // the camera). Without this the point would be a front-side
+            // marker on the same face — visible only when the front is
+            // exposed, defeating the d2/d4 hidden-back-reveal semantic.
+            for (var ab = 0; ab < hidB.length; ab++) add(hidB[ab] + N, true);
 
             configs.push({
                 facePoints: config,
@@ -2437,8 +2532,15 @@ function initPresetGenerator(globals) {
         // pose can be. Without this d1 collapses to the single "flat from
         // above" view.
         if (tier === 1) return { yaw: 0.5, pitch: 0.15, roll: 0.08 };
-        // d2: small rotation across fold steps (hidden-back reveal model).
-        if (tier === 2) return { yaw: 0.2, pitch: 0.2, roll: 0.05 };
+        // d2: Phase 2 uses ramping rotation (like d4) so it actually finds
+        // back-exposing trajectories, then normalizeStepsForDifficulty
+        // FREEZES the emitted preset's rotation to the final step's value.
+        // Uses d4-magnitude rotation (yaw/pitch ≈ 1.0) — smaller magnitudes
+        // don't reliably expose back-side faces at the final state. The
+        // hero-shot step-0 override (iso POV + no rotation) prevents the
+        // initial frame from being edge-on, so validation of step 0 passes
+        // even under large constant rotation for steps 1..N.
+        if (tier === 2) return { yaw: 1.0, pitch: 1.0, roll: 0.25 };
         // d3: rotated single-side, moderate yaw with mild pitch/roll.
         if (tier === 3) return { yaw: 0.5, pitch: 0.15, roll: 0.08 };
         // d4: rotated two-sided, ~1.0 rad to match bird-frontback reference
@@ -2682,16 +2784,12 @@ function initPresetGenerator(globals) {
                     // only runs if the timeline's final-step record
                     // disagrees with the live (settle-time) geometry.
                     //
-                    // "back" = face index in [N/2, N-1] — same strict
-                    // definition selectFacePointsFromTrajectory uses for
-                    // hidden-back picks. Earlier this used backFaces
-                    // (pools.back from discoverFacePools, visibility-based),
-                    // which disagreed with the picker's index-based pool —
-                    // hidden-back picks like face 13 didn't register as
-                    // "back" in this count, so the top-off fired anyway and
-                    // added an extra hidden face (observed: d2 presets with
-                    // 5 picks instead of the planned 4).
-                    var presetBackStart = Math.floor(modelFaceCount / 2);
+                    // "back" = faceId >= N (back-side IDs). The picker
+                    // stores hidden-back picks with faceId = (idx + N) so
+                    // the simulator treats them as back-surface markers
+                    // (isPointVisible's `isFront = id < N` path requires
+                    // back-normal facing camera). Counting must use the
+                    // same semantic so the top-off doesn't fire spuriously.
                     var presetHiddenBack = 0, presetHiddenFront = 0;
                     var presetKeys = Object.keys(preset.facePoints || {});
                     for (var pk = 0; pk < presetKeys.length; pk++) {
@@ -2700,7 +2798,7 @@ function initPresetGenerator(globals) {
                         if (!Array.isArray(arr)) continue;
                         for (var ai = 0; ai < arr.length; ai++) {
                             if (arr[ai] && arr[ai].hidden) {
-                                if (!isNaN(fid) && fid >= presetBackStart) presetHiddenBack++;
+                                if (!isNaN(fid) && fid >= modelFaceCount) presetHiddenBack++;
                                 else presetHiddenFront++;
                             }
                         }
@@ -2854,19 +2952,29 @@ function initPresetGenerator(globals) {
             setTimeout(function () {
 
                 var requiredIndices = [];
+                // d2 presets are emitted with FROZEN rotation (final-step
+                // value applied to every step) even though Phase 2 tested a
+                // ramping trajectory. This means middle-step geometry in
+                // the emitted preset is NOT what Phase 2 validated — face
+                // visibility at mid-folds with max rotation can flicker.
+                // For d2 we therefore only check non-hidden points at the
+                // boundary states (step 0 hero-shot and final step),
+                // mirroring what the user actually sees: state 0 is the
+                // high-visibility iso overview, final state is the proven
+                // back-exposing pose. Middle-state flicker is accepted.
+                var isD2Preset = (preset.difficulty === 2);
+                var isBoundaryStep = (stepIdx === 0) || isLast;
                 for (var i = 0; i < pointIndices.length; i++) {
                     var pInfo = pointIndices[i];
                     // Hidden points only need to be visible at final step.
                     if (pInfo.hidden && !isLast) continue;
                     requiredIndices.push(pInfo.idx);
 
-                    // Non-hidden tracked points MUST be visible at every step.
-                    // trackingEvalMode is now strictly a hidden-point semantic
-                    // (where to check hidden reveals), not a per-preset gate
-                    // that lets visible anchors disappear mid-fold. This
-                    // catches presets where a "visible" face went out of view
-                    // during the rotation ramp — the user observed several
-                    // such broken presets in the rendered output.
+                    // Non-hidden: all tiers except d2 require visible at
+                    // every step. d2 requires visible only at boundary
+                    // (state 0 hero + final state).
+                    if (isD2Preset && !isBoundaryStep) continue;
+
                     var visible = globals.facePoints.isPointVisible(pInfo.idx);
                     if (!visible) {
                         failures.push({

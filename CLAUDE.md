@@ -307,19 +307,27 @@ Each `runAll` invocation writes a JSONL file at `screenshots/dataset.jsonl` (tru
 ```json
 {
   "id": "origami_point_tracking_difficulty_<n>_<modelStem>_<NN>",
-  "category": ["origami", "origami_point_tracking", "interactive"],
+  "category": ["origami", "origami_point_tracking"],
   "type": "episode_rollout",
   "question": "You are solving a 3D point-tracking question on a folding origami model. The model goes through {N} folding states. ...",
   "meta_info": { "task_name", "config", "level", "seed", "repeat_index", "difficulty", "model_id", "success", "final_reason", "total_steps" },
-  "trajectory": [
-    { "step_index": 0, "current_images": ["images/<id>/step_0000_current.png"], "state": "in progress", "answer": ["B","C","D"], "invalid_response": false, "api_error": false, "illegal": false, "raw_response_text": "{\"visible_points\":[\"B\",\"C\",\"D\"]}" },
-    ...
-    { "step_index": N-1, "state": "success", ... }
+  "initial_state": {
+    "image": "images/<id>/step_0000_current.png",
+    "visible_points": ["B", "C", "D"]
+  },
+  "final_state": {
+    "image": "images/<id>/step_<lastIdx>_current.png",
+    "visible_points": ["A", "B", "C", "D", "E", "F"]
+  },
+  "intermediate_images": [
+    "images/<id>/step_0001_current.png",
+    "...",
+    "images/<id>/step_<lastIdx-1>_current.png"
   ]
 }
 ```
 
-PNGs are written to `screenshots/images/<id>/step_NNNN_current.png` (0-based, 4-digit padded). Hidden points are filtered from `answer` on intermediate steps and included on the final step (matches the reveal semantics). The id format is `origami_point_tracking_difficulty_<d>_<modelStem>_<NN>` where `NN` is the seed/index parsed from the preset name (truncated to 60 chars). See `buildJsonlEntry`, `postJsonlEntry`, and `buildJsonlId` in `js/benchmark.js`.
+PNGs are written to `screenshots/images/<id>/step_NNNN_current.png` (0-based, 4-digit padded). `initial_state.image` is step 0; `final_state.image` is the last step (`total_steps - 1`); `intermediate_images` lists every step strictly between them, so its length equals `total_steps - 2` (e.g. 8 entries for a 10-step preset, 3 for a 5-step d1). Hidden points are excluded from `initial_state.visible_points` and included in `final_state.visible_points` (reveal semantics). The id format is `origami_point_tracking_difficulty_<d>_<modelStem>_<NN>` where `NN` is the seed/index parsed from the preset name (truncated to 60 chars). See `buildJsonlEntry`, `postJsonlEntry`, and `buildJsonlId` in `js/benchmark.js`.
 
 **Server endpoint** — `POST /api/jsonl-append` with `{ path, line, fresh }`. `fresh: true` truncates the file (used for the first preset of a batch); otherwise appends. The per-segment folder sanitiser preserves nested paths like `images/<id>` instead of collapsing slashes (same sanitiser is used by `/api/screenshot`). See `server.js`.
 
@@ -375,6 +383,8 @@ Presets use a **static camera + object rotation** model. The camera POV is fixed
 `generateCandidateTrajectories` in `js/benchmark.js` is **static-POV-only**: every generated progression step repeats the same endpoint `pov` (motion comes from per-step model `rotation` during Phase 2 / playback).
 
 Because Phase 2's POV-motion gate evaluates POV direction changes, static-POV progressions produce **0** `endAngle` / `totalAngle`. Custom `scanMode` benchmarks therefore need **`minProgressionEndAngle: 0`** and **`minProgressionTotalAngle: 0`** (URL params supported) whenever `buildProgressions` is enabled — the hybrid generator does this automatically.
+
+**Hero-shot state 1.** `applyHeroShotStep0` in `js/presetGenerator.js` keeps step 0's POV equal to the trajectory's static POV (same as states 2..N) and only deletes `step.rotation`. State 1 renders the flat paper (fold=0) from the chosen camera direction with zero rotation; states 2..N apply the frozen (d1/d2) or ramping (d3/d4) rotation on top. POV is constant across the whole sequence so the camera never appears to "jump" between state 1 and state 2 — only the model rotates. (An earlier version forced `iso` POV at state 1, which caused visible inversions when the trajectory POV sat in a different hemisphere.) `runStep` / `validatePreset` honor per-step `pov` / `rotation` and fall back to `resetModel()` when `step.rotation` is absent. `computeStepMotionMetrics` skips step 0 so tier motion thresholds remain consistent.
 
 ### Tracked point counts (generator)
 
