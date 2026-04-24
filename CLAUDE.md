@@ -76,7 +76,7 @@ Two tests, both using raw ray-triangle intersection (no `material.side` culling,
 
 - **`isPointVisible(index)`** — gate used everywhere (benchmark, validation, label overlay):
   1. Face-normal test: `dot(toCamera, normal) > 0` (front points) / `< 0` (back points).
-  2. Frustum test: project point to NDC and reject if `x`, `y`, or `z` falls outside `[-1, 1]`. Without this, off-screen or behind-camera points pass the other tests and validation falsely accepts presets whose tracked points are invisible in the rendered PNG.
+  2. **Frustum check** — point projected to NDC; rejected if outside `[-1, 1]` on any axis. Catches off-screen points that would otherwise pass face-normal + occlusion tests.
   3. Occlusion test: ray from the point toward the camera must not hit another mesh face before reaching it. Origin is nudged off the surface by `OCCL_EPSILON = 0.002` so the point's own face isn't hit.
 - **`hasForwardClearance(index, dist)`** — stricter gate used only by the barycentric refiner. Imagines a short arrow pointing outward from the point along the face's +normal (for back-side points the inward normal is flipped) and checks both:
   1. **Along-normal path** — ray from point along +normal for `dist`; fails if a panel physically crosses the arrow body.
@@ -143,7 +143,7 @@ The benchmark system runs configurable sequences: load a model, apply view/color
 | `labelStyle` | string | Point label style: `"circle"` (default), `"arrow"` (screen-space connector labels), or `"both"` (final capture saves `stepNN.png` with circle labels and `stepNN_arrow.png` with arrow labels). |
 | `autoCapture` | boolean | Capture PNG at each step (steps flow only). |
 | `autoRun` | boolean | Start sequence automatically after load. |
-| `difficulty` | number | Difficulty tier 1–5. See [Difficulty tiers](#difficulty-tiers). Metadata for dataset labeling. |
+| `difficulty` | number | Difficulty tier 1–4. See [Difficulty tiers](#difficulty-tiers). Metadata for dataset labeling. |
 | `trackingEvalMode` | string | Hidden-point semantic: `strictAllSteps` (default — hidden points required visible at every step) or `finalStepOnly` (hidden points only required at the final step). Non-hidden points are required visible at every step regardless of mode. See [Validation semantics](#validation-semantics). |
 | `stepLabelPrefix` | string | Step overlay text prefix. Default: `"STATE"`. |
 | `stepLabelFontSize` | number | Step overlay font size in px. Default: 48. |
@@ -168,17 +168,18 @@ The benchmark system runs configurable sequences: load a model, apply view/color
 
 These tiers describe **dataset semantics** (`difficulty` metadata). They do **not** imply the camera animates across fold steps: generated presets follow the **static camera + per-step model `rotation`** motion model described in **Preset Generation Pipeline** below.
 
-| Tier | Motion across fold steps | Sides exposed by the end |
-|------|--------------------------|--------------------------|
-| 1 | Static POV, **constant** model rotation across steps (no inter-step motion) | One side only |
-| 2 | Static POV, **small** rotation ramp (hidden-back reveal) | Both sides (back tracked point is hidden until the final fold step) |
-| 3 | Static POV, **moderate** rotation ramp | One side only |
-| 4 | Static POV, **moderate** rotation ramp | Both sides (hidden-back reveal; often plus a hidden front revealed late) |
-| 5 | Static POV, **large** rotation ramp | Both sides (hidden-back reveal; denser hidden-front / late-reveal mix) |
+| Tier | Visible front | Hidden front | Hidden back | Total range | Motion |
+|------|---------------|--------------|-------------|-------------|--------|
+| d1   | 2             | 1–3          | 0           | 3–5         | Static (no rotation across steps; constant-pose profiles for visual diversity) |
+| d2   | 2             | 0            | 1–2         | 3–4         | Static POV + small rotation (hidden-back reveal via rotation) |
+| d3   | 2             | 1–3          | 0           | 3–5         | Static POV + moderate rotation (hidden-front late reveal on same side) |
+| d4   | 2             | 1–2          | 1–2         | 4–6         | Static POV + larger rotation (mix of late-front-reveal and back-via-rotation) |
+
+Visible-front anchors are always required at every step (validation enforces this for non-hidden points regardless of `trackingEvalMode`). Hidden points only need to be visible at the final step.
 
 **d1 note:** d1 has zero motion *between* fold steps, but the model still sits at any fixed (possibly non-flat) pose. `buildAutoRotationProfiles` emits multiple **constant-rotation** profiles so a d1 slot produces visually-diverse presets ("same fold sequence viewed from different fixed angles") instead of always defaulting to the flat-from-above view. The constant-rotation magnitudes use d3's bounds (yaw 0.5, pitch 0.15, roll 0.08).
 
-Reference examples: `bird-track` (difficulty 3) in `benchmarks.json`; `bird-frontback-*` (difficulty 5) in `candidates/bird-frontback.json`.
+Reference examples: `bird-track` (difficulty 3) in `benchmarks.json`; `bird-frontback-*` (difficulty 4) in `candidates/bird-frontback.json`.
 
 ### Face points
 
@@ -283,7 +284,7 @@ Animate fold from one % to another over time, with optional POV transition.
 | `povKeyframes` | array | `[{ fold, pov }, ...]` — POV at fold %. |
 | `trackModel` | boolean | Rotate model (camera fixed) so points stay in view. |
 | `fitAllPoints` | boolean | Zoom out so entire model stays in view. |
-| `hidePointsDuringAnimation` | boolean | Hide face points during fold. |
+| `hidePointsDuringAnimation` | boolean | Hide face points during fold. **Default: `true`** (every difficulty hides intermediate-frame markers so captured PNGs only show points at canonical step boundaries). Pass `false` to disable. Both `runFoldAnimation` and `runStep` use `!== false`, so the default fires unless explicitly opted out. Boundary steps (first/last) always show points regardless. |
 
 ### URL parameters
 
@@ -298,6 +299,29 @@ Default per-step overlay text on rendered PNGs:
 - Position: top-left, 16 px padding, semi-opaque white pill background.
 
 Customize per preset via `stepLabelPrefix`, `stepLabelFontSize`, `stepLabelShowTotal` config keys (also URL params). See `js/threeView.js` (PNG composition) and `js/benchmark.js` (`applyStepOverlayConfig`).
+
+### Dataset output (`screenshots/dataset.jsonl`)
+
+Each `runAll` invocation writes a JSONL file at `screenshots/dataset.jsonl` (truncated on the first preset of the batch via `fresh: true`, appended for subsequent presets). One line per preset:
+
+```json
+{
+  "id": "origami_point_tracking_difficulty_<n>_<modelStem>_<NN>",
+  "category": ["origami", "origami_point_tracking", "interactive"],
+  "type": "episode_rollout",
+  "question": "You are solving a 3D point-tracking question on a folding origami model. The model goes through {N} folding states. ...",
+  "meta_info": { "task_name", "config", "level", "seed", "repeat_index", "difficulty", "model_id", "success", "final_reason", "total_steps" },
+  "trajectory": [
+    { "step_index": 0, "current_images": ["images/<id>/step_0000_current.png"], "state": "in progress", "answer": ["B","C","D"], "invalid_response": false, "api_error": false, "illegal": false, "raw_response_text": "{\"visible_points\":[\"B\",\"C\",\"D\"]}" },
+    ...
+    { "step_index": N-1, "state": "success", ... }
+  ]
+}
+```
+
+PNGs are written to `screenshots/images/<id>/step_NNNN_current.png` (0-based, 4-digit padded). Hidden points are filtered from `answer` on intermediate steps and included on the final step (matches the reveal semantics). The id format is `origami_point_tracking_difficulty_<d>_<modelStem>_<NN>` where `NN` is the seed/index parsed from the preset name (truncated to 60 chars). See `buildJsonlEntry`, `postJsonlEntry`, and `buildJsonlId` in `js/benchmark.js`.
+
+**Server endpoint** — `POST /api/jsonl-append` with `{ path, line, fresh }`. `fresh: true` truncates the file (used for the first preset of a batch); otherwise appends. The per-segment folder sanitiser preserves nested paths like `images/<id>` instead of collapsing slashes (same sanitiser is used by `/api/screenshot`). See `server.js`.
 
 ### Scaling up front/back sequences
 
@@ -358,21 +382,28 @@ Because Phase 2's POV-motion gate evaluates POV direction changes, static-POV pr
 
 | Tier | Visible front | Hidden front | Hidden back | Total range |
 |------|---------------|--------------|-------------|-------------|
-| d1   | [3, 6]        | 0            | 0           | 3 to 6      |
-| d2   | [2, 4]        | 0            | [1, 2]      | 3 to 6      |
-| d3   | [3, 6]        | 0            | 0           | 3 to 6      |
-| d4   | [2, 3]        | [1, 2]       | [1, 2]      | 4 to 6 (cap) |
-| d5   | [2, 3]        | [2, 3]       | [1, 2]      | 5 to 6 (cap) |
+| d1   | 2             | 1–3          | 0           | 3–5         |
+| d2   | 2             | 0            | 1–2         | 3–4         |
+| d3   | 2             | 1–3          | 0           | 3–5         |
+| d4   | 2             | 1–2          | 1–2         | 4–6         |
 
 If any slot's lower bound can't be met by the trajectory's pools, the trajectory yields no configs.
 
 ### Two-sided tier policy
 
-**d2** is emitted as a **hidden-back reveal** preset: visible-front anchors must be visible at every step (`alwaysVisible` set from the timeline); hidden back picks come from faces visible at the **final** step. The small rotation budget (yaw/pitch ≈ 0.2 rad) is enough to surface a back face at fold ≈ 70 while the camera POV stays fixed.
+**Back pool definition (single source of truth):** Two-sided tiers use a **STRICT index-based** back pool — faces with index in `[N/2, N-1]` (the second half of the mesh, per user spec: "back faces are indices N/2 to N-1"). Intersected downstream with the trajectory's `finalVisible` (the visibility timeline at the final step) so we only pick back-pool faces the rotation actually exposes. The visibility-discovered `pools.back` from `discoverFacePools` is computed but **not** used for selection in trajectory-first mode (kept as legacy).
 
-**d4 / d5** extend that model with additional **hidden front** slots and a larger rotation ramp so thin back pools can still validate. Visible-front anchors are still gated on `alwaysVisible` (the user's contract: "initial points must be visible throughout all progressions and final state").
+This index-based definition is used in **three** places that must agree, otherwise top-off counts disagree with picker counts and presets get an extra hidden face:
 
-For two-sided tiers a **final-state back coverage gate** also fires: the count of `backPool ∩ finalVisible` must be ≥ **2** (d2) or ≥ **3** (d4/d5) or the trajectory is dropped (a single sliver of back peeking through is insufficient — reference d4/d5 presets ship 3–6 back-pool faces visible at final).
+1. **Back-coverage gate** in `selectFacePointsFromTrajectory` (~js/presetGenerator.js:2284).
+2. **Hidden-back picks** in `selectFacePointsFromTrajectory` (~js/presetGenerator.js:2188).
+3. **Top-off classification** in `generateFromScanProgressions`'s `processConfig` (~js/presetGenerator.js:2670) — counts a face as "back" iff `fid >= N/2`. Previously used `pools.back` (visibility-based), which disagreed with the picker; back picks like face 13 didn't register, so the safety top-off fired spuriously and added a 5th hidden face on d2 presets that already had 4.
+
+**d2** is emitted as a **hidden-back reveal** preset: visible-front anchors must be visible at every step (`alwaysVisible` set from the timeline); hidden back picks come from the index-based back pool intersected with the final step's visible faces. The small rotation budget (yaw/pitch ≈ 0.2 rad) is enough to surface a back face at fold ≈ 70 while the camera POV stays fixed.
+
+**d4** extends that model with additional **hidden front** slots and a larger rotation ramp so thin back pools can still validate. Visible-front anchors are still gated on `alwaysVisible` (the user's contract: "initial points must be visible throughout all progressions and final state").
+
+For two-sided tiers (d2, d4) a **final-state back coverage gate** fires: the count of back-pool faces visible at the final step must be **≥ `ranges.hB[0]`** (the tier's hidden-back lower bound — i.e. ≥1 for both d2 and d4 today) or the trajectory is dropped. Earlier this was hardcoded at ≥2, which tripped strict index-based pools on models like bird where rotation typically exposes only 0–1 back-half faces. Tying the gate to `ranges.hB[0]` keeps it consistent with the tier plan.
 
 Rotation magnitude per tier (`rotationBoundsForTier` in `js/presetGenerator.js`):
 
@@ -382,18 +413,20 @@ Rotation magnitude per tier (`rotationBoundsForTier` in `js/presetGenerator.js`)
 | d2   | 0.2 rad          | 0.2 rad             | 0.05 rad           |
 | d3   | 0.5 rad          | 0.15 rad            | 0.08 rad           |
 | d4   | 1.0 rad          | 1.0 rad             | 0.25 rad           |
-| d5   | 1.2 rad          | 1.2 rad             | 0.25 rad           |
 
-d1's bounds describe **constant** rotation (same value at every step) for static-pose diversity, not motion. d4/d5 envelopes ramp **monotonically** to 1.0 at the final step (not bell-curve) so the hidden-back reveal lands at peak rotation. See `buildAutoRotationProfiles` in `js/benchmark.js`.
+d1's bounds describe **constant** rotation (same value at every step) for static-pose diversity, not motion. d4's envelope ramps **monotonically** to 1.0 at the final step (not bell-curve) so the hidden-back reveal lands at peak rotation. See `buildAutoRotationProfiles` in `js/benchmark.js`.
 
 ### Generation stages
 
 Per (model, difficulty) slot:
 
-1. **Face-pool discovery** — one-time per model, cached at `assets/facepools/<key>.json`. Sweeps `scanPovs` (8–12 POVs across the upper hemisphere) × fold ∈ {0, 70} and records visible face IDs and per-face quality at each (fold, POV).
+1. **Face-pool discovery** — one-time per model, cached at `assets/facepools/<key>.json`. Sweeps `scanPovs` (8–12 POVs across the upper hemisphere) × fold ∈ {0, 70} and records visible face IDs and per-face quality at each (fold, POV). Two pool definitions are derived:
+   - **Front pool** — visibility-discovered: faces seen from above the model at fold=0, computed by `discoverFacePools` and cached at `assets/facepools/<key>.json`. Used to pick visible-front anchors and the generic Phase 2 anchor.
+   - **Back pool** — STRICT index-based: faces with index in `[N/2, N-1]` (the second half of the mesh). Intersected downstream with the trajectory's `finalVisible` so picks land on back-half faces the rotation actually exposes. Used for hidden-back picks in d2/d4 selection. See [Two-sided tier policy](#two-sided-tier-policy) for the single-source-of-truth invariant.
+   - The visibility-only `pools.back` from `discoverFacePools` is no longer used by `selectFacePointsFromTrajectory` (only `pools.front` is). Kept as legacy.
 2. **Generic anchor selection** — `buildGenericAnchorFacePoints(frontPool, modelFaceCount)` picks `frontPool[0]`'s centroid (`{u: 0.34, v: 0.33, w: 0.33}`) as a single throwaway anchor for Phase 2's gate. The anchor never appears in the final preset.
 3. **Phase 2 — single trajectory search per slot** — one `evaluateTrajectoriesLive` run with the generic anchor (replaces the old per-(front,back) fan-out). Phase 2 always uses `finalStepOnly` at the slot level (per-tier visibility semantics fire downstream). Each accepted progression is annotated with a **`visibilityTimeline`** (`[{stepIndex, fold, pov, rotation, visibleFaceIds, qualities}, ...]`) and a `finalViewScore`. `selectDiverseProgressions` preserves the timeline so the next stage can read it.
-4. **Per-tier point selection from timeline** — for each accepted trajectory, `selectFacePointsFromTrajectory(trajectory, tier, modelFaceCount, frontPool, backPool, rng)` emits up to **K=3** distinct face-point configs by shifting the visible-front rank window (and rotating hidden picks). Visible-front anchors are drawn from the timeline's `alwaysVisible` set (visible at *every* step) regardless of tier. Hidden-back / hidden-front picks are drawn from `finalVisible`. Two-sided tiers (d2/d4/d5) drop the trajectory if final-state back coverage is below threshold (see above).
+4. **Per-tier point selection from timeline** — for each accepted trajectory, `selectFacePointsFromTrajectory(trajectory, tier, modelFaceCount, frontPool, backPool, rng)` emits up to **K=3** distinct face-point configs by shifting the visible-front rank window (and rotating hidden picks). Visible-front anchors are drawn from the timeline's `alwaysVisible` set (visible at *every* step) regardless of tier. Hidden-back picks are drawn from the index-based back pool (`[N/2, N-1]`) intersected with `finalVisible`. Hidden-front picks are drawn from `finalVisible`. The internal `buildPlan` greedily clamps each slot to the tier's range against pool availability and the global 6-point cap; if any slot can't meet its lower bound the trajectory yields no configs. Two-sided tiers (d2/d4) drop the trajectory if final-state back coverage is below `ranges.hB[0]` (see above).
 5. **Barycentric refinement** — `refineFacePointBarycentric` runs *after* `selectDiverseProgressions` on only the final N selected presets. The refiner drives the simulation to the final pose with ≥800 ms settle per step and sweeps a 5×5 barycentric grid (`u,v ∈ [0.22, 0.52]`, `w ≥ 0.18`) per point in two passes. See [Refinement scoring](#refinement-scoring).
 6. **Validation** — replays each produced preset with settle (`Math.max(settle, 800)` ms); enforces non-hidden visibility at every step and hidden-point visibility per `trackingEvalMode`. Refinement regressions are reverted to the pre-refinement barycentric (`refineAndRevalidate`).
 7. **Fallback** — if no scan progression validates, generate up to 50 purely-synthetic candidates via the legacy fresh-POV path and validate.
@@ -423,7 +456,7 @@ Previously, `finalStepOnly` mode also let visible-front anchors disappear mid-fo
 
 ### Key trade-offs
 
-- **Thin back pools** (e.g. boat has 2 back faces) limit d4/d5 diversity. Multiple generated presets often share the same hidden-back face.
+- **Thin back pools** (e.g. boat has 2 back faces) limit d4 diversity. Multiple generated presets often share the same hidden-back face.
 - **d2 on extremely constrained geometry** can still fail: the hidden-back path needs *some* rotatable exposure of a back-pool face at the final step. When the fold + small rotation budget cannot surface any back-pool triangle, the slot produces **0** presets.
 - **Phase 2 settle vs validation settle**: Phase 2 uses `scanSettleMs=300` for speed; validation forces ≥800 ms to match playback. Trajectories accepted by Phase 2 can still fail validation if the paper is mid-transition at 300 ms; the fallback path picks up the slack.
 
@@ -440,7 +473,7 @@ Runs `tools/generate-presets.js` for each (model, difficulty) slot in parallel.
 - **`--concurrency`** — default `min(12, cpus/2)`. Half the logical CPUs, capped at 12 (SwiftShader Chrome is ~1 core under load; cap leaves headroom for OS + dev server).
 - **`--prewarm`** (default ON) — two-phase fan-out:
   - **Phase 1**: every model runs at d=1 in parallel. Each model writes its own `assets/facepools/<key>.json` so there's no cache contention.
-  - **Phase 2**: every remaining (model, d∈{2..5}) slot runs in parallel up to `--concurrency`. Cache is warm so same-model slots no longer race.
+  - **Phase 2**: every remaining (model, d∈{2..4}) slot runs in parallel up to `--concurrency`. Cache is warm so same-model slots no longer race.
 - **`--no-prewarm`** — legacy "model groups in parallel, difficulties within a model serial" mode (caps at modelCount slots concurrent regardless of `--concurrency`; safe for cold caches without a pre-warm).
 
 ## Render parallelism (`tools/render_dataset_parallel.py`)

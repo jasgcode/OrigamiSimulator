@@ -194,12 +194,12 @@ function buildEvalOptions(attemptIndex) {
     // and more progression candidates to find trajectories with both front and
     // back points visible, so their floors are higher than lower tiers.
     const diff = isNaN(DIFFICULTY) ? 3 : DIFFICULTY;
+    // Tiers: d1-d4 only (d5 dropped per user spec).
     const FLOORS = {
         1: { build: 12, grid: 32,  scan: 6,  traj: 20 },
         2: { build: 16, grid: 48,  scan: 8,  traj: 28 },
         3: { build: 20, grid: 64,  scan: 10, traj: 36 },
         4: { build: 28, grid: 80,  scan: 12, traj: 48 },
-        5: { build: 36, grid: 96,  scan: 14, traj: 60 },
     };
     const floor = FLOORS[diff] || FLOORS[3];
 
