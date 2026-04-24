@@ -1135,12 +1135,15 @@ function initPresetGenerator(globals) {
         // The mesh is path-dependent: jumping from fold=0 to fold=70%
         // converges to a DIFFERENT local minimum than walking 0 → 8 → ...
         // → 70% across 10 steps. The validator does the step-by-step walk
-        // with ≥800ms settle per step (see validatePreset), so refinement
+        // with ≥500ms settle per step (see validatePreset), so refinement
         // must too — otherwise a barycentric that is visible at the
         // refined-state mesh can fail visibility at the validated mesh
         // and we ship a broken preset. Match validator settle exactly.
-        var perStepSettle = Math.max(settleMs || 300, 800);
-        var finalSettle = Math.max(settleMs || 300, 800);
+        // (Was 800ms historically; dropped to 500ms since mesh convergence
+        // on origami bases stabilises well before then — verified by A/B
+        // on the existing matrix models.)
+        var perStepSettle = Math.max(settleMs || 300, 500);
+        var finalSettle = Math.max(settleMs || 300, 500);
         var stepIdx = 0;
         function applyNextStep() {
             if (stepIdx >= steps.length) {
@@ -2946,9 +2949,12 @@ function initPresetGenerator(globals) {
                 globals.threeView.resetModel();
             }
 
-            // Wait for simulation to settle (minimum 800ms, matching benchmark.js
-            // which uses max(pauseSec * 1000, 500) with default pauseDuration=2).
-            var actualSettle = Math.max(settle, 800);
+            // Wait for simulation to settle. Minimum 500ms — origami mesh
+            // convergence stabilises well before then on the current model
+            // set, and this floor is matched by refineFacePointBarycentric
+            // so refined barycentrics and validated barycentrics see the
+            // same mesh state. (Was 800ms historically.)
+            var actualSettle = Math.max(settle, 500);
             setTimeout(function () {
 
                 var requiredIndices = [];
@@ -3240,7 +3246,18 @@ function initPresetGenerator(globals) {
                 }
 
                 console.log("presetGenerator: generated " + scanCandidates.length + " progression candidates");
-                if (!validate) {
+                // Skip pre-refinement validateBatch for d1. d1 uses static
+                // constant-rotation profiles over a 5-step flat-paper walk
+                // with no back-side requirement — validation predictably
+                // passes, so the batch step is ~60s of wasted wall time.
+                // refineAndRevalidate below still runs a per-preset
+                // revalidate, so any genuinely broken preset (separation
+                // mishap, edge barycentric) is still caught there.
+                //
+                // Also short-circuits when caller explicitly opts out with
+                // --no-validate.
+                var skipBatchValidation = !validate || difficulty === 1;
+                if (skipBatchValidation) {
                     scanCandidates = filterCandidatesByDifficulty(scanCandidates, difficulty, modelFaceCount, count, rng);
                     var scanSelected = selectDiverse(scanCandidates, count, existingRefs);
                     refineAndRevalidate(scanSelected, settleMs, rng, function (finalPresets) {

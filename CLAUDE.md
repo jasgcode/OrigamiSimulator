@@ -147,7 +147,7 @@ The benchmark system runs configurable sequences: load a model, apply view/color
 | `trackingEvalMode` | string | Hidden-point semantic: `strictAllSteps` (default — hidden points required visible at every step) or `finalStepOnly` (hidden points only required at the final step). Non-hidden points are required visible at every step regardless of mode. See [Validation semantics](#validation-semantics). |
 | `stepLabelPrefix` | string | Step overlay text prefix. Default: `"STATE"`. |
 | `stepLabelFontSize` | number | Step overlay font size in px. Default: 48. |
-| `stepLabelShowTotal` | boolean | If true (default) overlay shows `"STATE 1/5"`; if false shows `"STATE 1"`. |
+| `stepLabelShowTotal` | boolean | If true shows `"STATE 1/5"`; default (false) shows just `"STATE 1"`. |
 | `scanMode` | boolean | Run scan/evaluation mode to discover high-visibility sequences (no direct step playback). |
 | `targetPointLabels` | array \| string | Prioritize visibility for specific point labels (e.g. `["A","C"]` or `"A,C"`) when building progressions. |
 | `targetPointIndices` | array \| string | Same as above using zero-based indices (e.g. `[0,2]` or `"0,2"`). |
@@ -170,16 +170,26 @@ These tiers describe **dataset semantics** (`difficulty` metadata). They do **no
 
 | Tier | Visible front | Hidden front | Hidden back | Total range | Motion |
 |------|---------------|--------------|-------------|-------------|--------|
-| d1   | 2             | 1–3          | 0           | 3–5         | Static (no rotation across steps; constant-pose profiles for visual diversity) |
-| d2   | 2             | 0            | 1–2         | 3–4         | Static POV + small rotation (hidden-back reveal via rotation) |
-| d3   | 2             | 1–3          | 0           | 3–5         | Static POV + moderate rotation (hidden-front late reveal on same side) |
-| d4   | 2             | 1–2          | 1–2         | 4–6         | Static POV + larger rotation (mix of late-front-reveal and back-via-rotation) |
+| d1   | 2             | 1–3          | 0           | 3–5         | Static POV, constant per-preset rotation (no inter-step motion; tilted constant-pose profiles for visual diversity) |
+| d2   | 2             | 0            | 1–2         | 3–4         | Static POV, constant rotation **frozen to d4's final-step pose** (hero shot at state 1, held pose at states 2..N) |
+| d3   | 2             | 1–3          | 0           | 3–5         | Static POV, **ramping** rotation (hidden-front late reveal on same side) |
+| d4   | 2             | 1–2          | 1–2         | 4–6         | Static POV, **monotonically ramping** rotation (mix of late-front-reveal and back-via-rotation) |
 
 Visible-front anchors are always required at every step (validation enforces this for non-hidden points regardless of `trackingEvalMode`). Hidden points only need to be visible at the final step.
 
 **d1 note:** d1 has zero motion *between* fold steps, but the model still sits at any fixed (possibly non-flat) pose. `buildAutoRotationProfiles` emits multiple **constant-rotation** profiles so a d1 slot produces visually-diverse presets ("same fold sequence viewed from different fixed angles") instead of always defaulting to the flat-from-above view. The constant-rotation magnitudes use d3's bounds (yaw 0.5, pitch 0.15, roll 0.08).
 
 Reference examples: `bird-track` (difficulty 3) in `benchmarks.json`; `bird-frontback-*` (difficulty 4) in `candidates/bird-frontback.json`.
+
+#### Difficulty tier descriptions
+
+**d1 — flat base, no inter-step motion.** Static POV. Model rotation is **constant across all fold steps** (no motion between frames) but can sit at any fixed tilted pose drawn from `buildAutoRotationProfiles`'s d1 templates (yaw / pitch / roll combinations scaled by `rotationBoundsForTier(1)` = `{yaw: 0.5, pitch: 0.15, roll: 0.08}`; see `js/benchmark.js:1710-1740`). State 1 always renders at zero rotation (hero shot — fold=0, flat paper) and states 2..N apply the chosen constant rotation. Tracked points: **2 visible front + 1–3 hidden front** (no back-side picks). Phase 2 runs a full trajectory search to pick the static POV; `selectFacePointsFromTrajectory` then picks face-point configs from the accepted trajectory's `alwaysVisible` timeline.
+
+**d2 — flat-paper-like reveal, derived post-hoc from d4.** No dedicated Phase 2 search runs for d2: it is **derived from a successful d4 output by `deriveD2FromD4` in `tools/generate-matrix.js:183-250`**. The transform copies each d4 preset's POV and fold sequence, then **freezes every step's rotation to d4's final-step value** (state 1 keeps no rotation for the hero shot; states 2..N hold that frozen pose). Tracked points: **2 visible front + 1–2 hidden back** (hidden-front picks inherited from d4 are currently retained — see comment at `tools/generate-matrix.js:230-241`). Result: zero additional compute, and d2's geometry is guaranteed to match d4's back-exposing pose because they share the same trajectory. If d4 fails for a model, d2 is skipped for that model.
+
+**d3 — one-sided ramping rotation.** Static POV with a **ramping** per-step rotation drawn from `buildAutoRotationProfiles`'s d3 envelope templates (`js/benchmark.js:1789-1823`); `rotationBoundsForTier(3)` = `{yaw: 0.5, pitch: 0.15, roll: 0.08}` (same magnitudes as d1, but applied as an envelope that grows from 0 at state 1 to peak in the last ~30% of the sweep). Tracked points: **2 visible front + 1–3 hidden front** — no back-side picks; the hidden-front reveal happens by occluded faces becoming visible as the paper folds. Phase 2 runs a full trajectory search.
+
+**d4 — two-sided ramping rotation.** Static POV with a **monotonically ramping** rotation that reaches its peak at the final state (`js/benchmark.js:1832-1859`); `rotationBoundsForTier(4)` = `{yaw: 1.0, pitch: 1.0, roll: 0.25}`. The monotonic envelope is essential: bell-curve profiles retracted at the final step and let back faces slip out of view exactly when the reveal should land. Tracked points: **2 visible front + 1–2 hidden front + 1–2 hidden back**. Hidden-back picks are stored in the preset with `faceId = idx + N` so `isPointVisible`'s `isFront = id < N` path correctly checks back-normal visibility (see `js/presetGenerator.js:2479-2485`). The back pool is **all face indices [0, N-1]** filtered by the geometric `getBackSideVisibleFaceIds` gate at the trajectory's final step (no index-based pre-filter). Phase 2 runs a full trajectory search and a final-step back-coverage gate (≥`ranges.hB[0]` back-visible faces) drops trajectories that don't expose enough back surface.
 
 ### Face points
 
@@ -294,7 +304,7 @@ Any JSON parameter can be overridden via URL: `?benchmark=waterbomb-animate&colo
 
 Default per-step overlay text on rendered PNGs:
 
-- Prefix: `STATE` (e.g. `STATE 1`, `STATE 2`, ...). With `stepLabelShowTotal=true` (default) the overlay reads `STATE 1/5`.
+- Prefix: `STATE` (e.g. `STATE 1`, `STATE 2`, ...). Default shows current state only (`"STATE 3"`); set `stepLabelShowTotal: true` in the preset cfg to render `"STATE 3/10"` instead.
 - Font size: **48 px** (scaled with canvas size).
 - Position: top-left, 16 px padding, semi-opaque white pill background.
 
@@ -401,45 +411,40 @@ If any slot's lower bound can't be met by the trajectory's pools, the trajectory
 
 ### Two-sided tier policy
 
-**Back pool definition (single source of truth):** Two-sided tiers use a **STRICT index-based** back pool — faces with index in `[N/2, N-1]` (the second half of the mesh, per user spec: "back faces are indices N/2 to N-1"). Intersected downstream with the trajectory's `finalVisible` (the visibility timeline at the final step) so we only pick back-pool faces the rotation actually exposes. The visibility-discovered `pools.back` from `discoverFacePools` is computed but **not** used for selection in trajectory-first mode (kept as legacy).
+**Back pool definition (single source of truth):** Two-sided tiers (d2, d4) use **all mesh face indices `[0, N-1]` as the raw back pool**, then filter by a **geometric back-side gate** at the trajectory's final step: a face qualifies as a back-pool member iff its back surface is camera-facing AND unoccluded (computed by `getBackSideVisibleFaceIds` in `js/facePoints.js` and recorded in the trajectory timeline as `backSideVisibleFaceIds`). See `js/presetGenerator.js:2252-2264, 2340-2343`. The earlier strict index-based `[N/2, N-1]` pool was dropped because thin-back models like boat / waterbomb / simplevertex have their geometric back faces at arbitrary indices (often `[0, 1]`), so any index pre-filter deterministically killed d2/d4 for those models. The visibility-only `pools.back` from `discoverFacePools` is still computed but no longer used in trajectory-first mode (kept as legacy).
 
-This index-based definition is used in **three** places that must agree, otherwise top-off counts disagree with picker counts and presets get an extra hidden face:
+**d2** (derived from d4, see [Difficulty tier descriptions](#difficulty-tier-descriptions)) inherits d4's final-pose geometry by construction — the same trajectory POV and the same frozen rotation that exposed a back face at the end of the d4 sequence. The only per-step difference is that d2 sits at that pose from state 2 onward (state 1 is the zero-rotation hero shot) instead of ramping into it.
 
-1. **Back-coverage gate** in `selectFacePointsFromTrajectory` (~js/presetGenerator.js:2284).
-2. **Hidden-back picks** in `selectFacePointsFromTrajectory` (~js/presetGenerator.js:2188).
-3. **Top-off classification** in `generateFromScanProgressions`'s `processConfig` (~js/presetGenerator.js:2670) — counts a face as "back" iff `fid >= N/2`. Previously used `pools.back` (visibility-based), which disagreed with the picker; back picks like face 13 didn't register, so the safety top-off fired spuriously and added a 5th hidden face on d2 presets that already had 4.
+**d4** picks hidden-back faces from the geometric back pool at the final step, via `rankedBacks` in `selectFacePointsFromTrajectory`. Hidden-back picks are stored in the preset with `faceId = idx + N` so `isPointVisible`'s `isFront = id < N` path checks back-normal visibility and the renderer treats the point as a back-surface marker (`js/presetGenerator.js:2479-2485`). Visible-front anchors remain gated on `alwaysVisible` (the user's contract: "initial points must be visible throughout all progressions and final state").
 
-**d2** is emitted as a **hidden-back reveal** preset: visible-front anchors must be visible at every step (`alwaysVisible` set from the timeline); hidden back picks come from the index-based back pool intersected with the final step's visible faces. The small rotation budget (yaw/pitch ≈ 0.2 rad) is enough to surface a back face at fold ≈ 70 while the camera POV stays fixed.
+For d4 a **final-state back coverage gate** fires: the count of geometrically back-side-exposed faces at the final step must be **≥ `ranges.hB[0]`** (the tier's hidden-back lower bound, i.e. ≥1 today) or the trajectory is dropped (`js/presetGenerator.js:2383-2391`). Tying the gate to `ranges.hB[0]` keeps it consistent with the tier plan. d2 is generated post-hoc, so this gate fires only on the d4 slot; d2 inherits whichever trajectories d4 accepted.
 
-**d4** extends that model with additional **hidden front** slots and a larger rotation ramp so thin back pools can still validate. Visible-front anchors are still gated on `alwaysVisible` (the user's contract: "initial points must be visible throughout all progressions and final state").
+Rotation magnitude per tier (`rotationBoundsForTier` in `js/presetGenerator.js:2530-2552`):
 
-For two-sided tiers (d2, d4) a **final-state back coverage gate** fires: the count of back-pool faces visible at the final step must be **≥ `ranges.hB[0]`** (the tier's hidden-back lower bound — i.e. ≥1 for both d2 and d4 today) or the trajectory is dropped. Earlier this was hardcoded at ≥2, which tripped strict index-based pools on models like bird where rotation typically exposes only 0–1 back-half faces. Tying the gate to `ranges.hB[0]` keeps it consistent with the tier plan.
+| Tier | `rotationYawMax` | `rotationPitchMax` | `rotationRollMax` | Applied as |
+|------|------------------|---------------------|--------------------|-----------|
+| d1   | 0.5 rad          | 0.15 rad            | 0.08 rad           | Constant (same rotation at every step) |
+| d2   | 1.0 rad          | 1.0 rad             | 0.25 rad           | Phase 2 uses d4-style ramp; emitted preset freezes the **final-step** value across states 2..N (derived from d4) |
+| d3   | 0.5 rad          | 0.15 rad            | 0.08 rad           | Ramping envelope, crest near the final step |
+| d4   | 1.0 rad          | 1.0 rad             | 0.25 rad           | **Monotonic** ramp to peak at the final step (essential for hidden-back reveal) |
 
-Rotation magnitude per tier (`rotationBoundsForTier` in `js/presetGenerator.js`):
-
-| Tier | `rotationYawMax` | `rotationPitchMax` | `rotationRollMax` |
-|------|------------------|---------------------|--------------------|
-| d1   | 0.5 rad          | 0.15 rad            | 0.08 rad           |
-| d2   | 0.2 rad          | 0.2 rad             | 0.05 rad           |
-| d3   | 0.5 rad          | 0.15 rad            | 0.08 rad           |
-| d4   | 1.0 rad          | 1.0 rad             | 0.25 rad           |
-
-d1's bounds describe **constant** rotation (same value at every step) for static-pose diversity, not motion. d4's envelope ramps **monotonically** to 1.0 at the final step (not bell-curve) so the hidden-back reveal lands at peak rotation. See `buildAutoRotationProfiles` in `js/benchmark.js`.
+d1's bounds describe constant rotation for static-pose diversity, not motion. d4's envelope ramps **monotonically** (not bell-curve) so the final step reaches full rotation magnitude. d2 shares d4's numeric bounds because d2 is derived from d4's output — their final-state poses are identical.
 
 ### Generation stages
 
-Per (model, difficulty) slot:
+Per (model, difficulty) slot — **runs for d1, d3, d4 only; d2 is derived post-hoc from d4 by the matrix runner** (see [Matrix runner concurrency](#matrix-runner-concurrency-toolsgenerate-matrixjs)):
 
 1. **Face-pool discovery** — one-time per model, cached at `assets/facepools/<key>.json`. Sweeps `scanPovs` (8–12 POVs across the upper hemisphere) × fold ∈ {0, 70} and records visible face IDs and per-face quality at each (fold, POV). Two pool definitions are derived:
    - **Front pool** — visibility-discovered: faces seen from above the model at fold=0, computed by `discoverFacePools` and cached at `assets/facepools/<key>.json`. Used to pick visible-front anchors and the generic Phase 2 anchor.
-   - **Back pool** — STRICT index-based: faces with index in `[N/2, N-1]` (the second half of the mesh). Intersected downstream with the trajectory's `finalVisible` so picks land on back-half faces the rotation actually exposes. Used for hidden-back picks in d2/d4 selection. See [Two-sided tier policy](#two-sided-tier-policy) for the single-source-of-truth invariant.
+   - **Back pool** — **all mesh face indices `[0, N-1]`**, gated downstream by the geometric `getBackSideVisibleFaceIds` filter at the trajectory's final step (only faces whose back surface is camera-facing AND unoccluded survive). See [Two-sided tier policy](#two-sided-tier-policy).
    - The visibility-only `pools.back` from `discoverFacePools` is no longer used by `selectFacePointsFromTrajectory` (only `pools.front` is). Kept as legacy.
 2. **Generic anchor selection** — `buildGenericAnchorFacePoints(frontPool, modelFaceCount)` picks `frontPool[0]`'s centroid (`{u: 0.34, v: 0.33, w: 0.33}`) as a single throwaway anchor for Phase 2's gate. The anchor never appears in the final preset.
-3. **Phase 2 — single trajectory search per slot** — one `evaluateTrajectoriesLive` run with the generic anchor (replaces the old per-(front,back) fan-out). Phase 2 always uses `finalStepOnly` at the slot level (per-tier visibility semantics fire downstream). Each accepted progression is annotated with a **`visibilityTimeline`** (`[{stepIndex, fold, pov, rotation, visibleFaceIds, qualities}, ...]`) and a `finalViewScore`. `selectDiverseProgressions` preserves the timeline so the next stage can read it.
-4. **Per-tier point selection from timeline** — for each accepted trajectory, `selectFacePointsFromTrajectory(trajectory, tier, modelFaceCount, frontPool, backPool, rng)` emits up to **K=3** distinct face-point configs by shifting the visible-front rank window (and rotating hidden picks). Visible-front anchors are drawn from the timeline's `alwaysVisible` set (visible at *every* step) regardless of tier. Hidden-back picks are drawn from the index-based back pool (`[N/2, N-1]`) intersected with `finalVisible`. Hidden-front picks are drawn from `finalVisible`. The internal `buildPlan` greedily clamps each slot to the tier's range against pool availability and the global 6-point cap; if any slot can't meet its lower bound the trajectory yields no configs. Two-sided tiers (d2/d4) drop the trajectory if final-state back coverage is below `ranges.hB[0]` (see above).
+3. **Phase 2 — single trajectory search per slot** — one `evaluateTrajectoriesLive` run with the generic anchor (replaces the old per-(front,back) fan-out). Phase 2 always uses `finalStepOnly` at the slot level (per-tier visibility semantics fire downstream). Each accepted progression is annotated with a **`visibilityTimeline`** (`[{stepIndex, fold, pov, rotation, visibleFaceIds, qualities, backSideVisibleFaceIds}, ...]`) and a `finalViewScore`. `selectDiverseProgressions` preserves the timeline so the next stage can read it.
+4. **Per-tier point selection from timeline** — for each accepted trajectory, `selectFacePointsFromTrajectory(trajectory, tier, modelFaceCount, frontPool, backPool, rng)` emits up to **K=3** distinct face-point configs by shifting the visible-front rank window (and rotating hidden picks). Visible-front anchors are drawn from the timeline's `alwaysVisible` set (visible at *every* step) regardless of tier. Hidden-back picks are drawn from `[0, N-1]` intersected with `finalBackSideVisible` (the geometric back-side gate). Hidden-front picks are drawn from `finalVisible`. The internal `buildPlan` greedily clamps each slot to the tier's range against pool availability and the global 6-point cap; if any slot can't meet its lower bound the trajectory yields no configs. Two-sided tier d4 drops the trajectory if final-state back coverage is below `ranges.hB[0]`.
 5. **Barycentric refinement** — `refineFacePointBarycentric` runs *after* `selectDiverseProgressions` on only the final N selected presets. The refiner drives the simulation to the final pose with ≥800 ms settle per step and sweeps a 5×5 barycentric grid (`u,v ∈ [0.22, 0.52]`, `w ≥ 0.18`) per point in two passes. See [Refinement scoring](#refinement-scoring).
-6. **Validation** — replays each produced preset with settle (`Math.max(settle, 800)` ms); enforces non-hidden visibility at every step and hidden-point visibility per `trackingEvalMode`. Refinement regressions are reverted to the pre-refinement barycentric (`refineAndRevalidate`).
-7. **Fallback** — if no scan progression validates, generate up to 50 purely-synthetic candidates via the legacy fresh-POV path and validate.
+6. **Step normalization** — `normalizeStepsForDifficulty` (`js/presetGenerator.js:1690-1802`) rewrites each accepted trajectory for the tier's motion model: static POV across all steps (final-step POV), rotation preserved per-step for d3/d4, rotation frozen to the final-step value for d2's Phase-2 fallback path. `applyHeroShotStep0` then strips `step[0].rotation` so state 1 always renders flat paper at zero rotation from the trajectory's POV.
+7. **Validation** — replays each produced preset with settle (`Math.max(settle, 800)` ms); enforces non-hidden visibility at every step and hidden-point visibility per `trackingEvalMode`. Refinement regressions are reverted to the pre-refinement barycentric (`refineAndRevalidate`).
+8. **Fallback** — if no scan progression validates, generate up to 50 purely-synthetic candidates via the legacy fresh-POV path and validate.
 
 ### Refinement scoring
 
@@ -478,13 +483,16 @@ Written to the `--output` file as a flat object `{ "<base-name>-01": {...}, "<ba
 
 ## Matrix runner concurrency (`tools/generate-matrix.js`)
 
-Runs `tools/generate-presets.js` for each (model, difficulty) slot in parallel.
+Runs `tools/generate-presets.js` for each (model, difficulty) slot in parallel. **Models** (`tools/generate-matrix.js:70-80`): `bird`, `waterbomb`, `pinwheel`, `opensink`. `boat` and `simplevertex` were dropped (back-half faces don't reliably expose under d4 rotation), and `frog` was dropped (too dense, slow per slot).
 
 - **`--concurrency`** — default `min(12, cpus/2)`. Half the logical CPUs, capped at 12 (SwiftShader Chrome is ~1 core under load; cap leaves headroom for OS + dev server).
-- **`--prewarm`** (default ON) — two-phase fan-out:
-  - **Phase 1**: every model runs at d=1 in parallel. Each model writes its own `assets/facepools/<key>.json` so there's no cache contention.
-  - **Phase 2**: every remaining (model, d∈{2..4}) slot runs in parallel up to `--concurrency`. Cache is warm so same-model slots no longer race.
-- **`--no-prewarm`** — legacy "model groups in parallel, difficulties within a model serial" mode (caps at modelCount slots concurrent regardless of `--concurrency`; safe for cold caches without a pre-warm).
+- **`--prewarm`** (default ON) — **three-phase** fan-out:
+  - **Phase 1 (prewarm)**: every model runs at d=1 in parallel. Each model writes its own `assets/facepools/<key>.json` so there's no cache contention.
+  - **Phase 2 (fan-out)**: every remaining (model, d∈{3, 4}) slot runs in parallel up to `--concurrency`. **d2 is not run here** — it's derived post-hoc in Phase 3. Cache is warm so same-model slots no longer race.
+  - **Phase 3 (derive d2 from d4)**: `deriveD2FromD4` transforms each model's `<model>-d4.json` into `<model>-d2.json` via pure JSON manipulation (no browser / simulation work): copies steps, freezes rotation to d4's final-step value across states 2..N (state 0 keeps no rotation for the hero shot), sets `difficulty: 2`, and renames `-d4-` → `-d2-` in preset ids. Skipped per-model when d4's output is missing or empty. See `tools/generate-matrix.js:183-250, 295-300`.
+- **`--no-prewarm`** — legacy "model groups in parallel, difficulties within a model serial" mode (caps at modelCount slots concurrent regardless of `--concurrency`; safe for cold caches without a pre-warm). Still runs only d1/d3/d4 per model and derives d2 last.
+
+Net effect: 4 models × 3 Phase-2 slots = **12 Phase-2 slots** instead of 16; d2 presets come for free (zero Phase-2 cost) and their geometry is guaranteed to match d4's back-exposing pose. Typical wall time ~10 min for 4 models at `--count 2` → roughly 30 presets (8 × d1, 7 × d2, 8 × d3, 7 × d4, depending on which d4 trajectories validate).
 
 ## Render parallelism (`tools/render_dataset_parallel.py`)
 
