@@ -12,9 +12,26 @@ function init3DUI(globals) {
     var draggingNode = null;
     var draggingNodeFixed = false;
     var mouseDown = false;
+    var mouseDownX = 0;
+    var mouseDownY = 0;
+    var CLICK_THRESHOLD_PX = 5;
     var highlightedObj;
     var draggingFacePointIndex = -1;
     var HIT_THRESHOLD = 0.05;
+    var HIT_THRESHOLD_MOVE_MODE = 0.15;
+    var pointMoveMode = false;
+
+    // V key toggles point-move mode: larger grab radius, orbit disabled, easier dragging
+    document.addEventListener('keydown', function(e) {
+        if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.tagName === "SELECT") return;
+        if (e.key === 'v' || e.key === 'V') {
+            if (!isFacePointMode() || !globals.facePoints) return;
+            pointMoveMode = !pointMoveMode;
+            globals.threeView.enableControls(!pointMoveMode);
+            var indicator = document.getElementById("pointMoveModeIndicator");
+            if (indicator) indicator.style.display = pointMoveMode ? "block" : "none";
+        }
+    });
 
     var highlighter1 = new Node(new THREE.Vector3());
     highlighter1.setTransparent();
@@ -23,17 +40,40 @@ function init3DUI(globals) {
     $(document).dblclick(function() {
     });
 
-    document.addEventListener('mousedown', function(){
+    document.addEventListener('mousedown', function(e){
         mouseDown = true;
+        mouseDownX = e.clientX;
+        mouseDownY = e.clientY;
     }, false);
     function isFacePointMode(){
-        return globals.colorMode === "faceTriangleID" || globals.colorMode === "labelOnly";
+        return globals.colorMode === "faceTriangleID" || globals.colorMode === "labelOnly" || globals.colorMode === "greyscaleLabel";
+    }
+    function addPointAtScreenPos(clientX, clientY) {
+        if (!globals.facePoints || !globals.model) return;
+        var mx = (clientX / window.innerWidth) * 2 - 1;
+        var my = -(clientY / window.innerHeight) * 2 + 1;
+        var rc = new THREE.Raycaster();
+        rc.setFromCamera(new THREE.Vector2(mx, my), globals.threeView.camera);
+        var meshArray = globals.model.getMesh();
+        var hits = rc.intersectObjects(meshArray, false);
+        if (hits.length === 0) return;
+        var inter = hits[0];
+        var newPt = globals.facePoints.pointFromRayIntersection(inter, meshArray);
+        if (!newPt) return;
+        var inset = globals.facePoints.insetBarycentric(newPt.u, newPt.v, newPt.w);
+        globals.facePoints.addPoint(newPt.faceId, inset.u, inset.v, inset.w);
+        globals.model.updateFaceColors();
+        if (globals.controls && globals.controls.refreshFacePointList) globals.controls.refreshFacePointList();
     }
     document.addEventListener('mouseup', function(e){
+        var dx = e.clientX - mouseDownX, dy = e.clientY - mouseDownY;
+        var wasClick = mouseDown && Math.sqrt(dx * dx + dy * dy) < CLICK_THRESHOLD_PX;
         isDragging = false;
+        var lockControls = pointMoveMode || (globals.clickToAddFacePoints && isFacePointMode());
         if (draggingFacePointIndex >= 0){
             draggingFacePointIndex = -1;
-            globals.threeView.enableControls(true);
+            globals.threeView.enableControls(!lockControls);
+            if (globals.controls && globals.controls.refreshFacePointList) globals.controls.refreshFacePointList();
         }
         if (draggingNode){
             draggingNode.setFixed(draggingNodeFixed);
@@ -42,6 +82,10 @@ function init3DUI(globals) {
             globals.threeView.enableControls(true);
             setHighlightedObj(null);
             globals.shouldCenterGeo = true;
+        }
+        // Handle click-to-add: pure click (no drag) on the mesh adds a point
+        if (wasClick && globals.clickToAddFacePoints && isFacePointMode() && globals.facePoints) {
+            addPointAtScreenPos(e.clientX, e.clientY);
         }
         mouseDown = false;
     }, false);
@@ -74,9 +118,12 @@ function init3DUI(globals) {
                 if (!isDragging && globals.clickToAddFacePoints){
                     var pts = globals.facePoints.getPoints();
                     var overExisting = false;
+                    var mwMat = globals.threeView.modelWrapper ? globals.threeView.modelWrapper.matrixWorld : new THREE.Matrix4();
                     for (var i = 0; i < pts.length; i++){
                         var pp = globals.facePoints.getPointPosition(i);
-                        if (pp && pp.distanceTo(inter.point) < HIT_THRESHOLD){ overExisting = true; break; }
+                        if (pp) pp = pp.clone().applyMatrix4(mwMat);
+                        var ht = pointMoveMode ? HIT_THRESHOLD_MOVE_MODE : HIT_THRESHOLD;
+                        if (pp && pp.distanceTo(inter.point) < ht){ overExisting = true; break; }
                     }
                     if (!overExisting){
                         var previewPt = globals.facePoints.pointFromRayIntersection(inter, meshArray);
@@ -90,8 +137,13 @@ function init3DUI(globals) {
                     globals.model.updateFacePointPreview(null, false);
                 }
 
-                if (isDragging){
+                if (isDragging || (pointMoveMode && mouseDown)){
                     globals.model.updateFacePointPreview(null, false);
+                    // Get model world matrix for local↔world transforms
+                    var modelWrapper = globals.threeView.modelWrapper;
+                    var modelWorldMatrix = modelWrapper ? modelWrapper.matrixWorld : new THREE.Matrix4();
+                    var modelInvMatrix = new THREE.Matrix4().getInverse(modelWorldMatrix);
+
                     if (draggingFacePointIndex >= 0){
                         var pts = globals.facePoints.getPoints();
                         var pt = pts[draggingFacePointIndex];
@@ -102,18 +154,23 @@ function init3DUI(globals) {
                             var faces = globals.model.getFaces();
                             var posArr = globals.model.getPositionsArray();
                             var face = faces[triIdx];
-                            vA.set(posArr[face[0]*3], posArr[face[0]*3+1], posArr[face[0]*3+2]);
-                            vB.set(posArr[face[1]*3], posArr[face[1]*3+1], posArr[face[1]*3+2]);
-                            vC.set(posArr[face[2]*3], posArr[face[2]*3+1], posArr[face[2]*3+2]);
+                            // Build plane in world space by transforming local vertices
+                            vA.set(posArr[face[0]*3], posArr[face[0]*3+1], posArr[face[0]*3+2]).applyMatrix4(modelWorldMatrix);
+                            vB.set(posArr[face[1]*3], posArr[face[1]*3+1], posArr[face[1]*3+2]).applyMatrix4(modelWorldMatrix);
+                            vC.set(posArr[face[2]*3], posArr[face[2]*3+1], posArr[face[2]*3+2]).applyMatrix4(modelWorldMatrix);
                             plane.setFromCoplanarPoints(vA, vB, vC);
                             var dragPoint = new THREE.Vector3();
                             raycaster.ray.intersectPlane(plane, dragPoint);
-                            var bary = globals.facePoints.worldToBarycentric(triIdx, dragPoint);
-                            if (bary){
-                                bary = globals.facePoints.clampBarycentric(bary);
-                                bary = globals.facePoints.insetBarycentric(bary.u, bary.v, bary.w);
-                                globals.facePoints.updatePointPosition(draggingFacePointIndex, pt.faceId, bary.u, bary.v, bary.w);
-                                globals.model.updateFaceColors();
+                            if (dragPoint) {
+                                // Transform hit back to local space for barycentric computation
+                                var localDragPoint = dragPoint.clone().applyMatrix4(modelInvMatrix);
+                                var bary = globals.facePoints.worldToBarycentric(triIdx, localDragPoint);
+                                if (bary){
+                                    bary = globals.facePoints.clampBarycentric(bary);
+                                    bary = globals.facePoints.insetBarycentric(bary.u, bary.v, bary.w);
+                                    globals.facePoints.updatePointPosition(draggingFacePointIndex, pt.faceId, bary.u, bary.v, bary.w);
+                                    globals.model.updateFaceColors();
+                                }
                             }
                         }
                         globals.threeView.enableControls(false);
@@ -121,9 +178,12 @@ function init3DUI(globals) {
                     }
                     var pts = globals.facePoints.getPoints();
                     var hitPointIndex = -1;
+                    var grabThreshold = pointMoveMode ? HIT_THRESHOLD_MOVE_MODE : HIT_THRESHOLD;
                     for (var i = 0; i < pts.length; i++){
+                        // getPointPosition returns local space; transform to world for comparison with inter.point
                         var pp = globals.facePoints.getPointPosition(i);
-                        if (pp && pp.distanceTo(inter.point) < HIT_THRESHOLD){
+                        if (pp) pp = pp.clone().applyMatrix4(modelWorldMatrix);
+                        if (pp && pp.distanceTo(inter.point) < grabThreshold){
                             hitPointIndex = i;
                             break;
                         }

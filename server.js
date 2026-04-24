@@ -4,15 +4,19 @@
  * that saves PNGs to the local screenshots/ directory.
  *
  *   bun run dev   (or: bun server.js)
+ *   PORT=3001 bun run dev   — listen on another port (default 3000)
  */
 
 import { join } from "path";
-import { mkdir } from "fs/promises";
+import { mkdir, readdir } from "fs/promises";
 
 const ROOT = import.meta.dir;
 const SCREENSHOTS_DIR = join(ROOT, "screenshots");
 const SCAN_CACHE_DIR = join(SCREENSHOTS_DIR, ".scan-cache");
-const PORT = 3000;
+const PORT = (() => {
+    const n = parseInt(process.env.PORT ?? "", 10);
+    return Number.isFinite(n) && n > 0 && n <= 65535 ? n : 3000;
+})();
 
 // Ensure screenshots directory exists
 await mkdir(SCREENSHOTS_DIR, { recursive: true });
@@ -39,6 +43,35 @@ const MIME = {
 function mime(path) {
     const dot = path.lastIndexOf(".");
     return dot >= 0 ? (MIME[path.slice(dot).toLowerCase()] || "application/octet-stream") : "application/octet-stream";
+}
+
+async function listJsonFilesRecursive(baseDir, publicPrefix) {
+    const files = [];
+
+    async function walk(absDir, relDir) {
+        let entries;
+        try {
+            entries = await readdir(absDir, { withFileTypes: true });
+        } catch (err) {
+            if (err && err.code === "ENOENT") return;
+            throw err;
+        }
+
+        for (const entry of entries) {
+            const absPath = join(absDir, entry.name);
+            const relPath = relDir ? `${relDir}/${entry.name}` : entry.name;
+            if (entry.isDirectory()) {
+                await walk(absPath, relPath);
+                continue;
+            }
+            if (entry.isFile() && entry.name.toLowerCase().endsWith(".json")) {
+                files.push(`${publicPrefix}/${relPath}`.replace(/\\/g, "/"));
+            }
+        }
+    }
+
+    await walk(baseDir, "");
+    return files;
 }
 
 Bun.serve({
@@ -105,6 +138,145 @@ Bun.serve({
                 return new Response("Method not allowed", { status: 405 });
             } catch (err) {
                 console.error("scan cache error:", err);
+                return new Response("Internal error", { status: 500 });
+            }
+        }
+
+        // ── Face pool cache endpoint ─────────────────────────────────────
+        // GET /api/face-pools?key=<modelKey>
+        // POST /api/face-pools?key=<modelKey> with JSON body
+        // Stores per-model classified face pools (front/back) under
+        // assets/facepools/ so the preset generator can avoid hardcoding.
+        if (url.pathname === "/api/face-pools") {
+            try {
+                const rawKey = url.searchParams.get("key") || "";
+                const safeKey = rawKey.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 120);
+                if (!safeKey) {
+                    return new Response("Missing key", { status: 400 });
+                }
+                const poolsDir = join(ROOT, "assets", "facepools");
+                await mkdir(poolsDir, { recursive: true });
+                const poolPath = join(poolsDir, `${safeKey}.json`);
+
+                if (req.method === "GET") {
+                    const file = Bun.file(poolPath);
+                    if (!(await file.exists())) {
+                        return new Response("Not found", { status: 404 });
+                    }
+                    return new Response(file, {
+                        headers: { "Content-Type": "application/json; charset=utf-8" },
+                    });
+                }
+
+                if (req.method === "POST") {
+                    const payload = await req.json();
+                    await Bun.write(poolPath, JSON.stringify(payload, null, 2));
+                    return new Response(JSON.stringify({ ok: true, path: poolPath }), {
+                        headers: { "Content-Type": "application/json" },
+                    });
+                }
+
+                return new Response("Method not allowed", { status: 405 });
+            } catch (err) {
+                console.error("face-pools error:", err);
+                return new Response("Internal error", { status: 500 });
+            }
+        }
+
+        // ── Save points to a specific preset ─────────────────────────────
+        if (url.pathname === "/api/save-preset-points" && req.method === "POST") {
+            try {
+                const { preset, facePoints } = await req.json();
+                if (!preset || !facePoints) {
+                    return new Response("Missing preset or facePoints", { status: 400 });
+                }
+                const benchPath = join(ROOT, "benchmarks.json");
+                const existing = await Bun.file(benchPath).json();
+                if (!existing[preset]) {
+                    return new Response(`Preset "${preset}" not found`, { status: 404 });
+                }
+                await Bun.write(benchPath + ".bak", JSON.stringify(existing, null, 4));
+                existing[preset].facePoints = facePoints;
+                await Bun.write(benchPath, JSON.stringify(existing, null, 4));
+                console.log(`  saved facePoints to preset "${preset}"`);
+                return new Response(JSON.stringify({ ok: true, preset }), {
+                    headers: { "Content-Type": "application/json" },
+                });
+            } catch (err) {
+                console.error("save-preset-points error:", err);
+                return new Response("Internal error", { status: 500 });
+            }
+        }
+
+        // ── Save candidates endpoint ─────────────────────────────────────
+        if (url.pathname === "/api/save-candidates" && req.method === "POST") {
+            try {
+                const payload = await req.json();
+                const name = payload.name || `candidates_${Date.now()}`;
+                const safeName = name.replace(/[/\\]/g, "_");
+                const candidatesDir = join(ROOT, "candidates");
+                await mkdir(candidatesDir, { recursive: true });
+                const dest = join(candidatesDir, `${safeName}.json`);
+                await Bun.write(dest, JSON.stringify(payload.presets, null, 4));
+                console.log("  saved candidates:", dest);
+                return new Response(JSON.stringify({ ok: true, path: dest }), {
+                    headers: { "Content-Type": "application/json" },
+                });
+            } catch (err) {
+                console.error("save-candidates error:", err);
+                return new Response("Internal error", { status: 500 });
+            }
+        }
+
+        // ── List candidate benchmark JSON files ─────────────────────────
+        if (url.pathname === "/api/candidates" && req.method === "GET") {
+            try {
+                const candidatesDir = join(ROOT, "candidates");
+                await mkdir(candidatesDir, { recursive: true });
+                const newDatasetDir = join(ROOT, "new_dataset");
+                const [candidateFiles, newDatasetFiles] = await Promise.all([
+                    listJsonFilesRecursive(candidatesDir, "candidates"),
+                    listJsonFilesRecursive(newDatasetDir, "new_dataset"),
+                ]);
+                const files = candidateFiles.concat(newDatasetFiles).sort();
+                return new Response(JSON.stringify({ files }), {
+                    headers: { "Content-Type": "application/json; charset=utf-8" },
+                });
+            } catch (err) {
+                console.error("list candidates error:", err);
+                return new Response("Internal error", { status: 500 });
+            }
+        }
+
+        // ── Save benchmarks endpoint ─────────────────────────────────────
+        if (url.pathname === "/api/save-benchmarks" && req.method === "POST") {
+            try {
+                const newPresets = await req.json();
+                const benchPath = join(ROOT, "benchmarks.json");
+                const bakPath = join(ROOT, "benchmarks.json.bak");
+
+                // Read existing
+                const existing = await Bun.file(benchPath).json();
+
+                // Backup
+                await Bun.write(bakPath, JSON.stringify(existing, null, 4));
+                console.log("  backed up benchmarks.json → benchmarks.json.bak");
+
+                // Merge new presets into existing
+                const keys = Object.keys(newPresets);
+                for (const key of keys) {
+                    existing[key] = newPresets[key];
+                }
+
+                // Write merged
+                await Bun.write(benchPath, JSON.stringify(existing, null, 4));
+                console.log("  merged " + keys.length + " presets into benchmarks.json");
+
+                return new Response(JSON.stringify({ ok: true, merged: keys.length }), {
+                    headers: { "Content-Type": "application/json" },
+                });
+            } catch (err) {
+                console.error("save-benchmarks error:", err);
                 return new Response("Internal error", { status: 500 });
             }
         }

@@ -569,7 +569,7 @@ function initControls(globals){
     else $("#axialStrainMaterialOptions").hide();
     if (globals.colorMode == "faceID") $("#faceIDOptions").show();
     else $("#faceIDOptions").hide();
-    if (globals.colorMode == "faceTriangleID" || globals.colorMode == "labelOnly") $("#faceTriangleIDOptions").show();
+    if (globals.colorMode == "faceTriangleID" || globals.colorMode == "labelOnly" || globals.colorMode == "greyscaleLabel") $("#faceTriangleIDOptions").show();
     else $("#faceTriangleIDOptions").hide();
     if (globals.colorMode == "labelOnly") $("#labelOnlyOptions").show();
     else $("#labelOnlyOptions").hide();
@@ -590,7 +590,7 @@ function initControls(globals){
         else $("#axialStrainMaterialOptions").hide();
         if (val == "faceID") $("#faceIDOptions").show();
         else $("#faceIDOptions").hide();
-        if (val == "faceTriangleID" || val == "labelOnly") {
+        if (val == "faceTriangleID" || val == "labelOnly" || val == "greyscaleLabel") {
             $("#faceTriangleIDOptions").show();
             if (typeof refreshFacePointList === "function") refreshFacePointList();
         } else $("#faceTriangleIDOptions").hide();
@@ -610,7 +610,7 @@ function initControls(globals){
     function onHighlightChange(){
         if (globals.colorMode == "faceID") globals.model.updateFaceColors();
         if (globals.colorMode == "faceTriangleID") globals.model.updateFaceColors();
-        if (globals.colorMode == "labelOnly") globals.model.updateFaceColors();
+        if (globals.colorMode == "labelOnly" || globals.colorMode == "greyscaleLabel") globals.model.updateFaceColors();
     }
     $("#highlightFaceA").on("change", function(){
         var val = $(this).val();
@@ -630,7 +630,18 @@ function initControls(globals){
         var pts = globals.facePoints.getPoints();
         var html = "";
         for (var i = 0; i < pts.length; i++){
-            html += "<span class=\"facePointItem\" data-index=\"" + i + "\">" + (i + 1) + ": Face " + pts[i].faceId + " <a href=\"#\" class=\"facePointRemove\">×</a></span><br/>";
+            var pt = pts[i];
+            var u = pt.u !== undefined ? pt.u.toFixed(3) : "?";
+            var v = pt.v !== undefined ? pt.v.toFixed(3) : "?";
+            var w = pt.w !== undefined ? pt.w.toFixed(3) : "?";
+            html += "<span class=\"facePointItem\" data-index=\"" + i + "\">"
+                + (i + 1) + ": Face " + pt.faceId
+                + " <span style=\"color:#888\">[" + u + ", " + v + ", " + w + "]</span>"
+                + " <a href=\"#\" class=\"facePointRemove\">×</a></span><br/>";
+        }
+        if (pts.length > 0) {
+            html += "<a href=\"#\" id=\"copyFacePointsJSON\" class=\"btn btn-xs btn-default\" style=\"margin-top:4px;\">Copy JSON</a> ";
+            html += "<a href=\"#\" id=\"savePointsToPreset\" class=\"btn btn-xs btn-warning\" style=\"margin-top:4px;\">Save to Preset</a>";
         }
         $("#facePointList").html(html || "(none)");
         $("#facePointList .facePointRemove").on("click", function(e){
@@ -640,6 +651,62 @@ function initControls(globals){
             refreshFacePointList();
             onHighlightChange();
         });
+        $("#copyFacePointsJSON").on("click", function(e){
+            e.preventDefault();
+            var pts = globals.facePoints.getPoints();
+            var grouped = buildFacePointsGrouped(pts);
+            var json = JSON.stringify(grouped, null, 4);
+            navigator.clipboard.writeText(json).then(function(){
+                $("#copyFacePointsJSON").text("Copied!");
+                setTimeout(function(){ $("#copyFacePointsJSON").text("Copy JSON"); }, 1500);
+            }, function(){
+                prompt("Copy facePoints JSON:", json);
+            });
+        });
+        $("#savePointsToPreset").on("click", function(e){
+            e.preventDefault();
+            var presetName = $("#benchmarkPresetSelect").val();
+            if (!presetName) {
+                alert("Select a benchmark preset first");
+                return;
+            }
+            var pts = globals.facePoints.getPoints();
+            if (pts.length === 0) {
+                alert("No points to save");
+                return;
+            }
+            var grouped = buildFacePointsGrouped(pts);
+            var xhr = new XMLHttpRequest();
+            xhr.open("POST", "/api/save-preset-points", true);
+            xhr.setRequestHeader("Content-Type", "application/json");
+            xhr.onload = function(){
+                if (xhr.status === 200) {
+                    $("#savePointsToPreset").text("Saved!");
+                    setTimeout(function(){ $("#savePointsToPreset").text("Save to Preset"); }, 1500);
+                } else {
+                    alert("Save failed: " + xhr.status);
+                }
+            };
+            xhr.onerror = function(){ alert("Save failed (network error)"); };
+            xhr.send(JSON.stringify({ preset: presetName, facePoints: grouped }));
+        });
+    }
+
+    function buildFacePointsGrouped(pts) {
+        var grouped = {};
+        for (var i = 0; i < pts.length; i++){
+            var p = pts[i];
+            var fid = String(p.faceId);
+            if (!grouped[fid]) grouped[fid] = [];
+            var entry = {
+                u: parseFloat(p.u.toFixed(2)),
+                v: parseFloat(p.v.toFixed(2)),
+                w: parseFloat(p.w.toFixed(2))
+            };
+            if (p.hidden) entry.hidden = true;
+            grouped[fid].push(entry);
+        }
+        return grouped;
     }
     $("#addFacePoint").on("click", function(e){
         e.preventDefault();
@@ -655,14 +722,21 @@ function initControls(globals){
 
     setCheckbox("#clickToAddFacePoints", globals.clickToAddFacePoints, function(val){
         globals.clickToAddFacePoints = val;
+        if (globals.threeView && globals.threeView.enableControls) {
+            globals.threeView.enableControls(!val);
+        }
     });
     setCheckbox("#showFacePointNumbers", globals.showFacePointNumbers, function(val){
         globals.showFacePointNumbers = val;
-        if (globals.colorMode === "faceTriangleID" || globals.colorMode === "labelOnly") globals.model.updateFaceColors();
+        if (globals.colorMode === "faceTriangleID" || globals.colorMode === "labelOnly" || globals.colorMode === "greyscaleLabel") globals.model.updateFaceColors();
     });
     setCheckbox("#facePoints3D", globals.facePoints3D, function(val){
         globals.facePoints3D = val;
-        if (globals.colorMode === "faceTriangleID" || globals.colorMode === "labelOnly") globals.model.updateFaceColors();
+        if (globals.colorMode === "faceTriangleID" || globals.colorMode === "labelOnly" || globals.colorMode === "greyscaleLabel") globals.model.updateFaceColors();
+    });
+
+    setCheckbox("#showFaceIds", false, function(val){
+        globals.showFaceIds = val;
     });
 
     setHexInput("#labelOnlyColor1", globals.color1, function(val){
@@ -728,13 +802,167 @@ function initControls(globals){
             globals.benchmark.runAll(path);
         }
     });
+    function refreshBenchmarkJsonPathOptions(selectedPath){
+        if (globals.benchmark && globals.benchmark.refreshJsonPaths) {
+            globals.benchmark.refreshJsonPaths(selectedPath || ($("#benchmarkJsonPath").val() || "benchmarks.json"));
+        }
+    }
+    refreshBenchmarkJsonPathOptions();
+    $("#benchmarkJsonPath").on("focus mousedown", function(){
+        refreshBenchmarkJsonPathOptions($(this).val());
+    });
     $("#benchmarkJsonPath").on("change", function(){
         var path = $(this).val();
-        if (globals.benchmark && globals.benchmark.loadJson) globals.benchmark.loadJson(path);
+        if (globals.benchmark) {
+            if (globals.benchmark.loadJson) globals.benchmark.loadJson(path);
+            if (globals.benchmark.startWatching) globals.benchmark.startWatching(path);
+        }
     });
     $("#benchmarkPresetSelect").on("change", function(){
         var val = $(this).val();
-        if (globals.benchmark && globals.benchmark.selectPreset) globals.benchmark.selectPreset(val || null);
+        if (globals.benchmark && globals.benchmark.selectPreset) {
+            globals.benchmark.selectPreset(val || null);
+        }
+    });
+
+    $("#benchmarkStepSelect").on("change", function(){
+        var val = $(this).val();
+        if (val === "" || val === null) return;
+        var idx = parseInt(val, 10);
+        if (!isNaN(idx) && globals.benchmark && globals.benchmark.goToStep) {
+            globals.benchmark.goToStep(idx);
+        }
+    });
+    $("#stepPrev").on("click", function(e){
+        e.preventDefault();
+        var $sel = $("#benchmarkStepSelect");
+        var cur = parseInt($sel.val(), 10);
+        if (isNaN(cur)) cur = 0; else cur = Math.max(0, cur - 1);
+        $sel.val(cur).trigger("change");
+    });
+    $("#stepNext").on("click", function(e){
+        e.preventDefault();
+        var $sel = $("#benchmarkStepSelect");
+        var cur = parseInt($sel.val(), 10);
+        var max = $sel.find("option").length - 1;
+        if (isNaN(cur)) cur = 0; else cur = Math.min(max, cur + 1);
+        $sel.val(cur).trigger("change");
+    });
+    $("#saveStepView").on("click", function(e){
+        e.preventDefault();
+        var idx = parseInt($("#benchmarkStepSelect").val(), 10);
+        if (isNaN(idx)) return;
+        if (!globals.benchmark || !globals.benchmark.saveViewToStep) return;
+        var step = globals.benchmark.saveViewToStep(idx);
+        if (step) {
+            $(this).text("Saved!").addClass("btn-success").removeClass("btn-warning");
+            var btn = this;
+            setTimeout(function(){ $(btn).text("Save View to Step").addClass("btn-warning").removeClass("btn-success"); }, 1500);
+        }
+    });
+    $("#exportPresetSteps").on("click", function(e){
+        e.preventDefault();
+        if (!globals.benchmark) return;
+        var cfg = globals.benchmark.getConfig();
+        if (!cfg || !cfg.steps) return;
+        var json = JSON.stringify(cfg.steps, null, 4);
+        navigator.clipboard.writeText(json).then(function(){
+            $("#exportPresetSteps").text("Copied!");
+            setTimeout(function(){ $("#exportPresetSteps").text("Copy All Steps JSON"); }, 1500);
+        }, function(){
+            prompt("Copy steps JSON:", json);
+        });
+    });
+
+    // ── Preset Generator UI ──
+    var _lastGenerated = null;
+
+    $("#runGenerator").on("click", function(e){
+        e.preventDefault();
+        if (!globals.presetGenerator) { alert("presetGenerator not initialized"); return; }
+        var opts = {
+            model: $("#genModel").val(),
+            difficulty: parseInt($("#genDifficulty").val()) || 5,
+            count: parseInt($("#genCount").val()) || 7,
+            baseName: $("#genBaseName").val() || "generated",
+            startIndex: parseInt($("#genStartIndex").val()) || 1,
+            templatePattern: $("#genTemplatePattern").val() || "bird-frontback-0*",
+            seed: parseInt($("#genSeed").val()) || 42,
+            validate: $("#genValidate").is(":checked"),
+            settleMs: 300,
+            trajectoryMode: "hybrid",
+            trackingEvalMode: "strictAllSteps"
+        };
+        $("#generatorStatus").text("Loading model...");
+        $("#saveGeneratedPresets").hide();
+
+        // Load the selected model first, then generate once it's ready
+        var modelPath = opts.model.replace(/^\//, ""); // strip leading slash
+        globals.importer.importDemoFile(modelPath);
+
+        // Poll until model geometry is loaded
+        var pollCount = 0;
+        var pollInterval = setInterval(function(){
+            pollCount++;
+            var faces = globals.model.getFaces ? globals.model.getFaces() : null;
+            if (faces && faces.length > 0) {
+                clearInterval(pollInterval);
+                $("#generatorStatus").text("Generating...");
+                runGeneration();
+            } else if (pollCount > 60) { // 30s timeout
+                clearInterval(pollInterval);
+                $("#generatorStatus").text("Error: model failed to load");
+            }
+        }, 500);
+
+        function runGeneration() {
+        globals.presetGenerator.generate(opts, function(result){
+            if (result.error) {
+                $("#generatorStatus").text("Error: " + result.error);
+                return;
+            }
+            _lastGenerated = result.generated;
+            var json = JSON.stringify(result.generated, null, 4);
+            console.log("Generated presets:", json);
+
+            // Auto-save to candidates/ directory
+            var candidateName = opts.baseName + "_d" + opts.difficulty + "_s" + opts.seed;
+            var xhr = new XMLHttpRequest();
+            xhr.open("POST", "/api/save-candidates", true);
+            xhr.setRequestHeader("Content-Type", "application/json");
+            xhr.onload = function() {
+                if (xhr.status === 200) {
+                    var resp = JSON.parse(xhr.responseText);
+                    $("#generatorStatus").text("Generated " + result.count + " presets — saved to " + resp.path);
+                    refreshBenchmarkJsonPathOptions($("#benchmarkJsonPath").val());
+                } else {
+                    $("#generatorStatus").text("Generated " + result.count + " presets (save failed: " + xhr.status + ")");
+                }
+            };
+            xhr.onerror = function() {
+                $("#generatorStatus").text("Generated " + result.count + " presets (save failed)");
+            };
+            xhr.send(JSON.stringify({ name: candidateName, presets: result.generated }));
+
+            $("#saveGeneratedPresets").show();
+        });
+        } // end runGeneration
+    });
+
+    $("#saveGeneratedPresets").on("click", function(e){
+        e.preventDefault();
+        if (!_lastGenerated) return;
+        globals.presetGenerator.saveToServer(_lastGenerated, function(err, resp){
+            if (err) {
+                $("#generatorStatus").text("Save failed: " + err);
+            } else {
+                $("#generatorStatus").text("Saved to benchmarks.json!");
+                // Reload presets
+                if (globals.benchmark && globals.benchmark.loadJson) {
+                    globals.benchmark.loadJson($("#benchmarkJsonPath").val());
+                }
+            }
+        });
     });
 
     setLink("#aboutError", function(){
@@ -1037,6 +1265,82 @@ function initControls(globals){
         });
         return slider;
     }
+
+    // View State display for benchmark authoring
+    function getViewState() {
+        var tv = globals.threeView;
+        if (!tv) return null;
+        var cam = tv.camera;
+        var mw = tv.modelWrapper;
+        if (!cam || !mw) return null;
+
+        // Camera direction (normalized position vector = POV direction)
+        var camPos = cam.position.clone().normalize();
+        var pov = [
+            parseFloat(camPos.x.toFixed(2)),
+            parseFloat(camPos.y.toFixed(2)),
+            parseFloat(camPos.z.toFixed(2))
+        ];
+
+        // Model rotation (Euler XYZ radians)
+        var rot = [
+            parseFloat(mw.rotation.x.toFixed(2)),
+            parseFloat(mw.rotation.y.toFixed(2)),
+            parseFloat(mw.rotation.z.toFixed(2))
+        ];
+        var hasRotation = rot[0] !== 0 || rot[1] !== 0 || rot[2] !== 0;
+
+        var fold = Math.round(globals.creasePercent * 100);
+
+        return { pov: pov, rotation: rot, hasRotation: hasRotation, fold: fold };
+    }
+
+    function updateViewStateDisplay() {
+        var el = document.getElementById("viewStateDisplay");
+        if (!el) return;
+        var vs = getViewState();
+        if (!vs) { el.textContent = "(no view)"; return; }
+        var lines = [];
+        lines.push("fold: " + vs.fold);
+        lines.push("pov:  [" + vs.pov.join(", ") + "]");
+        if (vs.hasRotation) lines.push("rot:  [" + vs.rotation.join(", ") + "]");
+        el.textContent = lines.join("\n");
+    }
+
+    // Update display periodically
+    setInterval(updateViewStateDisplay, 200);
+
+    function buildStepJSON() {
+        var vs = getViewState();
+        if (!vs) return "{}";
+        var step = { fold: vs.fold, pov: vs.pov };
+        if (vs.hasRotation) step.rotation = vs.rotation;
+        return JSON.stringify(step, null, 4);
+    }
+
+    $("#copyViewState").on("click", function(e) {
+        e.preventDefault();
+        var json = buildStepJSON();
+        navigator.clipboard.writeText(json).then(function(){
+            $("#copyViewState").text("Copied!");
+            setTimeout(function(){ $("#copyViewState").text("Copy Step JSON"); }, 1500);
+        }, function(){
+            prompt("Copy step JSON:", json);
+        });
+    });
+
+    $("#copyViewStateRotationOnly").on("click", function(e) {
+        e.preventDefault();
+        var vs = getViewState();
+        if (!vs) return;
+        var json = JSON.stringify(vs.rotation);
+        navigator.clipboard.writeText(json).then(function(){
+            $("#copyViewStateRotationOnly").text("Copied!");
+            setTimeout(function(){ $("#copyViewStateRotationOnly").text("Copy Rotation"); }, 1500);
+        }, function(){
+            prompt("Copy rotation:", json);
+        });
+    });
 
     return {
         setDeltaT: setDeltaT,

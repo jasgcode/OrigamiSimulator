@@ -310,7 +310,7 @@ function initModel(globals){
 
     function updateLabels(){
         var showPanelLabels = globals.colorMode == "faceID";
-        var showTriLabels = globals.colorMode == "faceTriangleID" || globals.colorMode == "labelOnly";
+        var showTriLabels = globals.colorMode == "faceTriangleID" || globals.colorMode == "labelOnly" || globals.colorMode == "greyscaleLabel";
 
         if (showPanelLabels){
             if (globals.highlightedFaceA >= 0 && globals.highlightedFaceA < numPanels){
@@ -534,6 +534,25 @@ function initModel(globals){
             material2.color.setStyle( "#" + globals.color2);
             backside.visible = true;
             updateLabels();
+        } else if (globals.colorMode == "greyscaleLabel"){
+            material = new THREE.MeshPhongMaterial({
+                flatShading:true,
+                side:THREE.FrontSide,
+                polygonOffset: true,
+                polygonOffsetFactor: polygonOffset,
+                polygonOffsetUnits: 1
+            });
+            material2 = new THREE.MeshPhongMaterial({
+                flatShading:true,
+                side:THREE.BackSide,
+                polygonOffset: true,
+                polygonOffsetFactor: polygonOffset,
+                polygonOffsetUnits: 1
+            });
+            material.color.setStyle("#" + toGreyscaleHex(globals.color1));
+            material2.color.setStyle("#" + toGreyscaleHex(globals.color2));
+            backside.visible = true;
+            updateLabels();
         } else {
             material = new THREE.MeshPhongMaterial({
                 flatShading:true,
@@ -560,6 +579,37 @@ function initModel(globals){
         }
         frontside.material = material;
         backside.material = material2;
+    }
+
+    function radicalInverse(base, index){
+        var invBase = 1.0 / base;
+        var denom = invBase;
+        var reversed = 0.0;
+        while (index > 0){
+            var next = index % base;
+            reversed += next * denom;
+            index = Math.floor(index / base);
+            denom *= invBase;
+        }
+        return reversed;
+    }
+
+    function makePaletteColor(index, hueOffset){
+        var i = index + 1;
+        var hue = (radicalInverse(2, i) + (hueOffset || 0)) % 1.0;
+        var saturation = 0.58 + 0.32 * radicalInverse(3, i);
+        var lightness = 0.42 + 0.24 * radicalInverse(5, i);
+        return new THREE.Color().setHSL(hue, saturation, lightness);
+    }
+
+    function makeBackPaletteColor(frontColor, index){
+        var i = index + 1;
+        var hsl = { h: 0, s: 0, l: 0 };
+        frontColor.getHSL(hsl);
+        var hue = (hsl.h + 0.17 + 0.11 * radicalInverse(7, i)) % 1.0;
+        var saturation = Math.max(0.4, Math.min(0.92, hsl.s * 0.82 + 0.12));
+        var lightness = Math.max(0.3, Math.min(0.78, hsl.l * 0.74 + 0.08));
+        return new THREE.Color().setHSL(hue, saturation, lightness);
     }
 
     function buildPanelMap(){
@@ -622,15 +672,15 @@ function initModel(globals){
         //build color palette for panels
         panelColorPalette = [];
         for (var p = 0; p < numPanels; p++){
-            var hue = (p * 0.618033988749895) % 1.0;
-            panelColorPalette.push(new THREE.Color().setHSL(hue, 0.7, 0.6));
+            panelColorPalette.push(makePaletteColor(p, 0.08));
         }
 
         //build color palette for individual triangle faces (2N: front 0..N-1, back N..2N-1)
         faceColorPalette = [];
-        for (var f = 0; f < faces.length * 2; f++){
-            var hue = (f * 0.618033988749895) % 1.0;
-            faceColorPalette.push(new THREE.Color().setHSL(hue, 0.7, 0.6));
+        for (var f = 0; f < faces.length; f++){
+            var frontColor = makePaletteColor(f, 0.0);
+            faceColorPalette[f] = frontColor;
+            faceColorPalette[f + faces.length] = makeBackPaletteColor(frontColor, f);
         }
     }
 
@@ -641,15 +691,10 @@ function initModel(globals){
         var N = faces.length;
 
         if (globals.colorMode == "faceTriangleID"){
-            //per-face coloring: highlight faces that have at least one point
-            var pts = (globals.facePoints && globals.facePoints.getPoints) ? globals.facePoints.getPoints() : [];
-            var highlightedFaceIds = {};
-            for (var pi = 0; pi < pts.length; pi++){
-                highlightedFaceIds[pts[pi].faceId] = true;
-            }
+            //per-face coloring: keep stable per-face palette for both tracked and untracked faces
             for (var f = 0; f < N; f++){
-                var frontColor = highlightedFaceIds[f] ? colorA : (faceColorPalette[f] || new THREE.Color(0.5, 0.5, 0.5));
-                var backColor = highlightedFaceIds[f + N] ? colorA : (faceColorPalette[f + N] || new THREE.Color(0.5, 0.5, 0.5));
+                var frontColor = faceColorPalette[f] || new THREE.Color(0.5, 0.5, 0.5);
+                var backColor = faceColorPalette[f + N] || new THREE.Color(0.5, 0.5, 0.5);
                 for (var v = 0; v < 3; v++){
                     var idx = (f * 3 + v) * 3;
                     meshColors[idx] = frontColor.r;
@@ -710,7 +755,7 @@ function initModel(globals){
 
     function updateMeshVisibility(){
         frontside.visible = globals.meshVisible;
-        backside.visible = (globals.colorMode == "color" || globals.colorMode == "greyscale" || globals.colorMode == "labelOnly" || globals.colorMode == "faceTriangleID") && globals.meshVisible;
+        backside.visible = (globals.colorMode == "color" || globals.colorMode == "greyscale" || globals.colorMode == "labelOnly" || globals.colorMode == "greyscaleLabel" || globals.colorMode == "faceTriangleID") && globals.meshVisible;
     }
 
     function getGeometry(){
@@ -984,7 +1029,7 @@ function initModel(globals){
 
         //group triangles into logical panels and build color palette
         buildPanelMap();
-        if (globals.colorMode == "faceID" || globals.colorMode == "faceTriangleID" || globals.colorMode == "labelOnly") updateFaceColors();
+        if (globals.colorMode == "faceID" || globals.colorMode == "faceTriangleID" || globals.colorMode == "labelOnly" || globals.colorMode == "greyscaleLabel") updateFaceColors();
         $("#totalFaces").html(numPanels);
         var totalTriFaces = faces.length * 2;
         $("#totalFacesLabel").html(totalTriFaces);
@@ -1055,6 +1100,8 @@ function initModel(globals){
 
         getDimensions: getDimensions,//for save stl
         getPointOnFace: getPointOnFace,
-        updateFacePointPreview: updateFacePointPreview
+        updateFacePointPreview: updateFacePointPreview,
+        getFaceCentroid: getFaceCentroid,
+        getFaceNormal: getFaceNormal
     }
 }

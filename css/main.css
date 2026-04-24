@@ -308,6 +308,31 @@ input.form-control {
     z-index: 2;
 }
 
+#faceIdCanvas {
+    width: 100%;
+    height: 100%;
+    position: absolute;
+    top: 0;
+    left: 0;
+    pointer-events: none;
+    z-index: 2;
+    display: none;
+}
+
+#stepNumberOverlay {
+    display: none;
+    position: absolute;
+    top: 16px;
+    left: 16px;
+    font: bold 28px Arial, sans-serif;
+    color: #222;
+    background: rgba(255, 255, 255, 0.75);
+    padding: 4px 12px;
+    border-radius: 6px;
+    pointer-events: none;
+    z-index: 3;
+}
+
 .slider.slider-horizontal {
     width: 200px;
     margin: 0;

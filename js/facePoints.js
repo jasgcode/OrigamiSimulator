@@ -184,15 +184,6 @@ function initFacePoints(globals) {
         points.length = 0;
     }
 
-    function randomBarycentric() {
-        var r1 = Math.random();
-        var r2 = Math.random();
-        var u = 1 - Math.sqrt(r1);
-        var v = Math.sqrt(r1) * (1 - r2);
-        var w = Math.sqrt(r1) * r2;
-        return { u: u, v: v, w: w };
-    }
-
     function deterministicBarycentric(index) {
         var m = 2147483647;
         var r1 = ((index * 2654435761 + 1013904223) % m) / m;
@@ -235,6 +226,20 @@ function initFacePoints(globals) {
         var facingCamera = isFront ? dot > 0 : dot < 0;
         if (!facingCamera) return false;
 
+        // Frustum check — without this, a point can pass the face-normal +
+        // occlusion tests but be entirely off-screen (behind camera or
+        // outside view cone), and validation falsely passes a preset whose
+        // tracked point is invisible in the rendered PNG. Project to NDC
+        // and reject anything outside [-1, 1] on x/y/z. The 2D label overlay
+        // already does this (pointAnnotations.js:44) — this brings the core
+        // visibility gate in line.
+        if (camera.matrixWorldInverse && camera.projectionMatrix) {
+            var ndc = posWorld.clone().project(camera);
+            if (ndc.z < -1 || ndc.z > 1) return false;
+            if (ndc.x < -1 || ndc.x > 1) return false;
+            if (ndc.y < -1 || ndc.y > 1) return false;
+        }
+
         // Occlusion test — raw ray-triangle, no material.side culling
         var positions = globals.model.getPositionsArray();
         if (!faces || !positions) return true; // can't test, assume visible
@@ -250,6 +255,80 @@ function initFacePoints(globals) {
         if (localDistToCamera < 1e-8) return true;
         var dirLocal = toCameraLocal.clone().divideScalar(localDistToCamera);
         return !isOccluded(originLocal, dirLocal, localDistToCamera, faces, positions);
+    }
+
+    // Forward-clearance test. Imagines a short arrow pointing perpendicular
+    // and outward from the point along the face's outward normal, then
+    // asks two questions:
+    //
+    //   (1) along-normal path: is any mesh face crossing the arrow body?
+    //       (ray from point along +normal for `dist`)
+    //   (2) tip visibility:    is the arrow's TIP visible from the camera?
+    //       (ray from tip toward camera)
+    //
+    // isPointVisible already rejects fully-occluded points via (2) applied
+    // to the point itself, but a marker/label drawn at a point that is
+    // technically visible can still visually collide with a panel sitting
+    // just above it along the normal (the point's own camera ray slips
+    // past the panel but the slightly-elevated tip does not, or a layer
+    // physically crosses the outward arrow). This combined test catches
+    // both geometries.
+    //
+    // dist is in LOCAL (pre-modelWorld) mesh units. The refiner passes
+    // ~2% of the mesh bounding-box diagonal, which is enough to
+    // discriminate "buried under a layer" from "out in the open".
+    //
+    // Returns true if the arrow is clear (both checks pass), false if
+    // the arrow is cut off or the tip is hidden from the camera.
+    function hasForwardClearance(index, dist) {
+        if (index < 0 || index >= points.length) return false;
+        if (!globals.model || !globals.model.getFaces) return true;
+        var faces = globals.model.getFaces();
+        var positions = globals.model.getPositionsArray();
+        if (!faces || !positions) return true;
+        var N = faces.length;
+        if (N === 0) return true;
+        var p = points[index];
+        var isFront = p.faceId < N;
+        var triIdx = isFront ? p.faceId : p.faceId - N;
+        var posLocal = getPointPosition(index);
+        var normalLocal = getFaceNormal(triIdx);
+        if (!posLocal || !normalLocal) return true;
+        var camera = globals.threeView && globals.threeView.camera;
+        if (!camera) return true;
+        updateModelMatrices();
+
+        // Back-side points use the inward normal as their "outward".
+        var dirLocal = isFront ? normalLocal.clone() : normalLocal.clone().multiplyScalar(-1);
+
+        // (1) Along-normal path check. Nudge origin off the surface so
+        //     the point's own face isn't hit.
+        var originLocal = posLocal.clone().addScaledVector(dirLocal, OCCL_EPSILON);
+        if (isOccluded(originLocal, dirLocal, dist, faces, positions)) return false;
+
+        // (2) Tip visibility check. Compute the arrow tip in local
+        //     coords, transform its world-space position, and cast a
+        //     ray from the tip back toward the camera. A layer between
+        //     the camera and the tip indicates the tip — and therefore
+        //     the upper half of the arrow — is hidden.
+        var tipLocal = posLocal.clone().addScaledVector(dirLocal, dist);
+        var tipWorld = tipLocal.clone().applyMatrix4(_modelWorld);
+        var toCameraWorld = camera.position.clone().sub(tipWorld);
+        var distToCamera = toCameraWorld.length();
+        if (distToCamera < 1e-8) return true;
+        var dirToCameraWorld = toCameraWorld.clone().divideScalar(distToCamera);
+        // Transform the ray into local space so we can reuse the local
+        // positions array for triangle intersection.
+        var originTipLocal = tipLocal.clone().addScaledVector(
+            dirToCameraWorld.clone().transformDirection(_modelInv).normalize(),
+            OCCL_EPSILON
+        );
+        var localCamera = camera.position.clone().applyMatrix4(_modelInv);
+        var toCameraLocal = localCamera.clone().sub(originTipLocal);
+        var localDistToCamera = toCameraLocal.length();
+        if (localDistToCamera < 1e-8) return true;
+        var dirToCameraLocal = toCameraLocal.clone().divideScalar(localDistToCamera);
+        return !isOccluded(originTipLocal, dirToCameraLocal, localDistToCamera, faces, positions);
     }
 
     // Returns points array enriched with world position and camera-facing visibility.
@@ -436,6 +515,7 @@ function initFacePoints(globals) {
         clearPoints: clearPoints,
         initFromConfig: initFromConfig,
         isPointVisible: isPointVisible,
+        hasForwardClearance: hasForwardClearance,
         getPointsWithVisibility: getPointsWithVisibility,
         getVisibleFaceIds: getVisibleFaceIds,
         getFaceViewQualities: getFaceViewQualities,
