@@ -8,6 +8,8 @@
  *   bun tools/generate-matrix.js --out-dir new_dataset/matrix-gen-0423
  *   bun tools/generate-matrix.js --out-dir new_dataset/matrix-gen-0423 --concurrency 12
  *
+ * Tiers: d1-d4 (d5 dropped per user spec).
+ *
  * Parallelism model:
  *   Phase 1 (pre-warm): for each model, run d=1 in parallel. Each model
  *     writes its own assets/facepools/<key>.json so there's no cache
@@ -198,7 +200,7 @@ if (PREWARM) {
     // Phase 2: every remaining (model, d∈{2..5}) slot, fully parallel up
     // to --concurrency. Cache is warm so same-model slots no longer race.
     const phase2 = [];
-    for (const m of MODELS) for (let d = 2; d <= 5; d++) phase2.push({ model: m, d });
+    for (const m of MODELS) for (let d = 2; d <= 4; d++) phase2.push({ model: m, d });
     await runQueue(phase2, CONCURRENCY, "phase 2 (fan-out d=2..5)");
 } else {
     // Legacy: model groups in parallel, difficulties within a model
@@ -210,7 +212,7 @@ if (PREWARM) {
             const i = cursor++;
             if (i >= MODELS.length) return;
             const m = MODELS[i];
-            for (let d = 1; d <= 5; d++) await runSlot(m, d);
+            for (let d = 1; d <= 4; d++) await runSlot(m, d);
         }
     }
     const limit = Math.min(CONCURRENCY, MODELS.length);

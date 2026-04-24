@@ -339,9 +339,9 @@ function initPresetGenerator(globals) {
 
     function clampDifficultyTier(difficulty) {
         var d = parseInt(difficulty, 10);
-        if (isNaN(d)) d = 5;
+        if (isNaN(d)) d = 4;
         if (d < 1) d = 1;
-        if (d > 5) d = 5;
+        if (d > 4) d = 4;  // d5 dropped per user spec
         return d;
     }
 
@@ -349,9 +349,11 @@ function initPresetGenerator(globals) {
         var tier = clampDifficultyTier(difficulty);
         return {
             tier: tier,
-            requiresBothSides: tier === 2 || tier === 4 || tier === 5,
+            requiresBothSides: tier === 2 || tier === 4,
+            // d1 = no inter-step motion, d2 = "small" rotation but POV static.
+            // Both render with constant or near-constant rotation across steps.
             isStaticTier: tier <= 2,
-            isMajorMotionTier: tier === 5
+            isMajorMotionTier: tier === 4
         };
     }
 
@@ -2160,10 +2162,8 @@ function initPresetGenerator(globals) {
         var N = modelFaceCount;
         if (!N || N < 1) return [];
 
-        // Normalize pools to face IDs in [0, N). Back-side IDs in input
-        // (>= N) are folded to the front index — getVisibleFaceIds always
-        // returns 0..N-1 (a face has both sides; "back pool" = faces whose
-        // back side becomes visible under rotation).
+        // Front pool: keep visibility-discovered front faces (faces visible
+        // from above at fold=0). Used for visible-front anchors.
         function normalizePool(src) {
             var out = [];
             var seen = {};
@@ -2178,7 +2178,16 @@ function initPresetGenerator(globals) {
             return out;
         }
         var fronts = normalizePool(frontPool);
-        var backs = normalizePool(backPool);
+
+        // Back pool: STRICTLY index-based — faces with INDEX in [N/2, N-1]
+        // (the second half of the mesh, per user spec). Intersected downstream
+        // with the trajectory's finalVisible so we only pick back-pool faces
+        // the rotation actually exposes. d4 requires 1-2 hidden points
+        // on faces from this range; trajectories that don't expose enough
+        // back-half faces are dropped by the coverage gate below.
+        var backStart = Math.floor(N / 2);
+        var backs = [];
+        for (var bii = backStart; bii < N; bii++) backs.push(bii);
 
         // Build alwaysVisible set + min-step quality from the timeline.
         var firstStep = timeline[0];
@@ -2251,33 +2260,41 @@ function initPresetGenerator(globals) {
             return (finalQuality[b] || 0) - (finalQuality[a] || 0);
         });
 
-        // Per-tier slot count RANGES. Constraint: every preset has 3–6 total
-        // tracked points (user spec) AND at least 2 visible (non-hidden)
-        // anchors so initial state is trackable. Each tier picks greedily
-        // from its range based on what the trajectory's pools support; an
-        // empty config is returned if the lower bound can't be met.
+        // Per-tier slot count RANGES (d1–d4 only; d5 dropped per user spec).
+        // Constraint: every preset has at least 2 visible (non-hidden)
+        // anchors so initial state is trackable, and the total fits the
+        // tier's range. Each tier picks greedily from its range based on
+        // what the trajectory's pools support; empty config returned if
+        // the lower bound can't be met.
         //
-        // Range = [min, max] per slot. Total cap of 6 is enforced after.
+        //   d1: static (no rotation across steps), 2 visible front + 1-3
+        //       hidden front (revealed at final step). Total 3-5.
+        //   d2: static POV + small rotation, 2 visible front + 1-2 hidden
+        //       back (revealed at final via rotation). Total 3-4.
+        //   d3: rotated, 2 visible front + 1-3 hidden front. Total 3-5.
+        //   d4: rotated, 2 visible front + 1-2 hidden front + 1-2 hidden
+        //       back (mix of late-front-reveal and back-via-rotation).
+        //       Total 4-6.
         var ranges;
-        if (tier === 1)      ranges = { vF: [3, 6], hF: [0, 0], hB: [0, 0] };
-        else if (tier === 2) ranges = { vF: [2, 4], hF: [0, 0], hB: [1, 2] };
-        else if (tier === 3) ranges = { vF: [3, 6], hF: [0, 0], hB: [0, 0] };
-        else if (tier === 4) ranges = { vF: [2, 3], hF: [1, 2], hB: [1, 2] };
-        else                 ranges = { vF: [2, 3], hF: [2, 3], hB: [1, 2] };
+        if (tier === 1)      ranges = { vF: [2, 2], hF: [1, 3], hB: [0, 0] };
+        else if (tier === 2) ranges = { vF: [2, 2], hF: [0, 0], hB: [1, 2] };
+        else if (tier === 3) ranges = { vF: [2, 2], hF: [1, 3], hB: [0, 0] };
+        else                 ranges = { vF: [2, 2], hF: [1, 2], hB: [1, 2] };
 
-        // For two-sided tiers, the FINAL POSE must show "a good amount of
-        // both sides" — not just a single back face peeking through. Gate
-        // trajectory acceptance on the count of back-pool faces visible at
-        // the final step. Reference d4/d5 ("bird-frontback") presets ship
-        // 3-6 back-pool faces visible at final; one sliver is insufficient.
-        // d2 has tighter rotation budget so allow 2; d4/d5 require 3.
-        var requiresBothSides = (tier === 2 || tier === 4 || tier === 5);
+        // For two-sided tiers (d2, d4), the FINAL POSE must show at least
+        // hB.lower back-pool faces (indices [N/2, N-1]) visible at the final
+        // step — that's the minimum required to fill the tier's hidden-back
+        // slots. Earlier this was hardcoded at >=2, which trips strict
+        // index-based pools on models like bird (only 4 of 8 back-half
+        // faces are ever back-visible, and rotation typically exposes 0-1).
+        // Use the range's lower bound so the gate matches the tier plan.
+        var requiresBothSides = (tier === 2 || tier === 4);
         var backVisibleAtFinalCount = 0;
         for (var bvi = 0; bvi < backs.length; bvi++) {
             if (finalVisible[backs[bvi]]) backVisibleAtFinalCount++;
         }
         if (requiresBothSides) {
-            var minBackAtFinal = (tier === 2) ? 2 : 3;
+            var minBackAtFinal = ranges.hB[0];
             if (backVisibleAtFinalCount < minBackAtFinal) return [];
         }
 
@@ -2414,20 +2431,19 @@ function initPresetGenerator(globals) {
     // single-side, d4=moderate two-sided, d5=large two-sided.
     function rotationBoundsForTier(difficulty) {
         var tier = clampDifficultyTier(difficulty);
-        // d1 borrows d3's rotation magnitudes for STATIC pose diversity.
-        // d1 still has zero motion BETWEEN steps (buildAutoRotationProfiles'
-        // d1 case emits constant-rotation profiles); these magnitudes only
-        // determine how tilted the static pose can be. Without this, d1
-        // collapses to the single "flat from above" view.
+        // d1: STATIC (no motion across steps), but each preset can sit at a
+        // tilted constant pose (buildAutoRotationProfiles emits constant-
+        // rotation profiles). These bounds determine how tilted the static
+        // pose can be. Without this d1 collapses to the single "flat from
+        // above" view.
         if (tier === 1) return { yaw: 0.5, pitch: 0.15, roll: 0.08 };
+        // d2: small rotation across fold steps (hidden-back reveal model).
         if (tier === 2) return { yaw: 0.2, pitch: 0.2, roll: 0.05 };
+        // d3: rotated single-side, moderate yaw with mild pitch/roll.
         if (tier === 3) return { yaw: 0.5, pitch: 0.15, roll: 0.08 };
-        // d4 bumped 0.6→1.0 to match bird-frontback reference quality.
-        // The 0.6 cap produced final-step rotations of only ~0.74 rad after
-        // template+envelope multiplication; references reach ~1.0+ rad and
-        // show substantially more back-side area at the final pose.
-        if (tier === 4) return { yaw: 1.0, pitch: 1.0, roll: 0.25 };
-        return              { yaw: 1.2, pitch: 1.2, roll: 0.25 };
+        // d4: rotated two-sided, ~1.0 rad to match bird-frontback reference
+        // quality (0.6 cap produced ~0.74 rad final, references reach ~1.0+).
+        return { yaw: 1.0, pitch: 1.0, roll: 0.25 };
     }
 
     function generateFromScanProgressions(options, callback) {
@@ -2550,10 +2566,10 @@ function initPresetGenerator(globals) {
             minProgressionTotalAngle: opts.minProgressionTotalAngle != null ? opts.minProgressionTotalAngle : 0,
             minRotationEndAngle: opts.minRotationEndAngle != null
                 ? opts.minRotationEndAngle
-                : (difficulty >= 5 ? 0.85 : (difficulty >= 4 ? 0.45 : (difficulty >= 3 ? 0.20 : 0))),
+                : (difficulty >= 4 ? 0.45 : (difficulty >= 3 ? 0.20 : 0)),
             minRotationTotalAngle: opts.minRotationTotalAngle != null
                 ? opts.minRotationTotalAngle
-                : (difficulty >= 5 ? 1.8 : (difficulty >= 4 ? 0.95 : (difficulty >= 3 ? 0.45 : 0))),
+                : (difficulty >= 4 ? 0.95 : (difficulty >= 3 ? 0.45 : 0)),
             rotationYawMax: opts.rotationYawMax != null ? opts.rotationYawMax : rotBounds.yaw,
             rotationPitchMax: opts.rotationPitchMax != null ? opts.rotationPitchMax : rotBounds.pitch,
             rotationRollMax: opts.rotationRollMax != null ? opts.rotationRollMax : rotBounds.roll,
@@ -2665,6 +2681,17 @@ function initPresetGenerator(globals) {
                     // tier's hidden plan from final-step visibility. This
                     // only runs if the timeline's final-step record
                     // disagrees with the live (settle-time) geometry.
+                    //
+                    // "back" = face index in [N/2, N-1] — same strict
+                    // definition selectFacePointsFromTrajectory uses for
+                    // hidden-back picks. Earlier this used backFaces
+                    // (pools.back from discoverFacePools, visibility-based),
+                    // which disagreed with the picker's index-based pool —
+                    // hidden-back picks like face 13 didn't register as
+                    // "back" in this count, so the top-off fired anyway and
+                    // added an extra hidden face (observed: d2 presets with
+                    // 5 picks instead of the planned 4).
+                    var presetBackStart = Math.floor(modelFaceCount / 2);
                     var presetHiddenBack = 0, presetHiddenFront = 0;
                     var presetKeys = Object.keys(preset.facePoints || {});
                     for (var pk = 0; pk < presetKeys.length; pk++) {
@@ -2673,7 +2700,7 @@ function initPresetGenerator(globals) {
                         if (!Array.isArray(arr)) continue;
                         for (var ai = 0; ai < arr.length; ai++) {
                             if (arr[ai] && arr[ai].hidden) {
-                                if (backFaces && backFaces.indexOf(fid) !== -1) presetHiddenBack++;
+                                if (!isNaN(fid) && fid >= presetBackStart) presetHiddenBack++;
                                 else presetHiddenFront++;
                             }
                         }
@@ -3002,8 +3029,8 @@ function initPresetGenerator(globals) {
         for (var fi = 0; fi < freshCount; fi++) {
             var startZ = rng.pick([-0.9, -0.6, -0.3, 0, 0.3, 0.6, 0.9]);
             var freshRot = generateFreshRotationCurve(foldSteps.length, rng, {
-                yawMax: difficulty >= 5 ? rng.randFloat(1.2, 1.9) : rng.randFloat(0.4, 1.0),
-                pitchMax: difficulty >= 5 ? rng.randFloat(0.2, 0.8) : rng.randFloat(0.08, 0.35),
+                yawMax: rng.randFloat(0.4, 1.0),
+                pitchMax: rng.randFloat(0.08, 0.35),
                 rollMax: difficulty >= 3 ? rng.randFloat(0.0, 0.4) : 0,
                 yawDir: rng.random() < 0.5 ? 1 : -1,
                 easeType: rng.randInt(0, 3)

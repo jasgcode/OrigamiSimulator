@@ -8,7 +8,7 @@
  */
 
 import { join } from "path";
-import { mkdir, readdir } from "fs/promises";
+import { mkdir, readdir, appendFile, writeFile } from "fs/promises";
 
 const ROOT = import.meta.dir;
 const SCREENSHOTS_DIR = join(ROOT, "screenshots");
@@ -87,9 +87,19 @@ Bun.serve({
                 if (!file || !(file instanceof File)) {
                     return new Response("Missing file field", { status: 400 });
                 }
-                // Optional ?folder= query param — creates screenshots/{folder}/ subdirectory
+                // Optional ?folder= query param — creates nested
+                // screenshots/{folder}/ subdirectory. Per-segment sanitiser
+                // so paths like "images/<id>" preserve the slash.
                 const rawFolder = url.searchParams.get("folder");
-                const safeFolder = rawFolder ? rawFolder.replace(/[/\\]/g, "_") : null;
+                let safeFolder = null;
+                if (rawFolder) {
+                    safeFolder = rawFolder
+                        .split(/[\\/]/)
+                        .map(s => s.replace(/[^a-zA-Z0-9_.-]/g, "_"))
+                        .filter(s => s && s !== "." && s !== "..")
+                        .join("/");
+                    if (!safeFolder) safeFolder = null;
+                }
                 const dir = safeFolder ? join(SCREENSHOTS_DIR, safeFolder) : SCREENSHOTS_DIR;
                 await mkdir(dir, { recursive: true });
                 const safeName = file.name.replace(/[/\\]/g, "_");
@@ -101,6 +111,46 @@ Bun.serve({
                 });
             } catch (err) {
                 console.error("screenshot save error:", err);
+                return new Response("Internal error", { status: 500 });
+            }
+        }
+
+        // ── JSONL append endpoint ────────────────────────────────────────
+        // POST /api/jsonl-append with JSON body { path, line, fresh }
+        // - path: filename within screenshots/ (e.g. "dataset.jsonl")
+        // - line: the JSON-stringified entry (no trailing newline expected)
+        // - fresh: when true, truncate the file before writing (start of batch)
+        if (url.pathname === "/api/jsonl-append" && req.method === "POST") {
+            try {
+                const payload = await req.json();
+                const rawPath = String(payload.path || "");
+                const line = String(payload.line || "");
+                const fresh = payload.fresh === true;
+                if (!rawPath.endsWith(".jsonl")) {
+                    return new Response("path must end with .jsonl", { status: 400 });
+                }
+                // Sanitise per-segment so we can't escape SCREENSHOTS_DIR.
+                const safeRel = rawPath
+                    .split(/[\\/]/)
+                    .map(s => s.replace(/[^a-zA-Z0-9_.-]/g, "_"))
+                    .filter(s => s && s !== "." && s !== "..")
+                    .join("/");
+                if (!safeRel) {
+                    return new Response("invalid path", { status: 400 });
+                }
+                const filePath = join(SCREENSHOTS_DIR, safeRel);
+                await mkdir(SCREENSHOTS_DIR, { recursive: true });
+                const data = (line.endsWith("\n") ? line : line + "\n");
+                if (fresh) {
+                    await writeFile(filePath, data, "utf8");
+                } else {
+                    await appendFile(filePath, data, "utf8");
+                }
+                return new Response(JSON.stringify({ ok: true, path: filePath }), {
+                    headers: { "Content-Type": "application/json" },
+                });
+            } catch (err) {
+                console.error("jsonl-append error:", err);
                 return new Response("Internal error", { status: 500 });
             }
         }

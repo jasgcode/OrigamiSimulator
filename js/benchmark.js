@@ -54,6 +54,13 @@ function initBenchmark(globals) {
     var stateAccumulator = [];   // collects { fold, pov, visiblePoints } per captured step
     var capturedFiles = [];      // ordered PNG filenames saved this run (for dataset JSON)
     var datasetSampleCounter = 0; // monotonic integer ID across all benchmark runs in session
+    // JSONL dataset output state. jsonlBatchStarted resets to false at runAll
+    // start; the first POST per batch truncates dataset.jsonl, subsequent POSTs
+    // append. currentJsonlId is the question id used for image folder naming.
+    // jsonlStepIndex is 0-based per preset.
+    var jsonlBatchStarted = false;
+    var currentJsonlId = null;
+    var jsonlStepIndex = 0;
     var stepLabelPrefix = "STATE";
     var stepLabelFontSize = null;
     var stepLabelShowTotal = true;
@@ -294,7 +301,7 @@ function initBenchmark(globals) {
         if (labelPrefix !== undefined && labelPrefix !== null && String(labelPrefix).trim() !== "") {
             stepLabelPrefix = String(labelPrefix).trim();
         } else {
-            stepLabelPrefix = "Step";
+            stepLabelPrefix = "STATE";
         }
 
         var fontSize = cfg ? parseFloat(cfg.stepLabelFontSize) : NaN;
@@ -410,6 +417,13 @@ function initBenchmark(globals) {
             });
 
         saveMetadataJson(name, summary);
+        // Append a JSONL row for this preset to screenshots/dataset.jsonl
+        // (truncates if first preset of the batch).
+        try {
+            postJsonlEntry(buildJsonlEntry(name, summary));
+        } catch (e) {
+            console.warn("benchmark: buildJsonlEntry failed", e && e.message ? e.message : e);
+        }
     }
 
     // Saves metadata JSON (no eval questions/answers — those are in Hydra config).
@@ -484,13 +498,19 @@ function initBenchmark(globals) {
     function captureScreenshot(filenameLabel, recordLabel, callback) {
         if (typeof recordLabel === "function") { callback = recordLabel; recordLabel = filenameLabel; }
         var name = currentBenchmarkName || globals.filename || "benchmark";
-        var filename = filenameLabel + ".png";
-        var relativePath = name + "/" + filename;
-        globals.screenRecordFilename = name + "_" + filenameLabel;
+        // JSONL-style path: images/<id>/step_NNNN_current.png. The 0-based
+        // jsonlStepIndex is incremented per captureScreenshot call within
+        // a preset (reset in run() alongside stateAccumulator/capturedFiles).
+        var jsonlId = currentJsonlId || buildJsonlId(name, config && config.model, config && config.difficulty);
+        var stepIdx = jsonlStepIndex++;
+        var filename = jsonlStepFilename(stepIdx);
+        var folder = "images/" + jsonlId;
+        var relativePath = folder + "/" + filename;
+        globals.screenRecordFilename = jsonlId + "_step_" + stepIdx;
         globals.captureCallback = function (blob) {
             var formData = new FormData();
             formData.append("file", blob, filename);
-            fetch("/api/screenshot?folder=" + encodeURIComponent(name), { method: "POST", body: formData })
+            fetch("/api/screenshot?folder=" + encodeURIComponent(folder), { method: "POST", body: formData })
                 .then(function (res) {
                     if (!res.ok) throw new Error("server error");
                     console.log("benchmark: saved screenshots/" + relativePath);
@@ -639,7 +659,11 @@ function initBenchmark(globals) {
         var povKeyframes = opts.povKeyframes || opts.pov; // povKeyframes: [{fold, pov}, ...] or single "iso"
         var fitAllPoints = opts.fitAllPoints === true || opts.povFitAllPoints === true;
         var trackModel = opts.trackModel === true; // rotate model, camera fixed — always all points in view
-        var hidePoints = opts.hidePointsDuringAnimation === true;
+        // Default to true when unspecified — every difficulty should hide
+        // intermediate-frame point markers during fold animation so the
+        // captured PNGs only show points at the canonical step boundaries.
+        // Pass `hidePointsDuringAnimation: false` to opt out.
+        var hidePoints = opts.hidePointsDuringAnimation !== false;
 
         globals.setCreasePercent(from / 100);
         globals.shouldChangeCreasePercent = true;
@@ -727,7 +751,10 @@ function initBenchmark(globals) {
                      (step.pov ? ", POV " + step.pov : ""));
 
         var isBoundaryStep = (index === 0 || index === steps.length - 1);
-        globals.hideFacePointsDuringAnimation = hidePointsDuringAnimation === true && !isBoundaryStep;
+        // Default-on: hide points during inter-step animation unless caller
+        // explicitly passes false. Boundary steps (first/last) always show
+        // points so the captured PNG includes them.
+        globals.hideFacePointsDuringAnimation = hidePointsDuringAnimation !== false && !isBoundaryStep;
 
         // reveal hidden points only on the last step
         globals.revealHiddenPoints = (index === steps.length - 1);
@@ -1139,6 +1166,138 @@ function initBenchmark(globals) {
         return label;
     }
 
+    // ── JSONL dataset helpers ──
+
+    function slugifyId(s) {
+        return String(s || "")
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, "_")
+            .replace(/^_+|_+$/g, "");
+    }
+
+    // Extract the model basename from a path like "/Bases/birdBase.svg" → "birdbase".
+    function modelStem(modelPath) {
+        var p = String(modelPath || "");
+        var lastSlash = p.lastIndexOf("/");
+        if (lastSlash >= 0) p = p.substring(lastSlash + 1);
+        var dot = p.lastIndexOf(".");
+        if (dot >= 0) p = p.substring(0, dot);
+        return slugifyId(p);
+    }
+
+    function parseSeedFromName(name) {
+        // Try to extract a trailing seed-like number from preset names.
+        // Currently presetGenerator names them like "bird-d4-final-01" — last
+        // numeric chunk = 01. If not present, return null.
+        var m = String(name || "").match(/(\d+)\s*$/);
+        return m ? parseInt(m[1], 10) : null;
+    }
+
+    // Build a compact, unique question id for a preset.
+    // Form: origami_point_tracking_difficulty_<n>_<modelStem>_<NN>
+    // Example: origami_point_tracking_difficulty_4_birdbase_01
+    // Capped at 60 chars to satisfy the user's "not too long" constraint.
+    function buildJsonlId(name, modelPath, difficulty) {
+        var d = parseInt(difficulty, 10);
+        if (isNaN(d) || d < 1) d = 1;
+        var stem = modelStem(modelPath);
+        var idx = parseSeedFromName(name);
+        var idxStr = (idx != null) ? String(idx).padStart(2, "0") : slugifyId(name);
+        var id = "origami_point_tracking_difficulty_" + d + "_" + stem + "_" + idxStr;
+        if (id.length > 60) id = id.substring(0, 60).replace(/_+$/, "");
+        return id;
+    }
+
+    function jsonlStepFilename(stepIndex) {
+        var s = String(stepIndex);
+        while (s.length < 4) s = "0" + s;
+        return "step_" + s + "_current.png";
+    }
+
+    var JSONL_QUESTION_TEMPLATE_PARTS = [
+        "You are solving a 3D point-tracking question on a folding origami model. ",
+        "The model goes through {N} folding states. ",
+        "At each state, identify which labeled points (e.g. A, B, C, ...) are currently visible on the model. ",
+        "Some points may be hidden until the final state."
+    ];
+
+    function buildJsonlEntry(name, summary) {
+        var id = currentJsonlId || buildJsonlId(name, config && config.model, config && config.difficulty);
+        var totalSteps = stateAccumulator.length;
+        var question = JSONL_QUESTION_TEMPLATE_PARTS.join("").replace("{N}", totalSteps);
+        var hiddenSet = {};
+        for (var hi = 0; hi < (summary.hiddenPoints || []).length; hi++) {
+            hiddenSet[summary.hiddenPoints[hi]] = true;
+        }
+
+        var trajectory = [];
+        for (var si = 0; si < totalSteps; si++) {
+            var st = stateAccumulator[si] || {};
+            var isFinal = (si === totalSteps - 1);
+            // Filter visiblePoints: hidden indices removed at non-final steps,
+            // included at the final step (matches the reveal semantics).
+            var visIdx = (st.visiblePoints || []).slice().sort(function (a, b) { return a - b; });
+            var answerLabels = [];
+            for (var vi = 0; vi < visIdx.length; vi++) {
+                if (!isFinal && hiddenSet[visIdx[vi]]) continue;
+                var lbl = pointIndexToLabel(visIdx[vi]);
+                if (lbl) answerLabels.push(lbl);
+            }
+            trajectory.push({
+                step_index: si,
+                current_images: ["images/" + id + "/" + jsonlStepFilename(si)],
+                state: isFinal ? "success" : "in progress",
+                answer: answerLabels,
+                invalid_response: false,
+                api_error: false,
+                illegal: false,
+                raw_response_text: JSON.stringify({ visible_points: answerLabels })
+            });
+        }
+
+        var d = parseInt(config && config.difficulty, 10);
+        if (isNaN(d) || d < 1) d = 1;
+        var seed = parseSeedFromName(name);
+
+        return {
+            id: id,
+            category: ["origami", "origami_point_tracking", "interactive"],
+            type: "episode_rollout",
+            question: question,
+            meta_info: {
+                task_name: "origami_point_tracking",
+                config: "../../metadata.json",
+                level: modelStem(config && config.model) + "_difficulty_" + d,
+                seed: seed,
+                repeat_index: 0,
+                difficulty: "d" + d,
+                model_id: "oracle",
+                success: true,
+                final_reason: "all_states_rendered",
+                total_steps: totalSteps
+            },
+            trajectory: trajectory
+        };
+    }
+
+    function postJsonlEntry(entry) {
+        var fresh = !jsonlBatchStarted;
+        jsonlBatchStarted = true;
+        var line = JSON.stringify(entry);
+        return fetch("/api/jsonl-append", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: "dataset.jsonl", line: line, fresh: fresh })
+        })
+        .then(function (res) {
+            if (!res.ok) throw new Error("jsonl-append failed");
+            console.log("benchmark: appended dataset.jsonl entry " + entry.id);
+        })
+        .catch(function (err) {
+            console.warn("benchmark: jsonl-append error", err && err.message ? err.message : err);
+        });
+    }
+
     function pointLabelToIndex(label) {
         if (label === undefined || label === null) return null;
         var s = String(label).trim().toUpperCase();
@@ -1229,12 +1388,15 @@ function initBenchmark(globals) {
 
     function getRotationBoundsForDifficulty(difficulty) {
         var tier = normalizeDifficultyTier(difficulty);
+        // d1: static — no inter-step motion. (Diversity from constant-rotation
+        // poses is layered in by presetGenerator.js's rotationBoundsForTier
+        // and propagated via cfg.rotationYawMax/Pitch/Roll, not here.)
         if (tier === 1) return { yaw: 0, pitch: 0, roll: 0 };
         if (tier === 2) return { yaw: 0.2, pitch: 0.2, roll: 0.05 };
         if (tier === 3) return { yaw: 0.5, pitch: 0.15, roll: 0.08 };
-        if (tier === 4) return { yaw: 0.6, pitch: 0.6, roll: 0.15 };
+        if (tier === 4) return { yaw: 1.0, pitch: 1.0, roll: 0.25 };
         // Fallback for custom/manual scan configs without a difficulty.
-        return { yaw: 1.5, pitch: 0.35, roll: 0.18 };
+        return { yaw: 1.0, pitch: 1.0, roll: 0.25 };
     }
 
     function getRotationMotionThresholdsForDifficulty(difficulty) {
@@ -2864,6 +3026,7 @@ function initBenchmark(globals) {
         }
         stateAccumulator = [];
         capturedFiles = [];
+        jsonlStepIndex = 0;
         applySettings(cfg);
 
         // Apply initial fold state (top-level fold) before any animations
@@ -2989,6 +3152,9 @@ function initBenchmark(globals) {
 
     function runAll(jsonPath, onComplete) {
         var path = jsonPath || "benchmarks.json";
+        // Reset JSONL batch state so the first preset of this run truncates
+        // dataset.jsonl (subsequent presets append).
+        jsonlBatchStarted = false;
         $.getJSON(path)
             .done(function (loaded) {
                 var names = Object.keys(loaded);
@@ -3043,6 +3209,10 @@ function initBenchmark(globals) {
     function selectPresetFromConfig(name, cfg, callback) {
         currentBenchmarkName = name;
         config = cfg;
+        // Compute a question id for this preset so captureScreenshot writes
+        // PNGs under images/<id>/ and saveBenchmarkSummary's JSONL row uses
+        // the same id.
+        currentJsonlId = buildJsonlId(name, cfg && cfg.model, cfg && cfg.difficulty);
         if (cfg.model) {
             var requestedModel = cfg.model.replace(/'/g, '');
             var modelAlreadyLoaded = false;
