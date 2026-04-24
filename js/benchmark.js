@@ -1228,75 +1228,90 @@ function initBenchmark(globals) {
         return "step_" + s + "_current.png";
     }
 
-    var JSONL_QUESTION_TEMPLATE_PARTS = [
-        "You are solving a 3D point-tracking question on a folding origami model. ",
-        "The model goes through {N} folding states. ",
-        "At each state, identify which labeled points (e.g. A, B, C, ...) are currently visible on the model. ",
-        "Some points may be hidden until the final state."
-    ];
+    var JSONL_QUESTION_TEXT = "Which lettered point(s) in the final folded image correspond to the unmarked dot(s) shown on the flat paper in the first image? List the matching letter(s).";
+
+    function difficultyLabelForTier(d) {
+        if (d <= 1) return "easy";
+        if (d >= 4) return "hard";
+        return "medium";
+    }
 
     function buildJsonlEntry(name, summary) {
         var id = currentJsonlId || buildJsonlId(name, config && config.model, config && config.difficulty);
         var totalSteps = stateAccumulator.length;
-        var question = JSONL_QUESTION_TEMPLATE_PARTS.join("").replace("{N}", totalSteps);
+        var totalPoints = summary.totalPoints || 0;
+
         var hiddenSet = {};
         for (var hi = 0; hi < (summary.hiddenPoints || []).length; hi++) {
             hiddenSet[summary.hiddenPoints[hi]] = true;
         }
 
-        // Build per-step visible-label arrays. Hidden indices are excluded
-        // from non-final steps and included at the final step (matches the
-        // reveal semantics).
-        function answerLabelsForStep(si, isFinal) {
-            var st = stateAccumulator[si] || {};
-            var visIdx = (st.visiblePoints || []).slice().sort(function (a, b) { return a - b; });
-            var labels = [];
-            for (var vi = 0; vi < visIdx.length; vi++) {
-                if (!isFinal && hiddenSet[visIdx[vi]]) continue;
-                var lbl = pointIndexToLabel(visIdx[vi]);
-                if (lbl) labels.push(lbl);
-            }
-            return labels;
+        // Initial (non-hidden) point labels — shown as unmarked dots at step 0.
+        // These are the gt_answer: the letters in the final image that correspond
+        // to those dots.
+        var allLabels = [];
+        var initialPoints = [];
+        for (var pi = 0; pi < totalPoints; pi++) {
+            var lbl = pointIndexToLabel(pi);
+            allLabels.push(lbl);
+            if (!hiddenSet[pi]) initialPoints.push(lbl);
         }
 
-        var lastIdx = (totalSteps > 0) ? totalSteps - 1 : 0;
-        var initialState = {
-            image: "images/" + id + "/" + jsonlStepFilename(0),
-            visible_points: answerLabelsForStep(0, false)
-        };
-        var finalState = {
-            image: "images/" + id + "/" + jsonlStepFilename(lastIdx),
-            visible_points: answerLabelsForStep(lastIdx, true)
-        };
-        var intermediateImages = [];
-        for (var si = 1; si < lastIdx; si++) {
-            intermediateImages.push("images/" + id + "/" + jsonlStepFilename(si));
+        // Front vs back labels (faceId < N is front).
+        var pts = globals.facePoints && globals.facePoints.getPoints ? globals.facePoints.getPoints() : [];
+        var faces = globals.model && globals.model.getFaces ? globals.model.getFaces() : [];
+        var N = faces.length;
+        var frontPoints = [], backPoints = [];
+        for (var fp = 0; fp < pts.length; fp++) {
+            var fpLabel = allLabels[fp] || pointIndexToLabel(fp);
+            if (pts[fp].faceId < N) frontPoints.push(fpLabel);
+            else backPoints.push(fpLabel);
+        }
+        frontPoints.sort();
+        backPoints.sort();
+
+        // Images: flat list, all N steps, relative to dataset root (no "images/" prefix).
+        var images = [];
+        for (var si = 0; si < totalSteps; si++) {
+            images.push(id + "/" + jsonlStepFilename(si));
         }
 
         var d = parseInt(config && config.difficulty, 10);
         if (isNaN(d) || d < 1) d = 1;
         var seed = parseSeedFromName(name);
+        var stem = modelStem(config && config.model);
+        // Raw filename stem preserving case (e.g. "birdBase" from "/Bases/birdBase.svg")
+        var objectName = "";
+        var mp = String((config && config.model) || "");
+        var lastSlash = mp.lastIndexOf("/");
+        if (lastSlash >= 0) mp = mp.substring(lastSlash + 1);
+        var dotIdx = mp.lastIndexOf(".");
+        objectName = dotIdx >= 0 ? mp.substring(0, dotIdx) : mp;
 
         return {
             id: id,
-            category: ["origami", "origami_point_tracking"],
-            type: "episode_rollout",
-            question: question,
+            category: ["Order", "origami_static", "point_tracking"],
+            type: "point_tracking",
+            question: JSONL_QUESTION_TEXT,
+            images: images,
+            gt_answer: initialPoints,
             meta_info: {
-                task_name: "origami_point_tracking",
+                task_name: "origami_static",
                 config: "../../metadata.json",
-                level: modelStem(config && config.model) + "_difficulty_" + d,
+                difficulty: difficultyLabelForTier(d),
                 seed: seed,
                 repeat_index: 0,
-                difficulty: "d" + d,
-                model_id: "oracle",
-                success: true,
-                final_reason: "all_states_rendered",
-                total_steps: totalSteps
-            },
-            initial_state: initialState,
-            final_state: finalState,
-            intermediate_images: intermediateImages
+                level: stem + "_difficulty_" + d,
+                benchmark: name,
+                object: objectName,
+                total_steps: totalSteps,
+                color_mode: globals.colorMode || null,
+                all_labels: allLabels,
+                initial_points: initialPoints,
+                hidden_point_labels: summary.hiddenPointLabels || {},
+                front_points: frontPoints,
+                back_points: backPoints
+            }
         };
     }
 

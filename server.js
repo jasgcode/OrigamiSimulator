@@ -1,17 +1,20 @@
 /**
  * Bun dev server for Origami Simulator.
  * Serves static files and provides a /api/screenshot endpoint
- * that saves PNGs to the local screenshots/ directory.
+ * that saves PNGs to the rendered-output directory.
  *
- *   bun run dev   (or: bun server.js)
- *   PORT=3001 bun run dev   — listen on another port (default 3000)
+ * Output dir defaults to ./dataset, overridable with DATASET_DIR=<path>.
+ *
+ *   bun run dev                              (writes to dataset/)
+ *   DATASET_DIR=screenshots bun run dev      (legacy screenshots/ location)
+ *   PORT=3001 bun run dev                    (different port)
  */
 
 import { join } from "path";
 import { mkdir, readdir, appendFile, writeFile } from "fs/promises";
 
 const ROOT = import.meta.dir;
-const SCREENSHOTS_DIR = join(ROOT, "screenshots");
+const SCREENSHOTS_DIR = join(ROOT, process.env.DATASET_DIR || "dataset");
 const SCAN_CACHE_DIR = join(SCREENSHOTS_DIR, ".scan-cache");
 const PORT = (() => {
     const n = parseInt(process.env.PORT ?? "", 10);
