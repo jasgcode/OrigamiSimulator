@@ -470,6 +470,54 @@ function initFacePoints(globals) {
         return result;
     }
 
+    // Same as getVisibleFaceIds but returns face indices (0..N-1) whose
+    // BACK side is camera-facing AND unoccluded. A "back-side-visible" face
+    // is one where front-normal · toCamera < 0 (so back normal points
+    // toward camera) and the centroid is unoccluded by other geometry.
+    // This is the primitive used by the trajectory-first preset generator
+    // to pick d2/d4 hidden-back face indices, which are then stored in the
+    // preset with faceId = (idx + N) so isPointVisible's `isFront = id < N`
+    // path correctly checks back-facing visibility.
+    function getBackSideVisibleFaceIds() {
+        var faces = globals.model.getFaces();
+        var positions = globals.model.getPositionsArray();
+        var camera = globals.threeView && globals.threeView.camera;
+        if (!faces || !positions || !camera) return [];
+        updateModelMatrices();
+        var localCamera = camera.position.clone().applyMatrix4(_modelInv);
+        var N = faces.length;
+        var result = [];
+        for (var i = 0; i < N; i++) {
+            var normalLocal = getFaceNormal(i);
+            if (!normalLocal) continue;
+            var face = faces[i];
+            var centroidLocal = new THREE.Vector3(
+                (positions[face[0]*3]   + positions[face[1]*3]   + positions[face[2]*3])   / 3,
+                (positions[face[0]*3+1] + positions[face[1]*3+1] + positions[face[2]*3+1]) / 3,
+                (positions[face[0]*3+2] + positions[face[1]*3+2] + positions[face[2]*3+2]) / 3
+            );
+            var centroidWorld = centroidLocal.clone().applyMatrix4(_modelWorld);
+            var normalWorld = normalLocal.clone().transformDirection(_modelWorld);
+            var toCamera = camera.position.clone().sub(centroidWorld);
+            var dot = toCamera.dot(normalWorld);
+            // Inverted check vs getVisibleFaceIds: back-facing means dot < 0.
+            if (dot >= 0) continue; // front-facing, skip — caller wants back-side only
+
+            var distToCamera = toCamera.length();
+            if (distToCamera < 1e-8) continue;
+            var dirWorld = toCamera.clone().divideScalar(distToCamera);
+            var originWorld = centroidWorld.clone().addScaledVector(dirWorld, OCCL_EPSILON);
+
+            var originLocal = originWorld.clone().applyMatrix4(_modelInv);
+            var toCameraLocal = localCamera.clone().sub(originLocal);
+            var localDistToCamera = toCameraLocal.length();
+            if (localDistToCamera < 1e-8) continue;
+            var dirLocal = toCameraLocal.clone().divideScalar(localDistToCamera);
+            if (!isOccluded(originLocal, dirLocal, localDistToCamera, faces, positions)) result.push(i);
+        }
+        return result;
+    }
+
     // Returns a quality score (0–1) for each face in faceIds: quality = dot(normalise(toCamera), normal).
     // 1.0 = squarely facing camera, ~0 = grazing angle.
     // Only front-facing faces (id < N) are scored; others get 0.
@@ -518,6 +566,7 @@ function initFacePoints(globals) {
         hasForwardClearance: hasForwardClearance,
         getPointsWithVisibility: getPointsWithVisibility,
         getVisibleFaceIds: getVisibleFaceIds,
+        getBackSideVisibleFaceIds: getBackSideVisibleFaceIds,
         getFaceViewQualities: getFaceViewQualities,
         isPointHidden: isPointHidden,
         getHiddenIndices: getHiddenIndices

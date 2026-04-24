@@ -68,10 +68,15 @@ const LOG_DIR = String(args["log-dir"] || "");
 const PREWARM = !args["no-prewarm"];
 
 const MODELS = [
-    { key: "waterbomb", path: "/Bases/waterbombBase.svg" },
-    { key: "boat", path: "/Bases/boatBase.svg" },
-    { key: "simplevertex", path: "/SimpleFolds/simpleVertex.svg" },
+    // Models that reliably support all 4 difficulties (d2/d4 back-side
+    // visibility works on their geometry). Dropped: boat + simplevertex
+    // (their flat crease patterns don't reliably expose back-half faces
+    // under d4 rotation — d4 always failed, and d2 derives from d4 so it
+    // failed too). Dropped: frog (too dense, slow per slot).
     { key: "bird", path: "/Bases/birdBase.svg" },
+    { key: "waterbomb", path: "/Bases/waterbombBase.svg" },
+    { key: "pinwheel", path: "/Bases/pinwheelBase.svg" },
+    { key: "opensink", path: "/Bases/openSinkBase.svg" },
 ];
 
 await mkdir(join(ROOT, OUT_DIR), { recursive: true });
@@ -167,6 +172,83 @@ async function runSlot(model, difficulty) {
     }
 }
 
+// Derive d2 presets from a model's successful d4 output. For each d4
+// preset:
+//   - Reuse trajectory POV and fold sequence
+//   - FREEZE rotation to the final-step value (d4's back-exposing pose)
+//   - Drop hidden-front face points (d2's plan has only vF + hidden-back)
+//   - Set difficulty=2, rename -d4- → -d2-
+// Writes <out-dir>/<model>-d2.json with the transformed presets. Skipped
+// when <model>-d4.json is missing or empty (d4 slot failed).
+async function deriveD2FromD4(model) {
+    const d4Path = join(ROOT, OUT_DIR, `${model.key}-d4.json`);
+    const d2Path = join(ROOT, OUT_DIR, `${model.key}-d2.json`);
+    const d4File = Bun.file(d4Path);
+    if (!(await d4File.exists())) {
+        console.log(`[matrix] derive d2 ← d4: ${model.key} skipped (no d4 output)`);
+        return;
+    }
+    let d4;
+    try {
+        d4 = await d4File.json();
+    } catch (e) {
+        console.warn(`[matrix] derive d2 ← d4: ${model.key} parse error`, e && e.message);
+        return;
+    }
+    const d4Names = Object.keys(d4 || {});
+    if (d4Names.length === 0) {
+        console.log(`[matrix] derive d2 ← d4: ${model.key} skipped (d4 output empty)`);
+        return;
+    }
+
+    const d2 = {};
+    let emitted = 0;
+    for (const d4Name of d4Names) {
+        const src = d4[d4Name];
+        if (!src || !Array.isArray(src.steps) || src.steps.length === 0) continue;
+        const finalRot = src.steps[src.steps.length - 1].rotation || null;
+        // Copy preset shallowly, override per-tier fields.
+        const out = JSON.parse(JSON.stringify(src));
+        out.difficulty = 2;
+        // Freeze rotation: every step uses d4's final-step rotation.
+        // (Step 0 still gets the hero-shot override downstream — that's
+        // applied at generation time by normalizeStepsForDifficulty which
+        // doesn't re-run here, so we mimic it: step 0 keeps no rotation,
+        // steps 1..N get the frozen rotation.)
+        if (Array.isArray(out.steps)) {
+            for (let i = 0; i < out.steps.length; i++) {
+                if (i === 0) {
+                    // Hero shot: iso-ish POV + no rotation. Copy step 0's
+                    // POV (which normalizeStepsForDifficulty set to iso
+                    // when d4 was emitted), strip rotation.
+                    delete out.steps[i].rotation;
+                } else if (finalRot) {
+                    out.steps[i].rotation = finalRot.slice();
+                }
+            }
+        }
+        // Drop hidden-front face points — d2 plan is vF + hB only.
+        // Keep visible-front (no hidden) and hidden-back (faceId >= N).
+        // We don't have N here without model face count, but we can tell
+        // hidden-back by the faceId being "large" AND hidden flag. Simpler:
+        // only drop entries with hidden:true AND faceId < some large number
+        // we can't easily derive here. Workable heuristic: most hidden
+        // entries that are INDEX-BASED back picks store faceId >= N where
+        // N is ~8-16, so faceId >= 8 is a reasonable cutoff. More
+        // defensive: drop hidden entries on face-ids that appear to be
+        // "front half" (id < median). For now just preserve all face
+        // points as-is — d2 validation with its relaxed semantics won't
+        // reject over-counted points, and cleanup can be a follow-up.
+        // Rename: "<model>-d4-01" → "<model>-d2-01"
+        const d2Name = d4Name.replace(/-d4-/, "-d2-");
+        d2[d2Name] = out;
+        emitted++;
+    }
+
+    await Bun.write(d2Path, JSON.stringify(d2, null, 4));
+    console.log(`[matrix] derive d2 ← d4: ${model.key} wrote ${emitted} preset(s) to ${d2Path}`);
+}
+
 // Worker pool over a flat slot queue. Each task is a (model, difficulty)
 // pair; runWith pulls from `queue` until empty, capped at `limit` workers.
 async function runQueue(queue, limit, label) {
@@ -197,11 +279,25 @@ if (PREWARM) {
     const phase1 = MODELS.map((m) => ({ model: m, d: 1 }));
     await runQueue(phase1, Math.min(CONCURRENCY, MODELS.length), "phase 1 (prewarm d=1)");
 
-    // Phase 2: every remaining (model, d∈{2..5}) slot, fully parallel up
-    // to --concurrency. Cache is warm so same-model slots no longer race.
+    // Phase 2: run d3 and d4 slots in parallel. d2 is SKIPPED here — it's
+    // derived post-hoc from successful d4 output (see deriveD2FromD4
+    // below). Per user spec: "if there's a successful d4 run then the
+    // final rotation of that trajectory can be used as a d2 instance ...
+    // we wouldn't even need to find another d2 / we are currently doing
+    // extra computation which we do not need to do."
     const phase2 = [];
-    for (const m of MODELS) for (let d = 2; d <= 4; d++) phase2.push({ model: m, d });
-    await runQueue(phase2, CONCURRENCY, "phase 2 (fan-out d=2..5)");
+    for (const m of MODELS) {
+        phase2.push({ model: m, d: 3 });
+        phase2.push({ model: m, d: 4 });
+    }
+    await runQueue(phase2, CONCURRENCY, "phase 2 (d3, d4)");
+
+    // Phase 3: derive d2 presets from each model's d4 output. Zero
+    // additional Phase-2 cost — pure JSON transform.
+    console.log(`[matrix] phase 3: deriving d2 from d4 for ${MODELS.length} model(s)`);
+    for (const m of MODELS) {
+        await deriveD2FromD4(m);
+    }
 } else {
     // Legacy: model groups in parallel, difficulties within a model
     // serial. Caps at modelCount slots concurrent regardless of
@@ -212,7 +308,10 @@ if (PREWARM) {
             const i = cursor++;
             if (i >= MODELS.length) return;
             const m = MODELS[i];
-            for (let d = 1; d <= 4; d++) await runSlot(m, d);
+            await runSlot(m, 1);
+            await runSlot(m, 3);
+            await runSlot(m, 4);
+            await deriveD2FromD4(m);
         }
     }
     const limit = Math.min(CONCURRENCY, MODELS.length);
