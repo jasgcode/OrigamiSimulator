@@ -24,7 +24,7 @@
  *   pauseDuration — seconds to wait before starting (animation flow) or at each step (steps flow); default 2
  *   stepLabelPrefix — prefix text for step overlay (default: "Step")
  *   stepLabelFontSize — step overlay font size in px
- *   stepLabelShowTotal — "false" to show only current index (e.g. "State 2") instead of "2/5"
+ *   stepLabelShowTotal — default false ("STATE N" only); set "true" to render "STATE N/M"
  *   trackingEvalMode — tracking strictness: "strictAllSteps" (default) or "finalStepOnly"
  *   autoCapture  — "true" to capture PNG at each step
  *   autoRun      — "true" to start sequence automatically after load
@@ -63,7 +63,10 @@ function initBenchmark(globals) {
     var jsonlStepIndex = 0;
     var stepLabelPrefix = "STATE";
     var stepLabelFontSize = null;
-    var stepLabelShowTotal = true;
+    // Default OFF: render overlay shows "STATE N" (current state only),
+    // not "STATE N/M". Pass `stepLabelShowTotal: true` in the preset cfg
+    // or URL param to opt back in.
+    var stepLabelShowTotal = false;
 
     // ── URL parameter helpers ──
 
@@ -311,7 +314,9 @@ function initBenchmark(globals) {
             stepLabelFontSize = null;
         }
 
-        stepLabelShowTotal = !(cfg && cfg.stepLabelShowTotal === false);
+        // Default OFF — "STATE N" not "STATE N/M". Caller can opt in via
+        // cfg.stepLabelShowTotal === true.
+        stepLabelShowTotal = cfg && cfg.stepLabelShowTotal === true;
 
         if (!$stepOverlay) $stepOverlay = $("#stepNumberOverlay");
         if (stepLabelFontSize !== null) {
