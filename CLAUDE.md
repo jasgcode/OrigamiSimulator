@@ -140,7 +140,27 @@ State 1 always renders at zero rotation (hero shot — fold=0, flat paper) from 
 
 ### Dataset output
 
-`runAll` writes `screenshots/dataset.jsonl` (truncated on first preset via `fresh: true`) and PNGs to `screenshots/images/<id>/step_NNNN_current.png`. Each line: `id` (`origami_point_tracking_difficulty_<d>_<modelStem>_<NN>`), `initial_state` (step 0), `final_state` (last step), `intermediate_images` (all steps in between). Hidden points excluded from `initial_state.visible_points`, included in `final_state.visible_points`. Server endpoint: `POST /api/jsonl-append` with `{ path, line, fresh }`. See `buildJsonlEntry` in `js/benchmark.js`.
+`runAll` writes `screenshots/dataset.jsonl` and PNGs to `screenshots/images/<id>/step_NNNN_current.png`. JSONL paths are **relative to dataset root `screenshots/images/`** (no `images/` prefix). One line per preset:
+
+```json
+{
+  "id": "origami_point_tracking_difficulty_<d>_<modelStem>_<NN>",
+  "category": ["Order", "origami_static", "point_tracking"],
+  "type": "point_tracking",
+  "question": "Which lettered point(s) in the final folded image correspond to the unmarked dot(s) shown on the flat paper in the first image? List the matching letter(s).",
+  "images": ["<id>/step_0000_current.png", "...", "<id>/step_<lastIdx>_current.png"],
+  "gt_answer": ["A", "C"],
+  "meta_info": {
+    "task_name": "origami_static", "config": "../../metadata.json",
+    "difficulty": "easy|medium|hard", "seed": <n>, "repeat_index": 0,
+    "level": "<stem>_difficulty_<d>", "benchmark": "<name>", "object": "birdBase",
+    "total_steps": <N>, "color_mode": "...", "all_labels": [...], "initial_points": [...],
+    "hidden_point_labels": {...}, "front_points": [...], "back_points": [...]
+  }
+}
+```
+
+Difficulty mapping: d1→`easy`, d2/d3→`medium`, d4→`hard`. `gt_answer` is the initial (non-hidden) point labels — letters that correspond to the unmarked dots rendered at step 0. Step 0 renders points as **unmarked dots**; the final step renders them with letters (`revealHiddenPoints` flag in `js/model.js:356-370`). Server endpoint: `POST /api/jsonl-append` with `{ path, line, fresh }`. See `buildJsonlEntry` in `js/benchmark.js`.
 
 ## Preset Generation Pipeline
 
