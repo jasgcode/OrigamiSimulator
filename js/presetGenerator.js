@@ -571,9 +571,8 @@ function initPresetGenerator(globals) {
     }
 
     function getColorModeForDifficulty(difficulty, rng) {
-        var profile = getDifficultyProfile(difficulty);
-        if (profile.tier <= 2) return "faceTriangleID";
-        if (profile.tier === 3) return rng.random() < 0.6 ? "faceTriangleID" : "labelOnly";
+        // All tiers render as labelOnly — uniform visual style across the
+        // dataset. (Was tier-dependent faceTriangleID / labelOnly mix.)
         return "labelOnly";
     }
 
