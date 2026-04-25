@@ -140,18 +140,26 @@ State 1 always renders at zero rotation (hero shot — fold=0, flat paper) from 
 
 ### Dataset output
 
-`runAll` writes `screenshots/dataset.jsonl` and PNGs to `screenshots/images/<id>/step_NNNN_current.png`. JSONL paths are **relative to dataset root `screenshots/images/`** (no `images/` prefix). One line per preset:
+`runAll` writes output under `<DATASET_DIR>/` (env var on `server.js`, default `dataset/`). Set `DATASET_DIR=screenshots` for legacy paths. Layout:
+
+- `<DATASET_DIR>/dataset.jsonl` — one line per preset
+- `<DATASET_DIR>/<id>/step_NNNN_current.png` — PNGs (4-digit, 0-based)
+- `<DATASET_DIR>/metadata/<object>_metadata.json` — **per-object consolidated** metadata, keyed by preset name (e.g. all 4 bird presets are top-level keys in `birdBase_metadata.json`). Object name preserves SVG filename case (e.g. `birdBase`).
+- `<DATASET_DIR>/metadata/<object>_summary.json` — per-object summary, same keying scheme.
+- `<DATASET_DIR>/.scan-cache/` — Phase 2 trajectory cache. **Cache migration**: when changing `DATASET_DIR`, copy `screenshots/.scan-cache/*.json` → `<new>/.scan-cache/` to avoid cold-cache penalty.
+
+JSONL paths are relative to `<DATASET_DIR>/`. One line per preset:
 
 ```json
 {
   "id": "origami_point_tracking_difficulty_<d>_<modelStem>_<NN>",
   "category": ["Order", "origami_static", "point_tracking"],
-  "type": "point_tracking",
-  "question": "Which lettered point(s) in the final folded image correspond to the unmarked dot(s) shown on the flat paper in the first image? List the matching letter(s).",
+  "type": "perception",
+  "question": "[Task] ... {images} ... [Answer Format] {json_answer_value}",
   "images": ["<id>/step_0000_current.png", "...", "<id>/step_<lastIdx>_current.png"],
   "gt_answer": ["A", "C"],
   "meta_info": {
-    "task_name": "origami_static", "config": "../../metadata.json",
+    "task_name": "origami_static", "config": "metadata/<object>_metadata.json",
     "difficulty": "easy|medium|hard", "seed": <n>, "repeat_index": 0,
     "level": "<stem>_difficulty_<d>", "benchmark": "<name>", "object": "birdBase",
     "total_steps": <N>, "color_mode": "...", "all_labels": [...], "initial_points": [...],
@@ -160,7 +168,15 @@ State 1 always renders at zero rotation (hero shot — fold=0, flat paper) from 
 }
 ```
 
-Difficulty mapping: d1→`easy`, d2/d3→`medium`, d4→`hard`. `gt_answer` is the initial (non-hidden) point labels — letters that correspond to the unmarked dots rendered at step 0. Step 0 renders points as **unmarked dots**; the final step renders them with letters (`revealHiddenPoints` flag in `js/model.js:356-370`). Server endpoint: `POST /api/jsonl-append` with `{ path, line, fresh }`. See `buildJsonlEntry` in `js/benchmark.js`.
+Difficulty mapping: d1→`easy`, d2/d3→`medium`, d4→`hard`. `gt_answer` is the initial (non-hidden) point labels — letters that correspond to the unmarked dots rendered at step 0. Step 0 renders points as **unmarked dots**; the final step renders them with letters (`revealHiddenPoints` flag in `js/model.js:356-370`).
+
+**Question template** (`JSONL_QUESTION_TEMPLATE` in `js/benchmark.js`) follows the project meta-prompt structure with `[Task]` / `[Rules]` / `[Question]` / `[Answer Format]` sections, includes the line "If this task depends on a specific visual definition: not applicable", places the `{images}` marker inline, and uses `{json_answer_value}` (literal text the model replaces) instead of `<json_answer_value>`. Variables substituted at JSONL build time: `{num_initial}`, `{all_labels}`. `{images}` and `{json_answer_value}` remain literal placeholders.
+
+**Server endpoints**:
+- `POST /api/jsonl-append` — `{ path, line, fresh }`. `fresh: true` truncates (first preset of batch); else append.
+- `POST /api/metadata-merge` — `{ path, key, value }`. Reads existing JSON object at `<DATASET_DIR>/<path>`, sets `merged[key] = value`, writes back. Creates parent dirs. Used by `saveSummary` and `saveMetadataJson` in `js/benchmark.js`.
+
+See `buildJsonlEntry` in `js/benchmark.js`.
 
 ## Preset Generation Pipeline
 
@@ -176,13 +192,15 @@ bun tools/generate-presets.js --model /Bases/boatBase.svg --difficulty 4 \
 
 1. **Face-pool discovery** — cached at `assets/facepools/<key>.json`. Sweeps POVs × fold ∈ {0, 70}; records visible face IDs. Front pool = visibility-discovered; back pool = **all face indices `[0, N-1]`**, gated downstream by `getBackSideVisibleFaceIds` at the final step.
 2. **Phase 2 trajectory search** — one `evaluateTrajectoriesLive` run per slot with a generic anchor. Each accepted progression carries a `visibilityTimeline` (per-step `visibleFaceIds`, `backSideVisibleFaceIds`, etc.) and a `finalViewScore`.
-3. **Per-tier point selection** — `selectFacePointsFromTrajectory` emits up to K=3 configs per trajectory. Visible-front anchors drawn from `alwaysVisible` (visible every step). Hidden-front from `finalVisible`. Hidden-back from `[0,N-1] ∩ finalBackSideVisible`, stored with `faceId = idx + N` so `isPointVisible`'s `isFront = id < N` path checks the back normal. Enforces 3–6 total points, ≥2 visible non-hidden.
+3. **Per-tier point selection** — `selectFacePointsFromTrajectory` emits **at most ONE** config per trajectory (`SELECT_FROM_TRAJECTORY_K = 1`, ~`js/presetGenerator.js:2226`). Loop tries up to `rankedFronts.length - plan.vF + 1` rank-window shifts (~lines 2440–2500) until one config fits the tier plan, then emits and moves on. **Contract: unique trajectory per preset within a model** (earlier K=3 / shared-trajectory behavior is gone). Visible-front anchors drawn from `alwaysVisible`. Hidden-front from `finalVisible`. Hidden-back from `[0,N-1] ∩ finalBackSideVisible`, stored with `faceId = idx + N` so `isPointVisible`'s `isFront = id < N` path checks the back normal. Enforces 3–6 total points, ≥2 visible non-hidden.
 4. **Barycentric refinement** — `refineFacePointBarycentric` runs on final selections. Drives to final pose with ≥800 ms settle; sweeps 5×5 barycentric grid (`u,v ∈ [0.22, 0.52]`, `w ≥ 0.18`) in two passes.
 5. **Step normalization + hero-shot** — `normalizeStepsForDifficulty` freezes POV across steps (tier motion model); `applyHeroShotStep0` strips `step[0].rotation`.
 6. **Validation** — replay with `Math.max(settle, 800)` ms. Regressions revert to pre-refinement barycentric.
 7. **Fallback** — if no scan progression validates, up to 50 synthetic candidates via legacy fresh-POV path.
 
 **d4 back-coverage gate**: the count of back-side-exposed faces at the final step must be ≥ `ranges.hB[0]` or the trajectory is dropped.
+
+**`skipBatchValidation`** fires when `!validate || difficulty <= 2` (~`js/presetGenerator.js:3259`). d1 is structurally trivial; d2 is derived from d4's already-validated trajectory so per-preset revalidation is sufficient.
 
 ### Static-POV gotcha
 
@@ -200,17 +218,21 @@ Use clamped (not saturating) terms — saturating `clamp01` causes ties and coll
 
 Runs slots in parallel. Models: `bird`, `waterbomb`, `pinwheel`, `opensink` (others dropped — back faces don't reliably expose under d4 rotation, or models too dense).
 
-- `--concurrency` default `min(12, cpus/2)`. SwiftShader Chrome is ~1 core/instance.
+- `--concurrency` default `min(28, cpus - 4)`. Leaves 4 threads for OS + dev server; saturates 32-thread boxes. SwiftShader Chrome is ~1 core/instance.
+- `--shards-per-slot N` — splits each (model, tier) slot into N sub-shards with distinct seeds (`SEED + shard*1009`) and contiguous start-index ranges. Each shard is a separate `generate-presets.js` process; the worker-pool queue work-steals across shards. File naming: `<model>-d<n>-s<shard>.json` when sharded, `<model>-d<n>.json` when unsharded. `deriveD2FromD4` globs `<model>-d4(-s\d+)?.json` to collect all d4 shards before deriving d2.
+- `--build-progressions` auto-scales to `max(24, ceil(count * 1.5))` (e.g. count=75 → build=113). Reason: K=1 means each preset needs its own passing trajectory.
 - `--prewarm` (default ON) — three-phase:
   1. All models run at d=1 in parallel (each writes its own facepool cache, no contention).
   2. Remaining (model, d∈{3,4}) slots run parallel up to `--concurrency`. **d2 not run here.**
-  3. `deriveD2FromD4` transforms each `<model>-d4.json` → `<model>-d2.json` via pure JSON (no browser): copies steps, freezes rotation to d4's final-step value across states 2..N, renames `-d4-` → `-d2-`. Skipped if d4 output is missing/empty.
+  3. `deriveD2FromD4` transforms each `<model>-d4*.json` → `<model>-d2.json` via pure JSON (no browser): copies steps, freezes rotation to d4's final-step value across states 2..N, renames `-d4-` → `-d2-`. Skipped if d4 output is missing/empty.
 
 d2 costs zero Phase-2 compute and inherits d4's back-exposing final pose by construction.
 
 ## Render parallelism (`tools/render_dataset_parallel.py`)
 
 Default `--workers = min(28, cpus * 7/8)`. Each worker = one Puppeteer Chromium (~600–800 MB RAM, ~1 core under SwiftShader). `selectPresetFromConfig` skips `importDemoFile` when the requested model is already loaded — saves ~1–2 s per preset on same-model shards.
+
+Skip-existing check uses `step_0000_current.png` presence (not `metadata.json`, since metadata is now consolidated per-object so a per-preset existence check from file presence isn't possible).
 
 ## Key trade-offs
 

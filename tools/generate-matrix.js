@@ -40,30 +40,42 @@ const { values: args } = parseArgs({
         "max-trajectory-candidates": { type: "string", default: "40" },
         "max-scan-candidates": { type: "string", default: "20" },
         concurrency: { type: "string", default: "" },
+        "shards-per-slot": { type: "string", default: "1" },
         "log-dir": { type: "string", default: "" },
         "no-prewarm": { type: "boolean", default: false },
     },
     strict: false,
 });
 
-// Default concurrency: half the logical CPUs, capped at 12. SwiftShader-
-// backed Chrome is CPU-bound (~1 core under load), so half-of-cpus leaves
-// headroom for the dev server and OS. Cap at 12 because gains taper off
-// past that point in practice.
+// Default concurrency: (CPU_COUNT - 4), capped at 28. Leaves 4 threads for
+// OS + dev server + renderer. SwiftShader-backed Chrome is CPU-bound (~1
+// core per Puppeteer instance under load) so this maps ~1:1 to worker
+// slots. High cap lets sub-sharded workloads saturate a 32-thread box.
 const CPU_COUNT = cpus().length || 4;
-const DEFAULT_CONCURRENCY = Math.min(12, Math.max(2, Math.floor(CPU_COUNT / 2)));
+const DEFAULT_CONCURRENCY = Math.min(28, Math.max(2, CPU_COUNT - 4));
 
 const OUT_DIR = String(args["out-dir"] || "new_dataset/matrix-gen");
 const COUNT = parseInt(String(args.count || "2"), 10) || 2;
 const SEED = parseInt(String(args.seed || "42"), 10) || 42;
 const SERVER_URL = String(args["server-url"] || "http://localhost:3000");
-const BUILD = String(args["build-progressions"] || "24");
+// --build-progressions controls Phase 2 scan candidate pool. With K=1
+// (unique trajectory per preset) we need build ≥ count / expected-pass-rate.
+// Auto-scale to max(24, ceil(count * 1.5)) so count=75 → build=113.
+const BUILD_RAW = parseInt(String(args["build-progressions"] || "24"), 10) || 24;
+const BUILD = String(Math.max(BUILD_RAW, Math.ceil(COUNT * 1.5)));
 const MAX_TRAJ = String(args["max-trajectory-candidates"] || "40");
 const MAX_SCAN = String(args["max-scan-candidates"] || "20");
 const CONCURRENCY_RAW = String(args.concurrency || "").trim();
 const CONCURRENCY = CONCURRENCY_RAW
     ? Math.max(1, parseInt(CONCURRENCY_RAW, 10) || DEFAULT_CONCURRENCY)
     : DEFAULT_CONCURRENCY;
+// Sub-sharding: split a (model, tier) slot into S sub-shards. Each shard
+// is a separate generate-presets.js process with its own seed + start-index
+// range, so trajectories across shards stay distinct (probabilistically).
+// The worker pool naturally work-steals across slots: when a shard finishes,
+// its worker picks up the next item in the queue, regardless of origin.
+// Pass --shards-per-slot 3 at CLI to enable.
+const SHARDS_PER_SLOT = Math.max(1, parseInt(String(args["shards-per-slot"] || "1"), 10) || 1);
 const LOG_DIR = String(args["log-dir"] || "");
 const PREWARM = !args["no-prewarm"];
 
@@ -121,19 +133,34 @@ async function pipeWithPrefix(stream, tag, sink, fileHandle) {
     }
 }
 
-async function runSlot(model, difficulty) {
+async function runSlot(model, difficulty, shard = 0, totalShards = 1) {
+    const isSharded = totalShards > 1;
+    // Per-shard count: distribute COUNT across shards, first shards absorb
+    // the remainder (so shards at most differ by 1 preset).
+    const basePerShard = Math.floor(COUNT / totalShards);
+    const remainder = COUNT - basePerShard * totalShards;
+    const countForShard = shard < remainder ? basePerShard + 1 : basePerShard;
+    if (countForShard <= 0) return; // nothing to do
+    // Start-index range so preset names are contiguous across shards.
+    const startIndexForShard = shard * basePerShard + Math.min(shard, remainder) + 1;
+    // Distinct seed per shard — prime offset so seeds don't collide.
+    const seedForShard = SEED + shard * 1009;
+    // Output file names: unsharded → bird-d3.json; sharded → bird-d3-s0.json.
+    // base-name keeps the non-sharded form so preset ids remain consistent.
     const base = `${model.key}-d${difficulty}`;
-    const outPath = join(ROOT, OUT_DIR, `${base}.json`);
+    const fileStem = isSharded ? `${base}-s${shard}` : base;
+    const outPath = join(ROOT, OUT_DIR, `${fileStem}.json`);
+    const tag = isSharded ? `${base}/${shard + 1}-of-${totalShards}` : base;
     const genScript = join(ROOT, "tools/generate-presets.js");
     const procArgs = [
         genScript,
         "--model", model.path,
         "--difficulty", String(difficulty),
-        "--count", String(COUNT),
+        "--count", String(countForShard),
         "--base-name", base,
-        "--start-index", "1",
+        "--start-index", String(startIndexForShard),
         "--templates", "no-match-pattern-*",
-        "--seed", String(SEED),
+        "--seed", String(seedForShard),
         "--output", outPath,
         "--trajectory-mode", "hybrid",
         "--build-progressions", BUILD,
@@ -143,11 +170,11 @@ async function runSlot(model, difficulty) {
     ];
 
     const slotStarted = Date.now();
-    console.log(`[matrix] start ${base} (elapsed ${fmtElapsed(Date.now() - startedAt)})`);
+    console.log(`[matrix] start ${tag} (elapsed ${fmtElapsed(Date.now() - startedAt)})`);
 
     let logFile = null;
     if (LOG_DIR) {
-        const logPath = join(ROOT, LOG_DIR, `${base}.log`);
+        const logPath = join(ROOT, LOG_DIR, `${fileStem}.log`);
         logFile = await open(logPath, "w");
     }
 
@@ -157,18 +184,18 @@ async function runSlot(model, difficulty) {
         stderr: "pipe",
     });
 
-    const stdoutPipe = pipeWithPrefix(proc.stdout, base, (line) => console.log(line), logFile);
-    const stderrPipe = pipeWithPrefix(proc.stderr, base, (line) => console.error(line), logFile);
+    const stdoutPipe = pipeWithPrefix(proc.stdout, tag, (line) => console.log(line), logFile);
+    const stderrPipe = pipeWithPrefix(proc.stderr, tag, (line) => console.error(line), logFile);
     await Promise.all([stdoutPipe, stderrPipe]);
     const exitCode = await proc.exited;
     if (logFile) await logFile.close();
 
     const slotDur = fmtElapsed(Date.now() - slotStarted);
     if (exitCode !== 0) {
-        failures.push({ base, exitCode });
-        console.error(`[matrix] FAILED ${base} (exit ${exitCode}, took ${slotDur})`);
+        failures.push({ base: fileStem, exitCode });
+        console.error(`[matrix] FAILED ${tag} (exit ${exitCode}, took ${slotDur})`);
     } else {
-        console.log(`[matrix] done  ${base} (took ${slotDur})`);
+        console.log(`[matrix] done  ${tag} (took ${slotDur})`);
     }
 }
 
@@ -181,21 +208,34 @@ async function runSlot(model, difficulty) {
 // Writes <out-dir>/<model>-d2.json with the transformed presets. Skipped
 // when <model>-d4.json is missing or empty (d4 slot failed).
 async function deriveD2FromD4(model) {
-    const d4Path = join(ROOT, OUT_DIR, `${model.key}-d4.json`);
+    // Collect d4 presets from both unsharded (<model>-d4.json) and sharded
+    // (<model>-d4-s0.json, -s1.json, ...) outputs. Merges across shard files.
     const d2Path = join(ROOT, OUT_DIR, `${model.key}-d2.json`);
-    const d4File = Bun.file(d4Path);
-    if (!(await d4File.exists())) {
+    const { readdir } = await import("fs/promises");
+    let dirEntries;
+    try {
+        dirEntries = await readdir(join(ROOT, OUT_DIR));
+    } catch (e) {
+        console.warn(`[matrix] derive d2 ← d4: ${model.key} readdir error`, e && e.message);
+        return;
+    }
+    const d4Pattern = new RegExp(`^${model.key}-d4(-s\\d+)?\\.json$`);
+    const d4Files = dirEntries.filter(f => d4Pattern.test(f));
+    if (d4Files.length === 0) {
         console.log(`[matrix] derive d2 ← d4: ${model.key} skipped (no d4 output)`);
         return;
     }
-    let d4;
-    try {
-        d4 = await d4File.json();
-    } catch (e) {
-        console.warn(`[matrix] derive d2 ← d4: ${model.key} parse error`, e && e.message);
-        return;
+
+    const d4 = {};
+    for (const fname of d4Files) {
+        try {
+            const shardData = await Bun.file(join(ROOT, OUT_DIR, fname)).json();
+            Object.assign(d4, shardData);
+        } catch (e) {
+            console.warn(`[matrix] derive d2 ← d4: ${model.key}/${fname} parse error`, e && e.message);
+        }
     }
-    const d4Names = Object.keys(d4 || {});
+    const d4Names = Object.keys(d4);
     if (d4Names.length === 0) {
         console.log(`[matrix] derive d2 ← d4: ${model.key} skipped (d4 output empty)`);
         return;
@@ -249,16 +289,19 @@ async function deriveD2FromD4(model) {
     console.log(`[matrix] derive d2 ← d4: ${model.key} wrote ${emitted} preset(s) to ${d2Path}`);
 }
 
-// Worker pool over a flat slot queue. Each task is a (model, difficulty)
-// pair; runWith pulls from `queue` until empty, capped at `limit` workers.
+// Worker pool over a flat slot queue. Each task is a {model, d, shard?,
+// totalShards?} item; workers pull from `queue` until empty, capped at
+// `limit`. Natural work-stealing: an idle worker grabs the next queue item
+// regardless of origin slot, so sub-shards from different (model, tier)
+// slots get interleaved if some finish faster than others.
 async function runQueue(queue, limit, label) {
     let cursor = 0;
     async function worker() {
         while (true) {
             const i = cursor++;
             if (i >= queue.length) return;
-            const { model, d } = queue[i];
-            await runSlot(model, d);
+            const { model, d, shard = 0, totalShards = 1 } = queue[i];
+            await runSlot(model, d, shard, totalShards);
         }
     }
     const workerCount = Math.min(limit, queue.length);
@@ -269,26 +312,27 @@ async function runQueue(queue, limit, label) {
     await Promise.all(workers);
 }
 
-console.log(`[matrix] cpus=${CPU_COUNT}, concurrency=${CONCURRENCY}, prewarm=${PREWARM}, models=${MODELS.length}, out=${OUT_DIR}`);
+console.log(`[matrix] cpus=${CPU_COUNT}, concurrency=${CONCURRENCY}, prewarm=${PREWARM}, models=${MODELS.length}, shards=${SHARDS_PER_SLOT}, count=${COUNT}, build=${BUILD}, out=${OUT_DIR}`);
 
 if (PREWARM) {
     // Phase 1: one slot per model in parallel. Each model writes its own
     // assets/facepools/<key>.json so there's no cache contention. Use d=1
     // because it's the cheapest tier and is sufficient to populate the
-    // facepool for that model.
+    // facepool for that model. d=1 is never sharded — it's fast and the
+    // facepool write must happen exactly once per model.
     const phase1 = MODELS.map((m) => ({ model: m, d: 1 }));
     await runQueue(phase1, Math.min(CONCURRENCY, MODELS.length), "phase 1 (prewarm d=1)");
 
-    // Phase 2: run d3 and d4 slots in parallel. d2 is SKIPPED here — it's
-    // derived post-hoc from successful d4 output (see deriveD2FromD4
-    // below). Per user spec: "if there's a successful d4 run then the
-    // final rotation of that trajectory can be used as a d2 instance ...
-    // we wouldn't even need to find another d2 / we are currently doing
-    // extra computation which we do not need to do."
+    // Phase 2: run d3 and d4 slots in parallel, optionally split into
+    // SHARDS_PER_SLOT sub-shards each. d2 is SKIPPED here — derived
+    // post-hoc from d4 output (deriveD2FromD4 below).
     const phase2 = [];
     for (const m of MODELS) {
-        phase2.push({ model: m, d: 3 });
-        phase2.push({ model: m, d: 4 });
+        for (const d of [3, 4]) {
+            for (let s = 0; s < SHARDS_PER_SLOT; s++) {
+                phase2.push({ model: m, d, shard: s, totalShards: SHARDS_PER_SLOT });
+            }
+        }
     }
     await runQueue(phase2, CONCURRENCY, "phase 2 (d3, d4)");
 

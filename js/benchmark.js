@@ -409,13 +409,18 @@ function initBenchmark(globals) {
             alwaysVisibleFaceIds:  alwaysVisibleFaceIds
         };
 
-        var blob = new Blob([JSON.stringify(summary, null, 2)], { type: "application/json" });
-        var formData = new FormData();
-        formData.append("file", blob, "summary.json");
-        fetch("/api/screenshot?folder=" + encodeURIComponent(name), { method: "POST", body: formData })
+        // Derive object name from model path (case-preserving, e.g. "birdBase").
+        // All summaries for this object merge into dataset/metadata/<object>_summary.json.
+        var objectName = objectNameFromModel(config && config.model);
+        var summaryPath = "metadata/" + objectName + "_summary.json";
+        fetch("/api/metadata-merge", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: summaryPath, key: name, value: summary })
+        })
             .then(function (res) {
                 if (!res.ok) throw new Error("server error");
-                console.log("benchmark: saved screenshots/" + name + "/summary.json");
+                console.log("benchmark: merged summary for " + name + " into " + summaryPath);
             })
             .catch(function () {
                 console.warn("benchmark: could not save summary (server unavailable)");
@@ -467,7 +472,7 @@ function initBenchmark(globals) {
         frontPoints.sort();
         backPoints.sort();
 
-        var samples = [{
+        var entry = {
             id:                datasetSampleCounter++,
             images:            images,
             benchmark:         name,
@@ -480,19 +485,32 @@ function initBenchmark(globals) {
             hiddenPointLabels: summary.hiddenPointLabels,
             frontPoints:       frontPoints,
             backPoints:        backPoints
-        }];
+        };
 
-        var blob = new Blob([JSON.stringify(samples, null, 2)], { type: "application/json" });
-        var formData = new FormData();
-        formData.append("file", blob, "metadata.json");
-        fetch("/api/screenshot?folder=" + encodeURIComponent(name), { method: "POST", body: formData })
+        var objectName = objectNameFromModel(config && config.model);
+        var metadataPath = "metadata/" + objectName + "_metadata.json";
+        fetch("/api/metadata-merge", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: metadataPath, key: name, value: entry })
+        })
             .then(function (res) {
                 if (!res.ok) throw new Error("server error");
-                console.log("benchmark: saved screenshots/" + name + "/metadata.json");
+                console.log("benchmark: merged metadata for " + name + " into " + metadataPath);
             })
             .catch(function () {
                 console.warn("benchmark: could not save metadata JSON (server unavailable)");
             });
+    }
+
+    // Extract case-preserving model stem from path (e.g. "/Bases/birdBase.svg" → "birdBase").
+    // Used for grouping metadata/summary by object in dataset/metadata/.
+    function objectNameFromModel(modelPath) {
+        var p = String(modelPath || "unknown");
+        var lastSlash = p.lastIndexOf("/");
+        if (lastSlash >= 0) p = p.substring(lastSlash + 1);
+        var dotIdx = p.lastIndexOf(".");
+        return dotIdx >= 0 ? p.substring(0, dotIdx) : p;
     }
 
 
@@ -503,13 +521,13 @@ function initBenchmark(globals) {
     function captureScreenshot(filenameLabel, recordLabel, callback) {
         if (typeof recordLabel === "function") { callback = recordLabel; recordLabel = filenameLabel; }
         var name = currentBenchmarkName || globals.filename || "benchmark";
-        // JSONL-style path: images/<id>/step_NNNN_current.png. The 0-based
-        // jsonlStepIndex is incremented per captureScreenshot call within
-        // a preset (reset in run() alongside stateAccumulator/capturedFiles).
+        // PNG path relative to <DATASET_DIR>: <id>/step_NNNN_current.png.
+        // The 0-based jsonlStepIndex is incremented per captureScreenshot call
+        // within a preset (reset in run() alongside stateAccumulator/capturedFiles).
         var jsonlId = currentJsonlId || buildJsonlId(name, config && config.model, config && config.difficulty);
         var stepIdx = jsonlStepIndex++;
         var filename = jsonlStepFilename(stepIdx);
-        var folder = "images/" + jsonlId;
+        var folder = jsonlId;
         var relativePath = folder + "/" + filename;
         globals.screenRecordFilename = jsonlId + "_step_" + stepIdx;
         globals.captureCallback = function (blob) {
@@ -1228,7 +1246,30 @@ function initBenchmark(globals) {
         return "step_" + s + "_current.png";
     }
 
-    var JSONL_QUESTION_TEXT = "Which lettered point(s) in the final folded image correspond to the unmarked dot(s) shown on the flat paper in the first image? List the matching letter(s).";
+    // Follows the project's meta-prompt template structure. Placeholders:
+    //   {num_initial}, {all_labels} — substituted per-preset
+    //   {images} — rendered marker for the eval harness to insert images
+    //   {json_answer_value} — literal placeholder kept in output (model replaces)
+    var JSONL_QUESTION_TEMPLATE = [
+        "[Task]",
+        "You are solving origami point tracking.",
+        "In this task, you must identify which labeled points on a folded piece of paper correspond to the unmarked dots placed on the original flat (unfolded) paper. The first image shows the flat paper with {num_initial} unmarked dot(s) printed on it. The following images show the same paper being folded step by step, ending with the fully folded result where every visible point is labeled using the letters {all_labels}. Paper is opaque: points on the back side may be hidden by overlying layers, and the same physical dot may appear in different positions across steps as the paper folds. You must track each unmarked dot through the fold sequence and report the letter(s) in the final image that correspond to the original unmarked dot(s).",
+        "If this task depends on a specific visual definition, use this definition exactly: not applicable",
+        "The visual evidence for this question is provided below.",
+        "{images}",
+        "",
+        "[Rules]",
+        "1. Use only the images and text provided in this prompt.",
+        "2. If answer options are provided, choose only from the provided options.",
+        "3. Do not output explanation beyond the required final answer.",
+        "",
+        "[Question]",
+        "Which lettered point(s) in the final folded image correspond to the unmarked dot(s) shown on the flat paper in the first image? List the matching letter(s).",
+        "",
+        "[Answer Format]",
+        "Output exactly one JSON object: {\"answer\": {json_answer_value}} and nothing else.",
+        "Replace {json_answer_value} with the single answer for this task, formatted according to a JSON array of uppercase letters chosen from [{all_labels}], with no duplicates, e.g. [\"A\", \"C\"]."
+    ].join("\n");
 
     function difficultyLabelForTier(d) {
         if (d <= 1) return "easy";
@@ -1288,16 +1329,20 @@ function initBenchmark(globals) {
         var dotIdx = mp.lastIndexOf(".");
         objectName = dotIdx >= 0 ? mp.substring(0, dotIdx) : mp;
 
+        var question = JSONL_QUESTION_TEMPLATE
+            .replace(/\{num_initial\}/g, String(initialPoints.length))
+            .replace(/\{all_labels\}/g, allLabels.join(", "));
+
         return {
             id: id,
             category: ["Order", "origami_static", "point_tracking"],
-            type: "point_tracking",
-            question: JSONL_QUESTION_TEXT,
+            type: "perception",
+            question: question,
             images: images,
             gt_answer: initialPoints,
             meta_info: {
                 task_name: "origami_static",
-                config: "../../metadata.json",
+                config: "metadata/" + objectName + "_metadata.json",
                 difficulty: difficultyLabelForTier(d),
                 seed: seed,
                 repeat_index: 0,

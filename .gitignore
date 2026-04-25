@@ -13,3 +13,4 @@ eval*
 test_suite/m/*
 *.log
 *.json
+*.png
