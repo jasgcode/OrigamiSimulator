@@ -1107,11 +1107,16 @@ function initBenchmark(globals) {
         for (var ei = 0; ei < sorted.length; ei++) {
             var ep = sorted[ei];
 
-            // Skip endpoints too close to already-used ones (0.15 rad ≈ 8.6°)
+            // Skip endpoints too close to already-used ones. Was 0.15 rad
+            // (~8.6°), which capped static-POV trajectories at ~5 distinct
+            // POVs in the upper hemisphere — too few for K=1 + count>=20.
+            // Tightened to 0.06 rad (~3.4°) so larger runs have a richer
+            // POV pool. Geometric similarity is still tracked by the
+            // rotation-profile sweep downstream.
             var tooClose = false;
             for (var ui = 0; ui < trajectories.length; ui++) {
                 var lastStep = trajectories[ui][trajectories[ui].length - 1];
-                if (Array.isArray(lastStep.pov) && angularDist(ep, lastStep.pov) < 0.15) {
+                if (Array.isArray(lastStep.pov) && angularDist(ep, lastStep.pov) < 0.06) {
                     tooClose = true; break;
                 }
             }
@@ -1786,7 +1791,7 @@ function initBenchmark(globals) {
                 { name: "d1-static-yp-pos",  yaw:  0.7,  pitch:  0.7,  roll:  0.5 },
                 { name: "d1-static-yp-neg",  yaw: -0.7,  pitch:  0.7,  roll: -0.5 }
             ];
-            var requestedD1 = (cfg && cfg.rotationProfileCount != null) ? cfg.rotationProfileCount : 6;
+            var requestedD1 = (cfg && cfg.rotationProfileCount != null) ? cfg.rotationProfileCount : 3;
             var d1Count = Math.max(1, Math.min(requestedD1, d1Templates.length));
             var d1Profiles = [];
             for (var d1ti = 0; d1ti < d1Count; d1ti++) {
@@ -2180,8 +2185,10 @@ function initBenchmark(globals) {
         // candidate only needs a handful of progressions for the outer
         // preset generator's diverse-select pass; evaluating all 40×6
         // combos per scan is typically 4–6× more work than needed.
-        // Default: min(maxCount, 5) — enough diversity to feed selectDiverse
-        // without over-spending time on a single face-pair.
+        // Default for direct benchmark callers: cap at 5 to keep scan-mode
+        // fast. Preset generator sets this explicitly via cfg.phase2EarlyStopCount
+        // (= count * 1.5) for K=1 generation, where every preset needs its own
+        // unique progression.
         var phase2EarlyStopCount = (cfg && cfg.phase2EarlyStopCount != null)
             ? (cfg.phase2EarlyStopCount | 0)
             : Math.min(Math.max(3, maxCount | 0), 5);
