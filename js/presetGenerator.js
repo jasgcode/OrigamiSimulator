@@ -2219,11 +2219,12 @@ function initPresetGenerator(globals) {
     //     FINAL step but excluded from the visible-front pick (so the same
     //     face isn't picked twice).
     //
-    // K=3 distinct configs: shift the visible-front rank window by 0/1/2 so
-    // each config picks a different combination of front anchors. Hidden
-    // back/front choices also rotate. If pools are too thin, we emit fewer
-    // configs (down to 0).
-    var SELECT_FROM_TRAJECTORY_K = 3;
+    // K configs per trajectory: each accepted trajectory spawns up to K
+    // face-point configs by rotating anchor picks. K=1 means every preset
+    // has a unique trajectory (uniqueness contract: no trajectory repeats
+    // within a model). Bump only if count is large and trajectory search
+    // can't keep up — but the wall-time trade is not linear.
+    var SELECT_FROM_TRAJECTORY_K = 1;
 
     function selectFacePointsFromTrajectory(trajectory, difficulty, modelFaceCount, frontPool, backPool, rng) {
         var tier = clampDifficultyTier(difficulty);
@@ -2438,9 +2439,11 @@ function initPresetGenerator(globals) {
         }
 
         var configs = [];
-        // Emit up to K configs by shifting the visible-front rank window.
-        // Hidden picks rotate alongside so each config covers different faces.
-        for (var k = 0; k < SELECT_FROM_TRAJECTORY_K; k++) {
+        // Try up to maxShifts rank windows; keep at most K successful configs.
+        // Decoupling "max attempts" from "max kept" ensures K=1 doesn't kill
+        // a trajectory whose first rank window fails but later windows succeed.
+        var maxShifts = Math.max(1, rankedFronts.length - plan.vF + 1);
+        for (var k = 0; k < maxShifts && configs.length < SELECT_FROM_TRAJECTORY_K; k++) {
             var visF = rankedFronts.slice(k, k + plan.vF);
             if (visF.length < plan.vF) break;
 
@@ -3256,7 +3259,12 @@ function initPresetGenerator(globals) {
                 //
                 // Also short-circuits when caller explicitly opts out with
                 // --no-validate.
-                var skipBatchValidation = !validate || difficulty === 1;
+                // d1/d2 short-circuit batch validation — d1 because validation
+                // predictably passes for static-pose flat walks; d2 because it's
+                // derived post-hoc from d4's already-validated trajectory.
+                // refineAndRevalidate still does per-preset validation below, so
+                // any genuinely broken preset is caught.
+                var skipBatchValidation = !validate || difficulty <= 2;
                 if (skipBatchValidation) {
                     scanCandidates = filterCandidatesByDifficulty(scanCandidates, difficulty, modelFaceCount, count, rng);
                     var scanSelected = selectDiverse(scanCandidates, count, existingRefs);

@@ -29,6 +29,7 @@ import argparse
 import json
 import math
 import multiprocessing as mp
+import os
 import subprocess
 import sys
 import time
@@ -98,7 +99,12 @@ def estimate_cost(preset: dict[str, Any]) -> float:
 
 
 def metadata_exists(preset_name: str) -> bool:
-    return (ROOT / "screenshots" / preset_name / "metadata.json").exists()
+    # Output dir matches server.js DATASET_DIR (default: dataset/).
+    # Metadata is now consolidated per-object in dataset/metadata/<object>_metadata.json,
+    # so we can't do a simple path existence check per preset. Instead, treat
+    # the presence of step_0000_current.png as proof the preset rendered.
+    out_dir = os.environ.get("DATASET_DIR", "dataset")
+    return (ROOT / out_dir / preset_name / "step_0000_current.png").exists()
 
 
 def check_server(server_url: str, timeout_sec: float = 5.0) -> None:

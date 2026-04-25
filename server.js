@@ -11,7 +11,7 @@
  */
 
 import { join } from "path";
-import { mkdir, readdir, appendFile, writeFile } from "fs/promises";
+import { mkdir, readdir, appendFile, writeFile, readFile } from "fs/promises";
 
 const ROOT = import.meta.dir;
 const SCREENSHOTS_DIR = join(ROOT, process.env.DATASET_DIR || "dataset");
@@ -154,6 +154,58 @@ Bun.serve({
                 });
             } catch (err) {
                 console.error("jsonl-append error:", err);
+                return new Response("Internal error", { status: 500 });
+            }
+        }
+
+        // ── Metadata merge endpoint ──────────────────────────────────────
+        // POST /api/metadata-merge with JSON body { path, key, value }
+        // - path: relative path within SCREENSHOTS_DIR (e.g. "metadata/birdBase_metadata.json")
+        // - key: top-level key to insert/update (e.g. the preset name)
+        // - value: the JSON value to store under that key
+        // File is treated as an object { key1: val1, key2: val2, ... }. Reads
+        // existing content, merges in the new key/value, writes back. Creates
+        // parent dirs and the file if missing.
+        if (url.pathname === "/api/metadata-merge" && req.method === "POST") {
+            try {
+                const payload = await req.json();
+                const rawPath = String(payload.path || "");
+                const key = String(payload.key || "");
+                const value = payload.value;
+                if (!rawPath.endsWith(".json")) {
+                    return new Response("path must end with .json", { status: 400 });
+                }
+                if (!key) {
+                    return new Response("key required", { status: 400 });
+                }
+                const safeRel = rawPath
+                    .split(/[\\/]/)
+                    .map(s => s.replace(/[^a-zA-Z0-9_.-]/g, "_"))
+                    .filter(s => s && s !== "." && s !== "..")
+                    .join("/");
+                if (!safeRel) {
+                    return new Response("invalid path", { status: 400 });
+                }
+                const filePath = join(SCREENSHOTS_DIR, safeRel);
+                const fileDir = filePath.substring(0, filePath.lastIndexOf("/"));
+                await mkdir(fileDir, { recursive: true });
+
+                let merged = {};
+                try {
+                    const existing = await readFile(filePath, "utf8");
+                    const parsed = JSON.parse(existing);
+                    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                        merged = parsed;
+                    }
+                } catch (_) { /* missing or invalid — start fresh */ }
+
+                merged[key] = value;
+                await writeFile(filePath, JSON.stringify(merged, null, 2), "utf8");
+                return new Response(JSON.stringify({ ok: true, path: filePath, keys: Object.keys(merged).length }), {
+                    headers: { "Content-Type": "application/json" },
+                });
+            } catch (err) {
+                console.error("metadata-merge error:", err);
                 return new Response("Internal error", { status: 500 });
             }
         }
