@@ -122,11 +122,10 @@ Metadata for dataset labeling. Presets use **static camera + per-step model `rot
 | Tier | Visible front | Hidden front | Hidden back | Motion |
 |------|---|---|---|--------|
 | d1   | 2 | 1–3 | 0   | Constant per-preset rotation (no inter-step motion; tilted fixed pose) |
-| d2   | 2 | 0   | 1–2 | Constant rotation frozen to d4's final-step pose |
 | d3   | 2 | 1–3 | 0   | Ramping rotation, crest near final step |
 | d4   | 2 | 1–2 | 1–2 | Monotonically ramping rotation, peak at final step |
 
-Rotation bounds per tier (radians): d1/d3 `{yaw 0.5, pitch 0.15, roll 0.08}`; d2/d4 `{yaw 1.0, pitch 1.0, roll 0.25}`.
+Rotation bounds per tier (radians): d1 `{yaw 0.5, pitch 0.15, roll 0.08}`; d3 `{yaw 0.8, pitch 0.5, roll 0.2}`; d4 `{yaw 1.4, pitch 1.3, roll 0.4}`.
 
 State 1 always renders at zero rotation (hero shot — fold=0, flat paper) from the trajectory's static POV; states 2..N apply the chosen rotation.
 
@@ -168,7 +167,7 @@ JSONL paths are relative to `<DATASET_DIR>/`. One line per preset:
 }
 ```
 
-Difficulty mapping: d1→`easy`, d2/d3→`medium`, d4→`hard`. `gt_answer` is the initial (non-hidden) point labels — letters that correspond to the unmarked dots rendered at step 0. Step 0 renders points as **unmarked dots**; the final step renders them with letters (`revealHiddenPoints` flag in `js/model.js:356-370`).
+Difficulty mapping: d1→`easy`, d3→`medium`, d4→`hard`. `gt_answer` is the initial (non-hidden) point labels — letters that correspond to the unmarked dots rendered at step 0. Step 0 renders points as **unmarked dots**; the final step renders them with letters (`revealHiddenPoints` flag in `js/model.js:356-370`).
 
 **Question template** (`JSONL_QUESTION_TEMPLATE` in `js/benchmark.js`) follows the project meta-prompt structure with `[Task]` / `[Rules]` / `[Question]` / `[Answer Format]` sections, includes the line "If this task depends on a specific visual definition: not applicable", places the `{images}` marker inline, and uses `{json_answer_value}` (literal text the model replaces) instead of `<json_answer_value>`. Variables substituted at JSONL build time: `{num_initial}`, `{all_labels}`. `{images}` and `{json_answer_value}` remain literal placeholders.
 
@@ -177,6 +176,10 @@ Difficulty mapping: d1→`easy`, d2/d3→`medium`, d4→`hard`. `gt_answer` is t
 - `POST /api/metadata-merge` — `{ path, key, value }`. Reads existing JSON object at `<DATASET_DIR>/<path>`, sets `merged[key] = value`, writes back. Creates parent dirs. Used by `saveSummary` and `saveMetadataJson` in `js/benchmark.js`.
 
 See `buildJsonlEntry` in `js/benchmark.js`.
+
+### Reverse render pipeline
+
+Runs after the forward dataset to produce a folded → flat variant. `tools/reverse-presets.js` transforms each preset by reversing the `steps` array and stamping `direction: "reverse"` on the config. The reversed presets are then re-rendered with `DATASET_DIR=reverse_dataset`. At JSONL build time, `buildJsonlEntry` selects `JSONL_QUESTION_TEMPLATE_REVERSE` (instead of the default forward template) when `config.direction === "reverse"`, so the question text reflects an unfolding sequence (folded → flat). All other JSONL fields follow the same schema as the forward pass.
 
 ## Preset Generation Pipeline
 
@@ -188,11 +191,11 @@ bun tools/generate-presets.js --model /Bases/boatBase.svg --difficulty 4 \
   --trajectory-mode hybrid --build-progressions 24
 ```
 
-### Pipeline stages (per model/difficulty slot, d1/d3/d4 only; d2 derived post-hoc)
+### Pipeline stages (per model/difficulty slot, d1/d3/d4 only)
 
 1. **Face-pool discovery** — cached at `assets/facepools/<key>.json`. Sweeps POVs × fold ∈ {0, 70}; records visible face IDs. Front pool = visibility-discovered; back pool = **all face indices `[0, N-1]`**, gated downstream by `getBackSideVisibleFaceIds` at the final step.
 2. **Phase 2 trajectory search** — one `evaluateTrajectoriesLive` run per slot with a generic anchor. Each accepted progression carries a `visibilityTimeline` (per-step `visibleFaceIds`, `backSideVisibleFaceIds`, etc.) and a `finalViewScore`.
-3. **Per-tier point selection** — `selectFacePointsFromTrajectory` emits **at most ONE** config per trajectory (`SELECT_FROM_TRAJECTORY_K = 1`, ~`js/presetGenerator.js:2226`). Loop tries up to `rankedFronts.length - plan.vF + 1` rank-window shifts (~lines 2440–2500) until one config fits the tier plan, then emits and moves on. **Contract: unique trajectory per preset within a model** (earlier K=3 / shared-trajectory behavior is gone). Visible-front anchors drawn from `alwaysVisible`. Hidden-front from `finalVisible`. Hidden-back from `[0,N-1] ∩ finalBackSideVisible`, stored with `faceId = idx + N` so `isPointVisible`'s `isFront = id < N` path checks the back normal. Enforces 3–6 total points, ≥2 visible non-hidden.
+3. **Per-tier point selection** — `selectFacePointsFromTrajectory` emits up to **K** configs per trajectory via `selectFromTrajectoryK(tier)`: **K=10 for d4, K=3 for d3, K=1 for d1** (~`js/presetGenerator.js`). Loop tries up to `rankedFronts.length - plan.vF + 1` rank-window shifts until configs fit the tier plan. Visible-front anchors drawn from `alwaysVisible`. Hidden-front from `finalVisible`. Hidden-back from `[0,N-1] ∩ finalBackSideVisible`, stored with `faceId = idx + N` so `isPointVisible`'s `isFront = id < N` path checks the back normal. Enforces 3–6 total points, ≥2 visible non-hidden.
 4. **Barycentric refinement** — `refineFacePointBarycentric` runs on final selections. Drives to final pose with ≥800 ms settle; sweeps 5×5 barycentric grid (`u,v ∈ [0.22, 0.52]`, `w ≥ 0.18`) in two passes.
 5. **Step normalization + hero-shot** — `normalizeStepsForDifficulty` freezes POV across steps (tier motion model); `applyHeroShotStep0` strips `step[0].rotation`.
 6. **Validation** — replay with `Math.max(settle, 800)` ms. Regressions revert to pre-refinement barycentric.
@@ -200,7 +203,7 @@ bun tools/generate-presets.js --model /Bases/boatBase.svg --difficulty 4 \
 
 **d4 back-coverage gate**: the count of back-side-exposed faces at the final step must be ≥ `ranges.hB[0]` or the trajectory is dropped.
 
-**`skipBatchValidation`** fires when `!validate || difficulty <= 2` (~`js/presetGenerator.js:3259`). d1 is structurally trivial; d2 is derived from d4's already-validated trajectory so per-preset revalidation is sufficient.
+**`skipBatchValidation`** fires when `!validate || difficulty <= 1` (~`js/presetGenerator.js:3259`). d1 is structurally trivial so per-preset revalidation is sufficient.
 
 ### Static-POV gotcha
 
@@ -216,17 +219,17 @@ Use clamped (not saturating) terms — saturating `clamp01` causes ties and coll
 
 ## Matrix runner (`tools/generate-matrix.js`)
 
-Runs slots in parallel. Models: `bird`, `waterbomb`, `pinwheel`, `opensink` (others dropped — back faces don't reliably expose under d4 rotation, or models too dense).
+Runs slots in parallel. Models in `ALL_MODELS`: `bird`, `waterbomb`, `pinwheel`, `opensink`, `boat` (5 total). `simplevertex` and `frog` remain dropped (back faces don't reliably expose under d4 rotation, or models too dense).
 
+- `--models <key>[,<key>]` — filter which models from `ALL_MODELS` to run. Default = all 5.
 - `--concurrency` default `min(28, cpus - 4)`. Leaves 4 threads for OS + dev server; saturates 32-thread boxes. SwiftShader Chrome is ~1 core/instance.
-- `--shards-per-slot N` — splits each (model, tier) slot into N sub-shards with distinct seeds (`SEED + shard*1009`) and contiguous start-index ranges. Each shard is a separate `generate-presets.js` process; the worker-pool queue work-steals across shards. File naming: `<model>-d<n>-s<shard>.json` when sharded, `<model>-d<n>.json` when unsharded. `deriveD2FromD4` globs `<model>-d4(-s\d+)?.json` to collect all d4 shards before deriving d2.
-- `--build-progressions` auto-scales to `max(24, ceil(count * 1.5))` (e.g. count=75 → build=113). Reason: K=1 means each preset needs its own passing trajectory.
-- `--prewarm` (default ON) — three-phase:
+- `--shards-per-slot N` — splits each (model, tier) slot into N sub-shards with distinct seeds (`SEED + shard*1009`) and contiguous start-index ranges. Each shard is a separate `generate-presets.js` process; the worker-pool queue work-steals across shards. File naming: `<model>-d<n>-s<shard>.json` when sharded, `<model>-d<n>.json` when unsharded.
+- `--build-progressions` auto-scales to `max(24, ceil(count * 1.5))` (e.g. count=75 → build=113).
+- `--prewarm` (default ON) — two-phase:
   1. All models run at d=1 in parallel (each writes its own facepool cache, no contention).
-  2. Remaining (model, d∈{3,4}) slots run parallel up to `--concurrency`. **d2 not run here.**
-  3. `deriveD2FromD4` transforms each `<model>-d4*.json` → `<model>-d2.json` via pure JSON (no browser): copies steps, freezes rotation to d4's final-step value across states 2..N, renames `-d4-` → `-d2-`. Skipped if d4 output is missing/empty.
+  2. Remaining (model, d∈{3,4}) slots run parallel up to `--concurrency`.
 
-d2 costs zero Phase-2 compute and inherits d4's back-exposing final pose by construction.
+Total Phase-2 work: 4–5 models × 2 tiers (d3, d4) × `--shards-per-slot` shards per slot, plus d1 unsharded in Phase 1. (d2 ablated: `deriveD2FromD4` exists in the source but is no longer invoked.)
 
 ## Render parallelism (`tools/render_dataset_parallel.py`)
 
@@ -237,7 +240,6 @@ Skip-existing check uses `step_0000_current.png` presence (not `metadata.json`, 
 ## Key trade-offs
 
 - **Thin back pools** (boat has 2 back faces) limit d4 diversity — presets often share hidden-back faces.
-- **d2 can still fail** on constrained geometry: needs *some* back-pool face exposed at the final pose.
 - **Phase 2 settle (300 ms) vs validation settle (≥800 ms)** — Phase 2 accepts can fail validation if paper is mid-transition; fallback picks up slack.
 
 ## Important Conventions
