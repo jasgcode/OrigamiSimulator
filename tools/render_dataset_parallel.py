@@ -100,11 +100,23 @@ def estimate_cost(preset: dict[str, Any]) -> float:
 
 def metadata_exists(preset_name: str) -> bool:
     # Output dir matches server.js DATASET_DIR (default: dataset/).
-    # Metadata is now consolidated per-object in dataset/metadata/<object>_metadata.json,
-    # so we can't do a simple path existence check per preset. Instead, treat
-    # the presence of step_0000_current.png as proof the preset rendered.
+    # Metadata is consolidated per-object at dataset/metadata/<object>_metadata.json,
+    # keyed by benchmark/preset name. PNGs live at dataset/<jsonl_id>/ (a
+    # different, id-slug-based name), so the only reliable per-preset marker
+    # is presence of the preset_name key inside SOME metadata file.
     out_dir = os.environ.get("DATASET_DIR", "dataset")
-    return (ROOT / out_dir / preset_name / "step_0000_current.png").exists()
+    metadata_dir = ROOT / out_dir / "metadata"
+    if not metadata_dir.is_dir():
+        return False
+    for mfile in metadata_dir.glob("*_metadata.json"):
+        try:
+            with mfile.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and preset_name in data:
+                return True
+        except (OSError, json.JSONDecodeError):
+            continue
+    return False
 
 
 def check_server(server_url: str, timeout_sec: float = 5.0) -> None:

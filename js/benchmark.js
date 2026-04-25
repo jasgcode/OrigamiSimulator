@@ -1107,16 +1107,14 @@ function initBenchmark(globals) {
         for (var ei = 0; ei < sorted.length; ei++) {
             var ep = sorted[ei];
 
-            // Skip endpoints too close to already-used ones. Was 0.15 rad
-            // (~8.6°), which capped static-POV trajectories at ~5 distinct
-            // POVs in the upper hemisphere — too few for K=1 + count>=20.
-            // Tightened to 0.06 rad (~3.4°) so larger runs have a richer
-            // POV pool. Geometric similarity is still tracked by the
-            // rotation-profile sweep downstream.
+            // Skip endpoints too close to already-used ones. 0.04 rad
+            // (~2.3°) — tight enough to give d4 a rich POV pool for the
+            // back-coverage gate to filter against. Rotation-profile
+            // sweep downstream provides additional diversity.
             var tooClose = false;
             for (var ui = 0; ui < trajectories.length; ui++) {
                 var lastStep = trajectories[ui][trajectories[ui].length - 1];
-                if (Array.isArray(lastStep.pov) && angularDist(ep, lastStep.pov) < 0.06) {
+                if (Array.isArray(lastStep.pov) && angularDist(ep, lastStep.pov) < 0.04) {
                     tooClose = true; break;
                 }
             }
@@ -1276,6 +1274,30 @@ function initBenchmark(globals) {
         "Replace {json_answer_value} with the single answer for this task, formatted according to a JSON array of uppercase letters chosen from [{all_labels}], with no duplicates, e.g. [\"A\", \"C\"]."
     ].join("\n");
 
+    // Reverse-direction template: trajectories played folded → flat. Fired when
+    // preset.direction === "reverse" (or config.direction). State 1 = folded
+    // image with all letters; final state = flat paper with the unmarked dots.
+    var JSONL_QUESTION_TEMPLATE_REVERSE = [
+        "[Task]",
+        "You are solving origami reverse point tracking.",
+        "In this task, you must identify which labeled points on a folded piece of paper will end up at the location of the unmarked dot(s) once the paper is unfolded back to flat. The first image shows the fully folded paper with every visible point labeled using the letters {all_labels}. The following images show the paper being reversed (unfolded) step by step. The final image shows the flat, unfolded paper with {num_initial} unmarked dot(s) printed on it. Paper is opaque: in the folded state, points on the back side may be hidden by overlying layers, and the same physical point may appear in different positions across steps as the paper unfolds. You must track each labeled point back through the unfold sequence and report which letter(s) land on the unmarked dot(s) in the flat image.",
+        "If this task depends on a specific visual definition, use this definition exactly: not applicable",
+        "The visual evidence for this question is provided below.",
+        "{images}",
+        "",
+        "[Rules]",
+        "1. Use only the images and text provided in this prompt.",
+        "2. If answer options are provided, choose only from the provided options.",
+        "3. Do not output explanation beyond the required final answer.",
+        "",
+        "[Question]",
+        "Which lettered point(s) from the folded first image correspond to the unmarked dot(s) on the flat paper in the final image? List the matching letter(s).",
+        "",
+        "[Answer Format]",
+        "Output exactly one JSON object: {\"answer\": {json_answer_value}} and nothing else.",
+        "Replace {json_answer_value} with the single answer for this task, formatted according to a JSON array of uppercase letters chosen from [{all_labels}], with no duplicates, e.g. [\"A\", \"C\"]."
+    ].join("\n");
+
     function difficultyLabelForTier(d) {
         if (d <= 1) return "easy";
         if (d >= 4) return "hard";
@@ -1334,7 +1356,15 @@ function initBenchmark(globals) {
         var dotIdx = mp.lastIndexOf(".");
         objectName = dotIdx >= 0 ? mp.substring(0, dotIdx) : mp;
 
-        var question = JSONL_QUESTION_TEMPLATE
+        // Select template by direction: forward (default) or reverse.
+        // Reverse presets carry direction:"reverse" set by the reverse
+        // preset generator; question template flips so the model is
+        // asked about folded-image letters → flat-paper dots.
+        var direction = (config && config.direction) || null;
+        var questionTemplate = direction === "reverse"
+            ? JSONL_QUESTION_TEMPLATE_REVERSE
+            : JSONL_QUESTION_TEMPLATE;
+        var question = questionTemplate
             .replace(/\{num_initial\}/g, String(initialPoints.length))
             .replace(/\{all_labels\}/g, allLabels.join(", "));
 
@@ -1791,7 +1821,7 @@ function initBenchmark(globals) {
                 { name: "d1-static-yp-pos",  yaw:  0.7,  pitch:  0.7,  roll:  0.5 },
                 { name: "d1-static-yp-neg",  yaw: -0.7,  pitch:  0.7,  roll: -0.5 }
             ];
-            var requestedD1 = (cfg && cfg.rotationProfileCount != null) ? cfg.rotationProfileCount : 3;
+            var requestedD1 = (cfg && cfg.rotationProfileCount != null) ? cfg.rotationProfileCount : 6;
             var d1Count = Math.max(1, Math.min(requestedD1, d1Templates.length));
             var d1Profiles = [];
             for (var d1ti = 0; d1ti < d1Count; d1ti++) {
@@ -1967,7 +1997,19 @@ function initBenchmark(globals) {
             { name: "pitch-neg-ccw",   yaw: -0.3, pitch: -1.2, roll:  0.0 },
             // Roll-dominant — rotates paper in its plane; useful when
             // back faces are along a diagonal axis.
-            { name: "roll-pos",        yaw:  0.3, pitch:  0.3, roll:  1.2 }
+            { name: "roll-pos",        yaw:  0.3, pitch:  0.3, roll:  1.2 },
+            // Strong yaw-dominant positive — exposes back faces on the
+            // model's +x side when pitch/roll alone don't reach them.
+            { name: "yaw-pos-strong",  yaw:  1.0, pitch:  0.5, roll:  0.0 },
+            // Strong yaw-dominant negative — complements yaw-pos-strong
+            // for back faces on the -x side.
+            { name: "yaw-neg-strong",  yaw: -1.0, pitch:  0.5, roll:  0.0 },
+            // Roll-negative — opposite in-plane rotation from roll-pos
+            // for diagonal-axis back faces on the other side.
+            { name: "roll-neg",        yaw:  0.3, pitch:  0.3, roll: -1.2 },
+            // Pitch-positive with opposite yaw — complements pitch-pos
+            // to sweep the front hemisphere's opposite side.
+            { name: "pitch-pos-ccw",   yaw: -0.3, pitch:  1.2, roll:  0.0 }
         ] : [];
         var templates = baseTemplates.concat(expositionTemplates);
         // Default profile count: 6 (backwards compatible). When
@@ -1975,7 +2017,7 @@ function initBenchmark(globals) {
         // cover them — the 4 exposition templates are the primary
         // reason this fix exists. User override via rotationProfileCount
         // still takes precedence.
-        var defaultCount = exposeBackside ? Math.min(templates.length, 10) : 6;
+        var defaultCount = exposeBackside ? Math.min(templates.length, 14) : 6;
         var requested = cfg && cfg.rotationProfileCount != null ? cfg.rotationProfileCount : defaultCount;
         var count = Math.max(1, Math.min(requested, templates.length));
         var profiles = [];

@@ -49,24 +49,28 @@ function initPresetGenerator(globals) {
         };
     }
 
-    // ── High-contrast color pairs ──────────────────────────────────────
+    // ── Same-hue color pairs (back = darker front) ─────────────────────
+    // Each pair is [front, back] where back is the front shade darkened to
+    // ~70% luminance. Reads as a single-colored sheet of paper with the
+    // reverse side naturally shaded. Previously both sides were contrasting
+    // colors; changed for a more paper-like visual.
 
     var COLOR_PAIRS = [
-        ["e74c3c", "3498db"],   // red / blue
-        ["f39c12", "1abc9c"],   // orange / teal
-        ["0077cc", "e67e22"],   // blue / orange
-        ["16a085", "d35400"],   // teal / dark orange
-        ["2980b9", "c0392b"],   // blue / red
-        ["27ae60", "8e44ad"],   // green / purple
-        ["e84393", "00b894"],   // pink / green
-        ["34495e", "f1c40f"],   // navy / yellow
-        ["9b59b6", "1abc9c"],   // purple / teal
-        ["d63031", "0984e3"],   // red / blue (alt)
-        ["00cec9", "6c5ce7"],   // cyan / indigo
-        ["fd79a8", "00b894"],   // pink / emerald
-        ["e17055", "74b9ff"],   // burnt orange / sky blue
-        ["a29bfe", "ff7675"],   // lavender / salmon
-        ["55efc4", "a29bfe"]    // mint / lavender
+        ["e74c3c", "a2352a"],   // red
+        ["f39c12", "aa6d0d"],   // orange
+        ["0077cc", "00538f"],   // blue
+        ["16a085", "0f705d"],   // teal
+        ["2980b9", "1d5a82"],   // cerulean
+        ["27ae60", "1b7a43"],   // green
+        ["e84393", "a22f67"],   // pink
+        ["34495e", "243342"],   // navy
+        ["9b59b6", "6d3e7f"],   // purple
+        ["d63031", "962222"],   // red (alt)
+        ["00cec9", "00908d"],   // cyan
+        ["fd79a8", "b15576"],   // rose
+        ["e17055", "9e4e3c"],   // burnt orange
+        ["a29bfe", "716db2"],   // lavender
+        ["55efc4", "3ca789"]    // mint
     ];
 
     // ── Bird base known-good face ID pools ─────────────────────────────
@@ -2219,15 +2223,22 @@ function initPresetGenerator(globals) {
     //     FINAL step but excluded from the visible-front pick (so the same
     //     face isn't picked twice).
     //
-    // K configs per trajectory: each accepted trajectory spawns up to K
-    // face-point configs by rotating anchor picks. K=1 means every preset
-    // has a unique trajectory (uniqueness contract: no trajectory repeats
-    // within a model). Bump only if count is large and trajectory search
-    // can't keep up — but the wall-time trade is not linear.
-    var SELECT_FROM_TRAJECTORY_K = 1;
+    // Configs per trajectory, per-tier. K=1 for d1/d2/d3 preserves
+    // "unique trajectory per preset". K=10 for d4 lifts yield past the
+    // thin-back-pool ceiling — d4 presets can share POV/rotation but
+    // differ in hidden-back pick and barycentric position, producing
+    // visually distinct outputs. Safe: presetSignature() keys on
+    // facePoints+steps jointly so shared trajectories with different
+    // face picks still dedupe correctly.
+    function selectFromTrajectoryK(tier) {
+        if (tier === 4) return 10;
+        if (tier === 3) return 3;
+        return 1;
+    }
 
     function selectFacePointsFromTrajectory(trajectory, difficulty, modelFaceCount, frontPool, backPool, rng) {
         var tier = clampDifficultyTier(difficulty);
+        var K = selectFromTrajectoryK(tier);
         var timeline = trajectory && trajectory.visibilityTimeline;
         if (!Array.isArray(timeline) || timeline.length === 0) return [];
         var N = modelFaceCount;
@@ -2442,8 +2453,8 @@ function initPresetGenerator(globals) {
         // Try up to maxShifts rank windows; keep at most K successful configs.
         // Decoupling "max attempts" from "max kept" ensures K=1 doesn't kill
         // a trajectory whose first rank window fails but later windows succeed.
-        var maxShifts = Math.max(1, rankedFronts.length - plan.vF + 1);
-        for (var k = 0; k < maxShifts && configs.length < SELECT_FROM_TRAJECTORY_K; k++) {
+        var maxShifts = Math.max(K * 3, rankedFronts.length - plan.vF + 1);
+        for (var k = 0; k < maxShifts && configs.length < K; k++) {
             var visF = rankedFronts.slice(k, k + plan.vF);
             if (visF.length < plan.vF) break;
 
@@ -2468,12 +2479,27 @@ function initPresetGenerator(globals) {
             }
             if (hidB.length < plan.hB) continue;
 
+            // Barycentric grid: 9 positions spanning the interior of a face.
+            // Cycled by config-index k so each of K configs per trajectory
+            // uses a different position for the same face. Stays clear of
+            // edges (min 0.18 margin) for visibility stability.
+            var baryGrid = [
+                { u: 0.34, v: 0.33, w: 0.33 },
+                { u: 0.50, v: 0.25, w: 0.25 },
+                { u: 0.25, v: 0.50, w: 0.25 },
+                { u: 0.25, v: 0.25, w: 0.50 },
+                { u: 0.42, v: 0.39, w: 0.19 },
+                { u: 0.19, v: 0.42, w: 0.39 },
+                { u: 0.39, v: 0.19, w: 0.42 },
+                { u: 0.35, v: 0.40, w: 0.25 },
+                { u: 0.25, v: 0.35, w: 0.40 }
+            ];
+            var baryForThisConfig = baryGrid[k % baryGrid.length];
             var config = {};
             function add(fid, hidden) {
                 var key = String(fid);
                 if (!config[key]) config[key] = [];
-                var b = makeBary();
-                var entry = { u: b.u, v: b.v, w: b.w };
+                var entry = { u: baryForThisConfig.u, v: baryForThisConfig.v, w: baryForThisConfig.w };
                 if (hidden) entry.hidden = true;
                 config[key].push(entry);
             }
@@ -2546,12 +2572,14 @@ function initPresetGenerator(globals) {
         // hero-shot step-0 override (iso POV + no rotation) prevents the
         // initial frame from being edge-on, so validation of step 0 passes
         // even under large constant rotation for steps 1..N.
-        if (tier === 2) return { yaw: 1.0, pitch: 1.0, roll: 0.25 };
-        // d3: rotated single-side, moderate yaw with mild pitch/roll.
-        if (tier === 3) return { yaw: 0.5, pitch: 0.15, roll: 0.08 };
+        if (tier === 2) return { yaw: 1.4, pitch: 1.3, roll: 0.4 };
+        // d3: rotated single-side, moderate envelope — larger than d1
+        // (static-pose) so the ramping motion is visually noticeable,
+        // but stays below d4's full two-sided envelope.
+        if (tier === 3) return { yaw: 0.8, pitch: 0.5, roll: 0.2 };
         // d4: rotated two-sided, ~1.0 rad to match bird-frontback reference
         // quality (0.6 cap produced ~0.74 rad final, references reach ~1.0+).
-        return { yaw: 1.0, pitch: 1.0, roll: 0.25 };
+        return { yaw: 1.4, pitch: 1.3, roll: 0.4 };
     }
 
     function generateFromScanProgressions(options, callback) {

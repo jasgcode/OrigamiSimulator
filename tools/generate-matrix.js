@@ -41,6 +41,7 @@ const { values: args } = parseArgs({
         "max-scan-candidates": { type: "string", default: "20" },
         concurrency: { type: "string", default: "" },
         "shards-per-slot": { type: "string", default: "1" },
+        "models": { type: "string", default: "" },
         "log-dir": { type: "string", default: "" },
         "no-prewarm": { type: "boolean", default: false },
     },
@@ -72,20 +73,37 @@ const CONCURRENCY = CONCURRENCY_RAW
 // its worker picks up the next item in the queue, regardless of origin.
 // Pass --shards-per-slot 3 at CLI to enable.
 const SHARDS_PER_SLOT = Math.max(1, parseInt(String(args["shards-per-slot"] || "1"), 10) || 1);
+// --models filter: comma-separated keys (e.g. "boat" or "boat,bird") to
+// run only a subset of MODELS. Useful for top-up runs without re-doing
+// already-generated models. Empty/unset = all models.
+const MODELS_FILTER = String(args["models"] || "").trim();
 const LOG_DIR = String(args["log-dir"] || "");
 const PREWARM = !args["no-prewarm"];
 
-const MODELS = [
-    // Models that reliably support all 4 difficulties (d2/d4 back-side
-    // visibility works on their geometry). Dropped: boat + simplevertex
-    // (their flat crease patterns don't reliably expose back-half faces
-    // under d4 rotation — d4 always failed, and d2 derives from d4 so it
-    // failed too). Dropped: frog (too dense, slow per slot).
+const ALL_MODELS = [
+    // Models supporting d1/d3/d4 (d2 ablated). Boat is back in the pool —
+    // earlier failures were under tighter d4 rotation bounds; with
+    // bounds {yaw: 1.4, pitch: 1.3, roll: 0.4} + K=10 + bary grid, boat
+    // is expected to expose enough back faces. Still dropped: simplevertex
+    // (too few back faces) and frog (too dense, slow per slot).
     { key: "bird", path: "/Bases/birdBase.svg" },
     { key: "waterbomb", path: "/Bases/waterbombBase.svg" },
     { key: "pinwheel", path: "/Bases/pinwheelBase.svg" },
     { key: "opensink", path: "/Bases/openSinkBase.svg" },
+    { key: "boat", path: "/Bases/boatBase.svg" },
 ];
+
+const MODELS = MODELS_FILTER
+    ? (() => {
+        const wanted = new Set(MODELS_FILTER.split(",").map((s) => s.trim()).filter(Boolean));
+        const filtered = ALL_MODELS.filter((m) => wanted.has(m.key));
+        if (filtered.length === 0) {
+            console.error(`[matrix] --models filter "${MODELS_FILTER}" matched zero models. Valid keys: ${ALL_MODELS.map((m) => m.key).join(", ")}`);
+            process.exit(1);
+        }
+        return filtered;
+    })()
+    : ALL_MODELS;
 
 await mkdir(join(ROOT, OUT_DIR), { recursive: true });
 if (LOG_DIR) await mkdir(join(ROOT, LOG_DIR), { recursive: true });
@@ -326,8 +344,9 @@ if (PREWARM) {
     await runQueue(phase1, Math.min(CONCURRENCY, MODELS.length), "phase 1 (prewarm d=1)");
 
     // Phase 2: run d3 and d4 slots in parallel, optionally split into
-    // SHARDS_PER_SLOT sub-shards each. d2 is SKIPPED here — derived
-    // post-hoc from d4 output (deriveD2FromD4 below).
+    // SHARDS_PER_SLOT sub-shards each. d2 is ablated — previously derived
+    // from d4 here, removed when d2 became redundant with d4's richer
+    // two-sided semantics.
     const phase2 = [];
     for (const m of MODELS) {
         for (const d of [3, 4]) {
@@ -337,13 +356,6 @@ if (PREWARM) {
         }
     }
     await runQueue(phase2, CONCURRENCY, "phase 2 (d3, d4)");
-
-    // Phase 3: derive d2 presets from each model's d4 output. Zero
-    // additional Phase-2 cost — pure JSON transform.
-    console.log(`[matrix] phase 3: deriving d2 from d4 for ${MODELS.length} model(s)`);
-    for (const m of MODELS) {
-        await deriveD2FromD4(m);
-    }
 } else {
     // Legacy: model groups in parallel, difficulties within a model
     // serial. Caps at modelCount slots concurrent regardless of
@@ -357,7 +369,6 @@ if (PREWARM) {
             await runSlot(m, 1);
             await runSlot(m, 3);
             await runSlot(m, 4);
-            await deriveD2FromD4(m);
         }
     }
     const limit = Math.min(CONCURRENCY, MODELS.length);
