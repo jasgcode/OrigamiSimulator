@@ -1134,15 +1134,16 @@ function initPresetGenerator(globals) {
         // The mesh is path-dependent: jumping from fold=0 to fold=70%
         // converges to a DIFFERENT local minimum than walking 0 → 8 → ...
         // → 70% across 10 steps. The validator does the step-by-step walk
-        // with ≥500ms settle per step (see validatePreset), so refinement
+        // with ≥400ms settle per step (see validatePreset), so refinement
         // must too — otherwise a barycentric that is visible at the
         // refined-state mesh can fail visibility at the validated mesh
         // and we ship a broken preset. Match validator settle exactly.
         // (Was 800ms historically; dropped to 500ms since mesh convergence
         // on origami bases stabilises well before then — verified by A/B
-        // on the existing matrix models.)
-        var perStepSettle = Math.max(settleMs || 300, 500);
-        var finalSettle = Math.max(settleMs || 300, 500);
+        // on the existing matrix models. Further dropped to 400ms as a
+        // pipeline speedup; mesh convergence still stable at this floor.)
+        var perStepSettle = Math.max(settleMs || 300, 400);
+        var finalSettle = Math.max(settleMs || 300, 400);
         var stepIdx = 0;
         function applyNextStep() {
             if (stepIdx >= steps.length) {
@@ -2658,6 +2659,17 @@ function initPresetGenerator(globals) {
             buildProgressions: typeof opts.buildProgressions === "number"
                 ? opts.buildProgressions
                 : Math.max(40, count * 12),
+            // Phase 2 stops once this many valid progressions are found.
+            // K=1 means each progression → 1 preset, so we need ~count
+            // valid progressions plus a small margin for downstream
+            // attrition (selectFacePointsFromTrajectory rejects, refinement
+            // failures, etc.). 1.5× is the sweet spot — enough margin for
+            // d4's lower pass-rate, not so much that we waste wall-time.
+            phase2EarlyStopCount: opts.phase2EarlyStopCount != null
+                ? opts.phase2EarlyStopCount
+                : (difficulty === 1
+                    ? Math.max(3, count)
+                    : Math.max(5, Math.ceil(count * 1.5))),
             maxTrajectoryCandidates: opts.maxTrajectoryCandidates != null
                 ? opts.maxTrajectoryCandidates
                 : Math.max(60, count * 18),
@@ -2951,12 +2963,13 @@ function initPresetGenerator(globals) {
                 globals.threeView.resetModel();
             }
 
-            // Wait for simulation to settle. Minimum 500ms — origami mesh
+            // Wait for simulation to settle. Minimum 400ms — origami mesh
             // convergence stabilises well before then on the current model
             // set, and this floor is matched by refineFacePointBarycentric
             // so refined barycentrics and validated barycentrics see the
-            // same mesh state. (Was 800ms historically.)
-            var actualSettle = Math.max(settle, 500);
+            // same mesh state. (Was 800ms historically, then 500ms; further
+            // dropped to 400ms as a pipeline speedup.)
+            var actualSettle = Math.max(settle, 400);
             setTimeout(function () {
 
                 var requiredIndices = [];

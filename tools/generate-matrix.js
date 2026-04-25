@@ -58,11 +58,7 @@ const OUT_DIR = String(args["out-dir"] || "new_dataset/matrix-gen");
 const COUNT = parseInt(String(args.count || "2"), 10) || 2;
 const SEED = parseInt(String(args.seed || "42"), 10) || 42;
 const SERVER_URL = String(args["server-url"] || "http://localhost:3000");
-// --build-progressions controls Phase 2 scan candidate pool. With K=1
-// (unique trajectory per preset) we need build ≥ count / expected-pass-rate.
-// Auto-scale to max(24, ceil(count * 1.5)) so count=75 → build=113.
 const BUILD_RAW = parseInt(String(args["build-progressions"] || "24"), 10) || 24;
-const BUILD = String(Math.max(BUILD_RAW, Math.ceil(COUNT * 1.5)));
 const MAX_TRAJ = String(args["max-trajectory-candidates"] || "40");
 const MAX_SCAN = String(args["max-scan-candidates"] || "20");
 const CONCURRENCY_RAW = String(args.concurrency || "").trim();
@@ -145,6 +141,12 @@ async function runSlot(model, difficulty, shard = 0, totalShards = 1) {
     const startIndexForShard = shard * basePerShard + Math.min(shard, remainder) + 1;
     // Distinct seed per shard — prime offset so seeds don't collide.
     const seedForShard = SEED + shard * 1009;
+    // --build-progressions: scan candidate pool must be big enough that
+    // count-for-shard passing trajectories are likely. With K=1 (unique
+    // trajectory per preset), need build ≥ count / expected-pass-rate.
+    // Scale per-shard count (not total COUNT) so sharding doesn't
+    // over-provision validation work.
+    const buildForShard = String(Math.max(BUILD_RAW, Math.ceil(countForShard * 1.5)));
     // Output file names: unsharded → bird-d3.json; sharded → bird-d3-s0.json.
     // base-name keeps the non-sharded form so preset ids remain consistent.
     const base = `${model.key}-d${difficulty}`;
@@ -163,7 +165,7 @@ async function runSlot(model, difficulty, shard = 0, totalShards = 1) {
         "--seed", String(seedForShard),
         "--output", outPath,
         "--trajectory-mode", "hybrid",
-        "--build-progressions", BUILD,
+        "--build-progressions", buildForShard,
         "--max-trajectory-candidates", MAX_TRAJ,
         "--max-scan-candidates", MAX_SCAN,
         "--server-url", SERVER_URL,
@@ -312,7 +314,7 @@ async function runQueue(queue, limit, label) {
     await Promise.all(workers);
 }
 
-console.log(`[matrix] cpus=${CPU_COUNT}, concurrency=${CONCURRENCY}, prewarm=${PREWARM}, models=${MODELS.length}, shards=${SHARDS_PER_SLOT}, count=${COUNT}, build=${BUILD}, out=${OUT_DIR}`);
+console.log(`[matrix] cpus=${CPU_COUNT}, concurrency=${CONCURRENCY}, prewarm=${PREWARM}, models=${MODELS.length}, shards=${SHARDS_PER_SLOT}, count=${COUNT} (per-shard ${Math.ceil(COUNT/SHARDS_PER_SLOT)}), build-floor=${BUILD_RAW}, out=${OUT_DIR}`);
 
 if (PREWARM) {
     // Phase 1: one slot per model in parallel. Each model writes its own
