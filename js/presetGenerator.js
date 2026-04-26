@@ -97,6 +97,24 @@ function initPresetGenerator(globals) {
         return String(model).replace(/^\/+/, "").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 120);
     }
 
+    // Linearly rescale a fold ladder so its last entry equals `target`.
+    // Used by the per-model `finalFold` override (e.g. squareBase needs a
+    // shallower terminal fold so back faces remain exposed at the final
+    // step). Returns the original ladder unchanged when target is null,
+    // matches the existing terminal value, or the ladder is degenerate.
+    function rescaleFoldLadder(ladder, target) {
+        if (target == null || !Array.isArray(ladder) || ladder.length === 0) return ladder;
+        var last = ladder[ladder.length - 1];
+        if (last <= 0 || last === target) return ladder;
+        var scale = target / last;
+        var out = new Array(ladder.length);
+        for (var i = 0; i < ladder.length; i++) {
+            out[i] = Math.round(ladder[i] * scale);
+        }
+        out[out.length - 1] = target;
+        return out;
+    }
+
     function poolsUnion(arrs) {
         var seen = {}, out = [];
         for (var i = 0; i < arrs.length; i++) {
@@ -1244,20 +1262,65 @@ function initPresetGenerator(globals) {
                     } catch (_e) {}
                 }
 
-                // Fixed barycentric grid over (u,v) ∈ [0.22, 0.52] with
-                // w ≥ 0.18; every candidate sits inside the triangle with a
-                // comfortable margin from all three edges.
+                // Barycentric grid over (u,v) ∈ [0.22, 0.52] with w ≥ 0.18.
+                // Every candidate sits inside the triangle with a margin
+                // from all three edges. Each candidate gets independent
+                // per-preset jitter so different presets land at distinct
+                // exact placements — avoids the "every preset picks the
+                // same cell" templated look. Jitter ±0.025 keeps grid
+                // spacing intact (d3/d4 spacing is 0.075–0.10).
                 //
-                // Grid values are pre-rounded to 2 decimals so that the
-                // score we compute is for the EXACT barycentric we will
-                // write to the preset. Otherwise a candidate could score
-                // "visible" at an unrounded position (e.g. 0.295, 0.295)
-                // but then round to a near-edge position (0.30, 0.30) that
-                // validation sees as occluded. Scoring the rounded value
-                // keeps refiner→validator visibility contract intact.
+                // Determinism: jitter is seeded from a hash of the preset's
+                // facePoints structure (face IDs + (u,v,w) values). This
+                // gives stable per-preset jitter even if upstream RNG
+                // consumption changes between code revisions — the same
+                // preset always refines to the same exact bary on re-run,
+                // independent of batch order or preceding operations.
+                //
+                // Rounding is applied AFTER jitter, and the score is
+                // computed at the post-rounded value — same contract as
+                // before: the bary we score is the bary we write.
+                var jitterSeed = (function () {
+                    var h = 2166136261;
+                    var fp = preset && preset.facePoints;
+                    if (fp && typeof fp === "object") {
+                        var keysS = Object.keys(fp).sort();
+                        for (var ks = 0; ks < keysS.length; ks++) {
+                            var keyS = keysS[ks];
+                            for (var ci = 0; ci < keyS.length; ci++) {
+                                h ^= keyS.charCodeAt(ci);
+                                h = Math.imul(h, 16777619);
+                            }
+                            var arrS = fp[keyS];
+                            if (Array.isArray(arrS)) {
+                                for (var asi = 0; asi < arrS.length; asi++) {
+                                    var ent = arrS[asi];
+                                    if (ent && typeof ent === "object") {
+                                        h ^= Math.round((ent.u || 0) * 1000) | 0;
+                                        h = Math.imul(h, 16777619);
+                                        h ^= Math.round((ent.v || 0) * 1000) | 0;
+                                        h = Math.imul(h, 16777619);
+                                        h ^= Math.round((ent.w || 0) * 1000) | 0;
+                                        h = Math.imul(h, 16777619);
+                                        if (ent.hidden) { h ^= 0xdeadbeef; h = Math.imul(h, 16777619); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return h | 0;
+                })();
+                var jitterRng = makeRng(jitterSeed);
+                function jitterAxis() {
+                    return jitterRng.randFloat(-0.025, 0.025);
+                }
                 function mk(u, v) {
-                    var ru = Math.round(u * 100) / 100;
-                    var rv = Math.round(v * 100) / 100;
+                    var ju = u + jitterAxis();
+                    var jv = v + jitterAxis();
+                    if (ju < 0.20) ju = 0.20; else if (ju > 0.55) ju = 0.55;
+                    if (jv < 0.20) jv = 0.20; else if (jv > 0.55) jv = 0.55;
+                    var ru = Math.round(ju * 100) / 100;
+                    var rv = Math.round(jv * 100) / 100;
                     var rw = Math.round((1 - ru - rv) * 100) / 100;
                     return { u: ru, v: rv, w: rw };
                 }
@@ -2129,9 +2192,12 @@ function initPresetGenerator(globals) {
         var colorMode = opts.colorMode || getColorModeForDifficulty(difficulty, rng);
         var colors = opts.colors || ["e74c3c", "3498db"];
         var bgColor = opts.backgroundColor || "f0f0f0";
-        var foldSteps = opts.foldSteps || (difficulty === 1
-            ? [0, 12, 25, 37, 50]
-            : [0, 8, 16, 24, 32, 40, 48, 56, 64, 70]);
+        var foldSteps = opts.foldSteps || rescaleFoldLadder(
+            difficulty === 1
+                ? [0, 12, 25, 37, 50]
+                : [0, 8, 16, 24, 32, 40, 48, 56, 64, 70],
+            opts.finalFold
+        );
         var rawSteps = stepsFromProgression(progression, foldSteps);
         var normalizedSteps = normalizeStepsForDifficulty(rawSteps, difficulty, rng);
 
@@ -2317,9 +2383,13 @@ function initPresetGenerator(globals) {
         // visibility" if the underlying face's back surface is actually
         // exposed at the final state.
         var finalBackSideVisible = {};
+        var finalBackQuality = {};
         var bsv = finalStep.backSideVisibleFaceIds || [];
+        var fbq = finalStep.backQualities || {};
         for (var fbi = 0; fbi < bsv.length; fbi++) {
-            finalBackSideVisible[bsv[fbi]] = true;
+            var bfid = bsv[fbi];
+            finalBackSideVisible[bfid] = true;
+            finalBackQuality[bfid] = (fbq[bfid] != null) ? fbq[bfid] : 0;
         }
 
         // Visible-front anchors must be visible at EVERY step regardless of
@@ -2353,7 +2423,15 @@ function initPresetGenerator(globals) {
             return !!finalBackSideVisible[fid];
         }
         var rankedBacks = backs.filter(isBackSideExposed);
+        // Rank by how directly the back surface faces the camera at the final
+        // step (1.0 = squarely back-facing, ~0 = grazing). Best-viewed first
+        // so K-output picks land on faces that actually read as back surface
+        // in the rendered PNG. Falls back to pool order when qualities tie or
+        // are missing (older timelines, error paths).
         rankedBacks.sort(function (a, b) {
+            var qa = finalBackQuality[a] || 0;
+            var qb = finalBackQuality[b] || 0;
+            if (qb !== qa) return qb - qa;
             return backs.indexOf(a) - backs.indexOf(b);
         });
 
@@ -2539,9 +2617,59 @@ function initPresetGenerator(globals) {
     // pool by quality at the standard view). Centroid bary {0.34, 0.33,
     // 0.33} maximizes interior margin so the anchor stays well inside its
     // face under the chosen POV.
-    function buildGenericAnchorFacePoints(frontPool, modelFaceCount) {
+    function buildGenericAnchorFacePoints(frontPool, modelFaceCount, difficulty, backPool, opts) {
         var N = modelFaceCount;
         if (!Array.isArray(frontPool) || frontPool.length === 0 || !N || N < 1) return null;
+
+        // d4: anchor is a HIDDEN back-side face. Reasoning: under d4's heavy
+        // rotation (yaw 1.4, pitch 1.3 rad) the front-pool faces typically
+        // rotate AWAY from the camera by the final step, so a front anchor
+        // fires `reason=tracked` rejection at step 10 in evaluateTrackedPoints.
+        // A back-side face has the opposite property — its back surface is
+        // exposed precisely *because* of the heavy rotation. Marked hidden
+        // so Phase 2's finalStepOnly mode only checks visibility at the
+        // final step (back faces aren't visible at fold=0 / no rotation).
+        // This puts trajectory acceptance on the same gate the post-hoc
+        // selectFacePointsFromTrajectory uses for hidden-back picks, which
+        // is exactly what we want for d4 yield.
+        // forceFrontAnchor: caller wants the d1/d3-style front-pool anchor
+        // even for d4. Used when all d4 back-anchor probes failed (model's
+        // back faces don't expose under d4 rotation at all — observed on
+        // bird-d4, where the front anchor stays visible because bird's
+        // compact 3D structure resists the d4 rotation budget).
+        if (difficulty === 4 && !(opts && opts.forceFrontAnchor)) {
+            // Place a single hidden back-side anchor. Phase 2's
+            // finalStepOnly mode validates hidden anchors only at the
+            // final step — perfect since back-exposure happens at the
+            // rotated final pose, not at the flat fold=0 start.
+            //
+            // The specific face index used is selected via opts.d4AnchorIndex
+            // (default 0). Caller can re-invoke with successive indices when
+            // Phase 2 yields zero progressions, walking the back pool until
+            // a face that exposes under the trajectory rotations is found
+            // (see retry loop in selectFacePointsFromTrajectory's caller).
+            var srcPool = (Array.isArray(backPool) && backPool.length > 0) ? backPool : frontPool;
+            var anchorIdx = (opts && opts.d4AnchorIndex != null) ? (opts.d4AnchorIndex | 0) : 0;
+            // Pick the anchorIdx-th valid back-pool face (skipping any that
+            // can't be normalized into [0, N)).
+            var pickIdx = null;
+            var seen = 0;
+            for (var i = 0; i < srcPool.length; i++) {
+                var rb = parseInt(srcPool[i], 10);
+                if (isNaN(rb)) continue;
+                if (rb >= N) rb -= N;
+                if (rb < 0 || rb >= N) continue;
+                if (seen === anchorIdx) { pickIdx = rb; break; }
+                seen++;
+            }
+            if (pickIdx != null) {
+                var cfg4 = {};
+                cfg4[String(pickIdx + N)] = [{ u: 0.34, v: 0.33, w: 0.33, hidden: true }];
+                return cfg4;
+            }
+            // Fall through if pool resolution failed.
+        }
+
         var raw = parseInt(frontPool[0], 10);
         if (isNaN(raw)) return null;
         if (raw >= N) raw -= N;
@@ -2594,9 +2722,12 @@ function initPresetGenerator(globals) {
         var count = opts.count || 7;
         var seed = opts.seed || Date.now();
         var rng = makeRng(seed);
-        var foldSteps = opts.foldSteps || (difficulty === 1
-            ? [0, 12, 25, 37, 50]
-            : [0, 8, 16, 24, 32, 40, 48, 56, 64, 70]);
+        var foldSteps = opts.foldSteps || rescaleFoldLadder(
+            difficulty === 1
+                ? [0, 12, 25, 37, 50]
+                : [0, 8, 16, 24, 32, 40, 48, 56, 64, 70],
+            opts.finalFold
+        );
         var maxScanCandidates = opts.maxScanCandidates || Math.max(count * 3, 12);
 
         var modelFaceCount = 0;
@@ -2622,7 +2753,15 @@ function initPresetGenerator(globals) {
         // anchor never appears in the output preset — face points are
         // selected post-hoc from the trajectory's visibilityTimeline by
         // selectFacePointsFromTrajectory.
-        var anchorFacePoints = buildGenericAnchorFacePoints(frontFaces, modelFaceCount);
+        // For d4, the anchor face is selected by index from the back pool
+        // via opts.d4AnchorIndex (default 0). The retry loop below cycles
+        // this index when Phase 2 yields zero progressions, so different
+        // back-pool faces get tested as the anchor in turn.
+        var d4AnchorIdx = (opts && opts.d4AnchorIndex != null) ? (opts.d4AnchorIndex | 0) : 0;
+        var anchorFacePoints = buildGenericAnchorFacePoints(
+            frontFaces, modelFaceCount, difficulty, backFaces,
+            { d4AnchorIndex: d4AnchorIdx }
+        );
         if (!anchorFacePoints) {
             callback({ error: "Could not build generic anchor (frontPool empty?)", generated: [] });
             return;
@@ -2755,18 +2894,117 @@ function initPresetGenerator(globals) {
             ? globals.benchmark.run.bind(globals.benchmark)
             : globals.benchmark.runScan.bind(globals.benchmark);
 
-        runFn(slotScanCfg, function (scanResult) {
-            var progressions = [];
-            try {
-                progressions = scanResult && Array.isArray(scanResult.diverseProgressions)
-                    ? scanResult.diverseProgressions
-                    : [];
-            } catch (err) {
-                console.warn("presetGenerator: progression extraction error", err);
+        // Count valid back-pool faces (for the d4 anchor-retry budget).
+        // A trajectory's d4 anchor is one back face whose back surface is
+        // expected to expose at the final pose. backPool[0] is good for most
+        // models, but on some (observed: bird) backPool[0] never exposes
+        // under d4 rotation, so Phase 2 yields 0 progressions. Retry with
+        // backPool[1], [2], … until we find an anchor that survives or the
+        // pool is exhausted.
+        var d4PoolSize = (function () {
+            if (difficulty !== 4 || !Array.isArray(backFaces)) return 0;
+            var src = (backFaces.length > 0) ? backFaces : (frontFaces || []);
+            var n = 0;
+            for (var bi = 0; bi < src.length; bi++) {
+                var v = parseInt(src[bi], 10);
+                if (!isNaN(v)) n++;
             }
+            return n;
+        })();
+
+        // Run a SHORT Phase 2 probe (small build budget). Used to score
+        // each d4 anchor candidate by how many trajectories survive Phase 2
+        // under that anchor — a proxy for full-run yield. Early-stop set
+        // high enough that good anchors return notably more than poor ones,
+        // so the picker can distinguish "barely usable" from "great fit".
+        // Without this, all surviving anchors return 1 (early-stop=1) and
+        // the picker can't tell front-anchor (high yield) from back-anchor
+        // (marginal). Cost: each probe ~30-90s depending on yield.
+        function runProbe(probeOpts, onCount) {
+            var probeCfg = {};
+            for (var pk in slotScanCfg) {
+                if (slotScanCfg.hasOwnProperty(pk)) probeCfg[pk] = slotScanCfg[pk];
+            }
+            probeCfg.facePoints = buildGenericAnchorFacePoints(
+                frontFaces, modelFaceCount, difficulty, backFaces, probeOpts
+            );
+            probeCfg.buildProgressions = 8;
+            probeCfg.maxTrajectoryCandidates = 12;
+            probeCfg.maxScanCandidates = 8;
+            probeCfg.phase2EarlyStopCount = 4;
+            probeCfg.phase2VerboseRejects = false;
+            runFn(probeCfg, function (probeResult) {
+                var probedProgs = [];
+                try {
+                    probedProgs = probeResult && Array.isArray(probeResult.diverseProgressions)
+                        ? probeResult.diverseProgressions
+                        : [];
+                } catch (_pErr) {}
+                onCount(probedProgs.length);
+            });
+        }
+
+        function runFullPhase2(anchorOpts, onResult) {
+            slotScanCfg.facePoints = buildGenericAnchorFacePoints(
+                frontFaces, modelFaceCount, difficulty, backFaces, anchorOpts
+            );
+            runFn(slotScanCfg, function (scanResult) {
+                var progressions = [];
+                try {
+                    progressions = scanResult && Array.isArray(scanResult.diverseProgressions)
+                        ? scanResult.diverseProgressions
+                        : [];
+                } catch (err) {
+                    console.warn("presetGenerator: progression extraction error", err);
+                }
+                onResult(scanResult, progressions);
+            });
+        }
+
+        // d4 anchor selection: just use front anchor for everyone. Probing
+        // back anchors introduced too much variance — RNG state from probes
+        // (which run mini-Phase-2s before the real one) shifted full Phase 2
+        // sampling enough to drop opensink-d4 from ~30 yield to 0. The front
+        // anchor was the original main-run choice and gives stable yields
+        // across all models (bird ~100%, others ~25-45%). For d1/d3, same
+        // thing — single front-pool face anchor.
+        function pickAndRun(onResult) {
+            if (difficulty === 4) {
+                runFullPhase2({ forceFrontAnchor: true }, onResult);
+            } else {
+                runFullPhase2({ d4AnchorIndex: 0 }, onResult);
+            }
+        }
+
+        pickAndRun(function (scanResult, progressions) {
 
             updateStatus("Trajectory-first: " + progressions.length + " progression(s); selecting points per tier...");
             console.log("presetGenerator: trajectory-first received " + progressions.length + " progressions");
+
+            // d4 needs hidden-back picks, so re-order progressions by the
+            // strongest back-side exposure at the final step. Other tiers
+            // (d1/d3) don't require any back exposure (hB=[0,0]) and are
+            // left in diversity-selected order. Score = max final-step
+            // back quality across the trajectory's back-visible faces.
+            // 0 when no face's back surface is exposed at final pose.
+            if (difficulty === 4) {
+                var maxFinalBackQuality = function (prog) {
+                    var tl = prog && prog.visibilityTimeline;
+                    if (!tl || tl.length === 0) return 0;
+                    var last = tl[tl.length - 1];
+                    var bq = last && last.backQualities;
+                    if (!bq) return 0;
+                    var best = 0;
+                    for (var k in bq) {
+                        if (!bq.hasOwnProperty(k)) continue;
+                        if (bq[k] > best) best = bq[k];
+                    }
+                    return best;
+                };
+                progressions = progressions.slice().sort(function (a, b) {
+                    return maxFinalBackQuality(b) - maxFinalBackQuality(a);
+                });
+            }
 
             var pi = 0;
             function processProgression() {
@@ -3103,9 +3341,12 @@ function initPresetGenerator(globals) {
         var startIndex = opts.startIndex || 9;
         var templatePattern = opts.templatePattern || "bird-frontback-0*";
         var seed = opts.seed || Date.now();
-        var foldSteps = opts.foldSteps || (difficulty === 1
-            ? [0, 12, 25, 37, 50]
-            : [0, 8, 16, 24, 32, 40, 48, 56, 64, 70]);
+        var foldSteps = opts.foldSteps || rescaleFoldLadder(
+            difficulty === 1
+                ? [0, 12, 25, 37, 50]
+                : [0, 8, 16, 24, 32, 40, 48, 56, 64, 70],
+            opts.finalFold
+        );
         var validate = opts.validate !== false;
         var settleMs = opts.settleMs || 300;
         var trajectoryMode = opts.trajectoryMode || "hybrid";

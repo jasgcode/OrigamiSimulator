@@ -549,6 +549,39 @@ function initFacePoints(globals) {
         return result;
     }
 
+    // Back-side analogue of getFaceViewQualities. Score is how directly the
+    // face's BACK surface points at the camera: 1.0 = squarely back-facing,
+    // ~0 = grazing or front-facing. Faces whose front normal is toward the
+    // camera (dot >= 0) score 0. No occlusion test here — pair with
+    // getBackSideVisibleFaceIds when occlusion-aware filtering is needed.
+    function getFaceBackQualities(faceIds) {
+        var faces = globals.model.getFaces();
+        var positions = globals.model.getPositionsArray();
+        var camera = globals.threeView && globals.threeView.camera;
+        if (!faces || !positions || !camera) return {};
+        updateModelMatrices();
+        var N = faces.length;
+        var result = {};
+        for (var i = 0; i < faceIds.length; i++) {
+            var id = faceIds[i];
+            if (id < 0 || id >= N) { result[id] = 0; continue; }
+            var normalLocal = getFaceNormal(id);
+            if (!normalLocal) { result[id] = 0; continue; }
+            var face = faces[id];
+            var centroidLocal = new THREE.Vector3(
+                (positions[face[0]*3]   + positions[face[1]*3]   + positions[face[2]*3])   / 3,
+                (positions[face[0]*3+1] + positions[face[1]*3+1] + positions[face[2]*3+1]) / 3,
+                (positions[face[0]*3+2] + positions[face[1]*3+2] + positions[face[2]*3+2]) / 3
+            );
+            var centroidWorld = centroidLocal.clone().applyMatrix4(_modelWorld);
+            var normalWorld = normalLocal.clone().transformDirection(_modelWorld);
+            var toCamera = camera.position.clone().sub(centroidWorld);
+            var dist = toCamera.length();
+            result[id] = dist > 0 ? Math.max(0, -toCamera.dot(normalWorld) / dist) : 0;
+        }
+        return result;
+    }
+
     return {
         getPoints: getPoints,
         addPoint: addPoint,
@@ -568,6 +601,7 @@ function initFacePoints(globals) {
         getVisibleFaceIds: getVisibleFaceIds,
         getBackSideVisibleFaceIds: getBackSideVisibleFaceIds,
         getFaceViewQualities: getFaceViewQualities,
+        getFaceBackQualities: getFaceBackQualities,
         isPointHidden: isPointHidden,
         getHiddenIndices: getHiddenIndices
     };

@@ -93,6 +93,7 @@ const INITIAL_VISIBLE_TRACKED_POINT_COUNT = parseInt(args["initial-visible-track
 const MIN_POINT_SEPARATION_PX = parseFloat(args["min-point-separation-px"]);
 const MIN_FACE_QUALITY = parseFloat(args["min-face-quality"]);
 const BUILD_PROGRESSIONS = parseInt(args["build-progressions"]);
+const FINAL_FOLD = parseFloat(args["final-fold"]);
 const POV_GRID_SIZE = parseInt(args["pov-grid-size"]);
 const SCAN_SETTLE_MS = parseInt(args["scan-settle-ms"]);
 const ENFORCE_SEPARATION_ALL_STEPS = !!args["enforce-separation-all-steps"];
@@ -179,6 +180,7 @@ function buildEvalOptions(attemptIndex) {
         minPointSeparationPx: isNaN(MIN_POINT_SEPARATION_PX) ? 70 : MIN_POINT_SEPARATION_PX,
         minFaceQuality: isNaN(MIN_FACE_QUALITY) ? 0.6 : MIN_FACE_QUALITY,
         buildProgressions: isNaN(BUILD_PROGRESSIONS) || BUILD_PROGRESSIONS <= 0 ? undefined : BUILD_PROGRESSIONS,
+        finalFold: isNaN(FINAL_FOLD) || FINAL_FOLD <= 0 ? undefined : FINAL_FOLD,
         povGridSize: isNaN(POV_GRID_SIZE) || POV_GRID_SIZE <= 0 ? undefined : POV_GRID_SIZE,
         scanSettleMs: isNaN(SCAN_SETTLE_MS) ? 300 : SCAN_SETTLE_MS,
         enforceSeparationAllSteps: ENFORCE_SEPARATION_ALL_STEPS,
