@@ -1374,7 +1374,10 @@ function initBenchmark(globals) {
             type: "perception",
             question: question,
             images: images,
-            gt_answer: initialPoints,
+            // gt_answer is the JSON-encoded string of the letter array, e.g.
+            // "[\"A\", \"C\"]" — matches the test harness's expected format
+            // (string containing a JSON array, not the bare array).
+            gt_answer: JSON.stringify(initialPoints),
             meta_info: {
                 task_name: "origami_static",
                 config: "metadata/" + objectName + "_metadata.json",
@@ -1489,6 +1492,9 @@ function initBenchmark(globals) {
         var s = mode == null ? "strictallsteps" : String(mode).trim().toLowerCase();
         if (s === "finalsteponly" || s === "finalstep" || s === "final" || s === "final-only" || s === "final_step_only") {
             return "finalStepOnly";
+        }
+        if (s === "finalstepanyvisible" || s === "anyvisible" || s === "any" || s === "final-any" || s === "final_step_any_visible") {
+            return "finalStepAnyVisible";
         }
         if (s === "strict" || s === "all" || s === "allsteps" || s === "strict-all-steps" || s === "strictallsteps") {
             return "strictAllSteps";
@@ -2113,6 +2119,38 @@ function initBenchmark(globals) {
             visibleScreens.push(screen);
         }
 
+        // finalStepAnyVisible: at the final step, succeed if AT LEAST ONE
+        // required point is visible (not all). Used by d4 with multiple
+        // hidden back-side anchors — different back faces expose under
+        // different rotation patterns, so requiring all is too strict.
+        // Pre-final steps under this mode: same as finalStepOnly (skip
+        // visibility check; hidden points are deferred to final).
+        if (mode === "finalStepAnyVisible") {
+            if (isFinalStep && required.length > 0 && visibleScreens.length === 0) {
+                return {
+                    ok: false,
+                    requiredCount: required.length,
+                    visibleCount: 0,
+                    missingCount: missingCount,
+                    minSep: 0,
+                    mode: mode,
+                    reason: "visibility"
+                };
+            }
+            // Skip per-step strict gate AND skip separation check — with
+            // any-of semantics the visible subset is candidates, not a
+            // committed point set, so inter-anchor distance is moot.
+            return {
+                ok: true,
+                requiredCount: required.length,
+                visibleCount: visibleScreens.length,
+                missingCount: missingCount,
+                minSep: Infinity,
+                mode: mode,
+                reason: null
+            };
+        }
+
         if (missingCount > 0 && (mode === "strictAllSteps" || isFinalStep)) {
             return {
                 ok: false,
@@ -2339,9 +2377,13 @@ function initBenchmark(globals) {
             // front-facing faces and can't tell whether a back surface is
             // exposed at the final step.
             var backSideVisibleFaceIds = [];
+            var backQualities = {};
             try {
                 if (globals.facePoints && globals.facePoints.getBackSideVisibleFaceIds) {
                     backSideVisibleFaceIds = globals.facePoints.getBackSideVisibleFaceIds();
+                }
+                if (globals.facePoints && globals.facePoints.getFaceBackQualities && backSideVisibleFaceIds.length > 0) {
+                    backQualities = globals.facePoints.getFaceBackQualities(backSideVisibleFaceIds);
                 }
             } catch (_e) {}
             currentVisibilityTimeline.push({
@@ -2351,7 +2393,8 @@ function initBenchmark(globals) {
                 rotation: stepRot ? [stepRot.x, stepRot.y, stepRot.z] : null,
                 visibleFaceIds: (visibleFaceIds || []).slice(),
                 qualities: qualityMap ? Object.assign({}, qualityMap) : {},
-                backSideVisibleFaceIds: backSideVisibleFaceIds
+                backSideVisibleFaceIds: backSideVisibleFaceIds,
+                backQualities: backQualities
             });
         }
 
@@ -2635,7 +2678,7 @@ function initBenchmark(globals) {
                                 ? globals.facePoints.getVisibleFaceIds() : [];
                             var reFaceQualities = globals.facePoints && globals.facePoints.getFaceViewQualities
                                 ? globals.facePoints.getFaceViewQualities(reVisibleFaceIds) : {};
-                            if (step.fold > 0 && trackingEvalMode !== "finalStepOnly") {
+                            if (step.fold > 0 && trackingEvalMode !== "finalStepOnly" && trackingEvalMode !== "finalStepAnyVisible") {
                                 for (var rti = 0; rti < targetFaces.length; rti++) {
                                     var rq = reFaceQualities[targetFaces[rti]] || 0;
                                     if (rq < minQuality) {
@@ -2690,7 +2733,8 @@ function initBenchmark(globals) {
                 // that is fine. For strictAllSteps, enforce quality at
                 // all non-zero steps (except the final, handled above).
                 var qualityGateActive = (step.fold > 0) &&
-                    (trackingEvalMode !== "finalStepOnly");
+                    (trackingEvalMode !== "finalStepOnly") &&
+                    (trackingEvalMode !== "finalStepAnyVisible");
                 if (qualityGateActive) {
                     for (var ti = 0; ti < targetFaces.length; ti++) {
                         var q = faceQualities[targetFaces[ti]] || 0;

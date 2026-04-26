@@ -34,7 +34,7 @@ const { values: args } = parseArgs({
     options: {
         "out-dir": { type: "string", default: "new_dataset/matrix-gen" },
         count: { type: "string", default: "2" },
-        seed: { type: "string", default: "42" },
+        seed: { type: "string", default: "12345" },
         "server-url": { type: "string", default: "http://localhost:3000" },
         "build-progressions": { type: "string", default: "24" },
         "max-trajectory-candidates": { type: "string", default: "40" },
@@ -81,16 +81,18 @@ const LOG_DIR = String(args["log-dir"] || "");
 const PREWARM = !args["no-prewarm"];
 
 const ALL_MODELS = [
-    // Models supporting d1/d3/d4 (d2 ablated). Boat is back in the pool —
-    // earlier failures were under tighter d4 rotation bounds; with
-    // bounds {yaw: 1.4, pitch: 1.3, roll: 0.4} + K=10 + bary grid, boat
-    // is expected to expose enough back faces. Still dropped: simplevertex
-    // (too few back faces) and frog (too dense, slow per slot).
+    // 4-model matrix for uniform-1000 dataset. Boat/square/mapfold all
+    // dropped after d4 yield issues (boat: 2 back faces; square: 8-face
+    // collapse at fold=70/65; mapfold: flat sheet, anchor drops out at
+    // any d3/d4 rotation). Still dropped: simplevertex, frog (too dense).
+    //
+    // Per-(model,difficulty) count override via `counts` map. Used for
+    // pinwheel-d4 where smoke showed ~60% yield — oversample to land
+    // the uniform target.
     { key: "bird", path: "/Bases/birdBase.svg" },
     { key: "waterbomb", path: "/Bases/waterbombBase.svg" },
-    { key: "pinwheel", path: "/Bases/pinwheelBase.svg" },
+    { key: "pinwheel", path: "/Bases/pinwheelBase.svg", counts: { 4: 140 } },
     { key: "opensink", path: "/Bases/openSinkBase.svg" },
-    { key: "boat", path: "/Bases/boatBase.svg" },
 ];
 
 const MODELS = MODELS_FILTER
@@ -149,10 +151,15 @@ async function pipeWithPrefix(stream, tag, sink, fileHandle) {
 
 async function runSlot(model, difficulty, shard = 0, totalShards = 1) {
     const isSharded = totalShards > 1;
-    // Per-shard count: distribute COUNT across shards, first shards absorb
-    // the remainder (so shards at most differ by 1 preset).
-    const basePerShard = Math.floor(COUNT / totalShards);
-    const remainder = COUNT - basePerShard * totalShards;
+    // Per-(model,difficulty) count override via model.counts map. Falls back
+    // to the global --count for cells without an override.
+    const slotCount = (model.counts && model.counts[difficulty] != null)
+        ? model.counts[difficulty]
+        : COUNT;
+    // Per-shard count: distribute slotCount across shards, first shards
+    // absorb the remainder (so shards at most differ by 1 preset).
+    const basePerShard = Math.floor(slotCount / totalShards);
+    const remainder = slotCount - basePerShard * totalShards;
     const countForShard = shard < remainder ? basePerShard + 1 : basePerShard;
     if (countForShard <= 0) return; // nothing to do
     // Start-index range so preset names are contiguous across shards.
@@ -188,6 +195,9 @@ async function runSlot(model, difficulty, shard = 0, totalShards = 1) {
         "--max-scan-candidates", MAX_SCAN,
         "--server-url", SERVER_URL,
     ];
+    if (model.finalFold != null) {
+        procArgs.push("--final-fold", String(model.finalFold));
+    }
 
     const slotStarted = Date.now();
     console.log(`[matrix] start ${tag} (elapsed ${fmtElapsed(Date.now() - startedAt)})`);
