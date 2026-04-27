@@ -1762,14 +1762,21 @@ function initBenchmark(globals) {
     // and re-evaluated. Bump if you change: gate logic in evaluateTrajectoriesLive,
     // recordStepVisibility output shape, faceStats accumulation, or anything
     // else that affects whether a (traj, profile) accepts/rejects.
-    // v3: dropped profileCount from cache key. Profile templates are
-    // appended deterministically (hardcoded[0..23] + sampled by seeded
-    // mulberry32), so profile_idx 0..N-1 is identical regardless of the
-    // run's requestedCount. This lets profile-count escalation stages
-    // (d4=30 → 60 → 100) share one cache file: lower indices replay,
-    // higher indices add fresh entries. Single source of truth per
-    // (model, difficulty, seed, gridSize).
-    var PHASE2_CACHE_VERSION = 3;
+    // v4: cache key now includes minFaceQuality (and any other field
+    // that affects scan POV filtering) because traj_idx is positional
+    // within the scan's trajectory list — different scan filters →
+    // different traj at the same index → cache poisoning.
+    //
+    // Symptom: Pass 1 with minFaceQuality=0.6 cached traj_idx=0 as
+    // accepted with visibility_timeline T1 (for POV P1). Pass 2 with
+    // minFaceQuality=0.05 has a different scan (more lenient → more
+    // POVs) where traj_idx=0 is POV P2. Eval cache returns Pass 1's
+    // (accepted, T1) → preset built with P2's steps but P1's timeline
+    // → K-expansion picks faces visible at P1, but preset renders at
+    // P2 → 100% validation failure.
+    //
+    // v3 fixed grid-size collisions; v4 fixes scan-filter collisions.
+    var PHASE2_CACHE_VERSION = 4;
 
     // Load Phase 2 evaluation cache. Reuses the /api/scan-cache server
     // endpoint with key prefix "eval_" to avoid colliding with the existing
@@ -2430,15 +2437,19 @@ function initBenchmark(globals) {
                 : "unknown";
             var seedPart = (cfg && cfg.rngSeed != null) ? String(cfg.rngSeed | 0) : "0";
             var diffPart = (cfg && cfg.difficulty != null) ? String(parseInt(cfg.difficulty, 10) | 0) : "x";
-            // (traj_idx, profile_idx) is positional; the actual trajectory
-            // at index N depends on povGridSize, so it must be in the key
-            // or different grid sizes corrupt each other's caches.
-            // profileCount is NOT in the key (v3): profile templates are
-            // appended deterministically, so profile_idx 0..N is the same
-            // regardless of requestedCount. Dropping it lets escalation
-            // stages share one cache file across rotation-count bumps.
+            // (traj_idx, profile_idx) is positional within the scan's
+            // trajectory list. povGridSize and minFaceQuality both affect
+            // scan POV filtering → must be in key or cross-filter cache
+            // hits return wrong (POV-mismatched) timelines. profileCount
+            // is NOT in key (v3): profile templates are appended
+            // deterministically, so profile_idx replay is safe.
             var gridPart = (cfg && cfg.povGridSize != null) ? String(cfg.povGridSize | 0) : "x";
-            return "eval_" + modelId + "_d" + diffPart + "_s" + seedPart + "_g" + gridPart;
+            // Encode minFaceQuality as a 3-digit fraction so it survives
+            // filename safety (no dots).
+            var mfqRaw = (cfg && cfg.minFaceQuality != null) ? cfg.minFaceQuality : 0.05;
+            var mfqPart = String(Math.round(mfqRaw * 1000) | 0);
+            return "eval_" + modelId + "_d" + diffPart + "_s" + seedPart
+                + "_g" + gridPart + "_q" + mfqPart;
         })();
         var evalCache = {};                     // populated post-load
         var evalCacheReady = false;             // gate: evaluateNext waits for load

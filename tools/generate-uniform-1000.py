@@ -100,24 +100,28 @@ PROFILE_CEILING = {"d1": 200, "d3": 6, "d4": 200}
 # d3 profile count is NEVER bumped (sampled random profiles fail
 # strictAllSteps validation, regressing yield).
 STAGES = [
+    # min_face_q=0.6 matches `generate-matrix.js`'s effective default
+    # (CLI default for generate-presets.js is 0.6) so Stage A and B
+    # share the eval cache file with Pass 1. Stage C onward changes
+    # min_face_q → cache key changes → cold restart for those cells.
     {"name": "profile-bump",
-     "min_sep_px": 70, "min_face_q": 0.05},
+     "min_sep_px": 70, "min_face_q": 0.6},
     {"name": "loosen-separation",
-     "min_sep_px": 50, "min_face_q": 0.05},
+     "min_sep_px": 50, "min_face_q": 0.6},
     {"name": "loosen-face-quality",
-     "min_sep_px": 50, "min_face_q": 0.02},
+     "min_sep_px": 50, "min_face_q": 0.05},
     {"name": "max-fallback",
      "min_sep_px": 40, "min_face_q": 0.02},
 ]
 
 
 def adaptive_profile_mult(max_deficit):
-    """Bigger deficit → more aggressive profile bump."""
+    """Bigger deficit → more aggressive profile bump. Even small
+    deficits get a 2× bump because that's what continuation IS — running
+    Pass 1's setup with the same profiles would be a no-op."""
     if max_deficit > 30:
         return 4
-    if max_deficit > 10:
-        return 2
-    return 1  # minor deficit; gate loosening alone may suffice
+    return 2
 
 
 def stage_profiles(stage_idx, max_deficit):
@@ -195,21 +199,40 @@ def run_matrix_pass1():
 
 def run_one_shard(cell, shard, profile_count, min_sep_px, min_face_q, pass_idx):
     """Invoke generate-presets.js for a single (cell, shard) combination.
-    Returns (cell_name, shard_or_None, returncode)."""
+    Returns (cell_name, shard_or_None, returncode).
+
+    Continuation passes (pass_idx >= 2) write to a SUFFIXED filename
+    (`<cell>-s<shard>-p<N>.json`) and use an offset start_index so the
+    preset names don't collide with Pass 1's (`<cell>-s<shard>.json`,
+    names 1..count). The assembler globs all of them and merges by
+    name — no-overwrite means each pass strictly adds new presets."""
     cell_name, model_path, difficulty, sharded, count = cell
     out_dir = ROOT / "new_dataset/uniform-1000"
     log_dir = ROOT / "new_dataset/uniform-1000-logs"
+    # Pass 1 (matrix) starts at 1; each subsequent pass offsets by
+    # PER_CELL_TOTAL to leave room for Pass 1's full range (which can
+    # be up to PER_CELL_TOTAL per shard for cells without overrides,
+    # or 35×4=140 for pinwheel-d4 due to model.counts override).
+    pass_offset = PER_CELL_TOTAL * (pass_idx - 1)
     if sharded:
-        start = shard * count + 1
+        start = pass_offset + shard * count + 1
         seed = BASE_SEED + shard * 1009
-        out_path = out_dir / f"{cell_name}-s{shard}.json"
-        log_path = log_dir / f"{cell_name}-s{shard}-p{pass_idx}.log"
+        if pass_idx == 1:
+            out_path = out_dir / f"{cell_name}-s{shard}.json"
+            log_path = log_dir / f"{cell_name}-s{shard}.log"
+        else:
+            out_path = out_dir / f"{cell_name}-s{shard}-p{pass_idx}.json"
+            log_path = log_dir / f"{cell_name}-s{shard}-p{pass_idx}.log"
         shard_label = shard
     else:
-        start = 1
+        start = pass_offset + 1
         seed = BASE_SEED
-        out_path = out_dir / f"{cell_name}.json"
-        log_path = log_dir / f"{cell_name}-p{pass_idx}.log"
+        if pass_idx == 1:
+            out_path = out_dir / f"{cell_name}.json"
+            log_path = log_dir / f"{cell_name}.log"
+        else:
+            out_path = out_dir / f"{cell_name}-p{pass_idx}.json"
+            log_path = log_dir / f"{cell_name}-p{pass_idx}.log"
         shard_label = None
     args = [
         "bun", "tools/generate-presets.js",

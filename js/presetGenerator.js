@@ -3707,6 +3707,21 @@ function initPresetGenerator(globals) {
                     }
 
                     if (passing.length === 0) {
+                        // Diagnostic: dump first 3 preset failures to surface
+                        // what specific gate is rejecting everything (visibility,
+                        // separation, etc.).
+                        try {
+                            for (var di = 0; di < Math.min(3, results.length); di++) {
+                                var r = results[di];
+                                var pIdx = r.presetIndex != null ? r.presetIndex : di;
+                                var pre = scanCandidates[pIdx] || {};
+                                var faces = pre.facePoints ? Object.keys(pre.facePoints) : [];
+                                console.log("presetGenerator: validation FAIL diag #" + di
+                                    + " — faces=" + JSON.stringify(faces)
+                                    + " stepsChecked=" + r.stepsChecked
+                                    + " failures=" + JSON.stringify((r.failures || []).slice(0, 3)));
+                            }
+                        } catch (e) { /* noop */ }
                         if (strictScanMode) {
                             callback({ error: "No scan progression candidates passed validation", generated: [] });
                             return;
