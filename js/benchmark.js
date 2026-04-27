@@ -1756,6 +1756,70 @@ function initBenchmark(globals) {
         });
     }
 
+    // Bumped whenever Phase 2 evaluation semantics change. Acts as a
+    // manual code-hash gate for the per-trajectory eval cache below — when
+    // this constant changes, cached entries are treated as cold misses
+    // and re-evaluated. Bump if you change: gate logic in evaluateTrajectoriesLive,
+    // recordStepVisibility output shape, faceStats accumulation, or anything
+    // else that affects whether a (traj, profile) accepts/rejects.
+    // v3: dropped profileCount from cache key. Profile templates are
+    // appended deterministically (hardcoded[0..23] + sampled by seeded
+    // mulberry32), so profile_idx 0..N-1 is identical regardless of the
+    // run's requestedCount. This lets profile-count escalation stages
+    // (d4=30 → 60 → 100) share one cache file: lower indices replay,
+    // higher indices add fresh entries. Single source of truth per
+    // (model, difficulty, seed, gridSize).
+    var PHASE2_CACHE_VERSION = 3;
+
+    // Load Phase 2 evaluation cache. Reuses the /api/scan-cache server
+    // endpoint with key prefix "eval_" to avoid colliding with the existing
+    // POV-scan cache. Returns {} on miss / version mismatch / network error.
+    function loadEvalCache(cacheKey, callback) {
+        var done = false;
+        var timer = setTimeout(function () {
+            if (done) return;
+            done = true;
+            callback({});
+        }, 2500);
+
+        fetch("/api/scan-cache?key=" + encodeURIComponent(cacheKey), { method: "GET" })
+            .then(function (res) {
+                if (!res.ok) throw new Error("cache miss");
+                return res.json();
+            })
+            .then(function (data) {
+                if (done) return;
+                done = true;
+                clearTimeout(timer);
+                if (!data || data.version !== PHASE2_CACHE_VERSION) {
+                    callback({});
+                    return;
+                }
+                callback(data.evaluations || {});
+            })
+            .catch(function () {
+                if (done) return;
+                done = true;
+                clearTimeout(timer);
+                callback({});
+            });
+    }
+
+    function saveEvalCache(cacheKey, evaluations, meta) {
+        var payload = Object.assign({
+            version: PHASE2_CACHE_VERSION,
+            saved_at: new Date().toISOString(),
+            evaluations: evaluations
+        }, meta || {});
+        fetch("/api/scan-cache?key=" + encodeURIComponent(cacheKey), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        }).catch(function () {
+            console.warn("benchmark: could not save eval cache " + cacheKey);
+        });
+    }
+
     function buildAutoRotationProfiles(templateSteps, cfg) {
         var stepCount = templateSteps ? templateSteps.length : 0;
         if (stepCount === 0) return [{ name: "none", rotations: [] }];
@@ -1769,6 +1833,46 @@ function initBenchmark(globals) {
             var i1 = Math.min(points.length - 1, i0 + 1);
             var frac = pos - i0;
             return points[i0] + (points[i1] - points[i0]) * frac;
+        }
+
+        // RNG-sampled rotation profiles. Each tier branch below has a small
+        // set of hand-tuned templates; we append additional templates whose
+        // yaw/pitch/roll multipliers are sampled uniformly in [-1.2, 1.2].
+        // Multiplier=1.0 corresponds to the tier's bound (e.g. d4 yaw=1.4
+        // rad), so [-1.2, 1.2] matches the "strong" magnitude already used
+        // in hardcoded templates. The PRNG is seeded from cfg.rngSeed (the
+        // per-shard seed plumbed by presetGenerator's slotScanCfg). Inline
+        // mulberry32 keeps benchmark.js self-contained without importing
+        // makeRng from presetGenerator.js.
+        function mulberry32(seed) {
+            var s = seed >>> 0;
+            return function () {
+                s = (s + 0x6D2B79F5) >>> 0;
+                var t = s;
+                t = Math.imul(t ^ (t >>> 15), t | 1);
+                t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+                return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+            };
+        }
+        var profileRngSeed = (cfg && cfg.rngSeed != null)
+            ? (parseInt(cfg.rngSeed, 10) | 0)
+            : (((parseInt(cfg && cfg.difficulty, 10) || 0) * 0x9E3779B1) | 0);
+        var profileRngNext = mulberry32(profileRngSeed);
+        function randMultiplier() { return profileRngNext() * 2.4 - 1.2; }
+        function pad2(n) { return (n < 10) ? ("0" + n) : String(n); }
+        // Append sampled templates to `templates` until it has `target`
+        // entries. Names are stable: <prefix>-rand-NN where NN is the
+        // post-append index (so re-runs with same seed produce identical
+        // sequence even if hardcoded count changes).
+        function appendSampledTemplates(templates, prefix, target) {
+            while (templates.length < target) {
+                templates.push({
+                    name: prefix + "-rand-" + pad2(templates.length),
+                    yaw: randMultiplier(),
+                    pitch: randMultiplier(),
+                    roll: randMultiplier()
+                });
+            }
         }
 
         if (cfg && Array.isArray(cfg.rotationProfiles) && cfg.rotationProfiles.length > 0) {
@@ -1827,7 +1931,9 @@ function initBenchmark(globals) {
                 { name: "d1-static-yp-pos",  yaw:  0.7,  pitch:  0.7,  roll:  0.5 },
                 { name: "d1-static-yp-neg",  yaw: -0.7,  pitch:  0.7,  roll: -0.5 }
             ];
-            var requestedD1 = (cfg && cfg.rotationProfileCount != null) ? cfg.rotationProfileCount : 6;
+            var requestedD1 = (cfg && cfg.rotationProfileCount != null) ? cfg.rotationProfileCount : 30;
+            // Append RNG-sampled templates to reach requestedD1 entries.
+            appendSampledTemplates(d1Templates, "d1-static", requestedD1);
             var d1Count = Math.max(1, Math.min(requestedD1, d1Templates.length));
             var d1Profiles = [];
             for (var d1ti = 0; d1ti < d1Count; d1ti++) {
@@ -1866,7 +1972,8 @@ function initBenchmark(globals) {
                 { name: "d2-cw-pitch-neg",  yaw:  1.05, pitch: -0.60, roll:  0.82 },
                 { name: "d2-ccw-pitch-neg", yaw: -1.05, pitch:  0.60, roll: -0.82 }
             ];
-            var requestedD2 = (cfg && cfg.rotationProfileCount != null) ? cfg.rotationProfileCount : 6;
+            var requestedD2 = (cfg && cfg.rotationProfileCount != null) ? cfg.rotationProfileCount : 30;
+            appendSampledTemplates(d2Templates, "d2", requestedD2);
             var d2Count = Math.max(1, Math.min(requestedD2, d2Templates.length));
             var d2Profiles = [];
             for (var d2t = 0; d2t < d2Count; d2t++) {
@@ -1906,7 +2013,8 @@ function initBenchmark(globals) {
                 { name: "d3-ccw-soft",   yaw: -0.72, pitch: 0.45, roll: -0.35 }
             ];
 
-            var requestedD3 = cfg && cfg.rotationProfileCount != null ? cfg.rotationProfileCount : 6;
+            var requestedD3 = cfg && cfg.rotationProfileCount != null ? cfg.rotationProfileCount : 30;
+            appendSampledTemplates(d3Templates, "d3", requestedD3);
             var d3Count = Math.max(1, Math.min(requestedD3, d3Templates.length));
             var d3Profiles = [];
             for (var dti = 0; dti < d3Count; dti++) {
@@ -1940,17 +2048,45 @@ function initBenchmark(globals) {
             var birdPitchEnv = [0.00, 0.10, 0.22, 0.34, 0.46, 0.58, 0.70, 0.82, 0.92, 1.00];
             var birdRollEnv = [0.00, 0.04, 0.10, 0.18, 0.28, 0.40, 0.54, 0.70, 0.86, 1.00];
 
-            // d4: moderate two-sided motion.
+            // d4: 6 yaw-dominant bird-style templates + 8 axis-diverse
+            // exposition templates (pitch-dominant, roll-dominant, yaw-only).
+            // The exposition templates were originally only used by the
+            // general (non-bird) d4 path; routing them here too gives Phase 2
+            // the rotation diversity it needs to expose back faces on
+            // models whose back-pool sits on pitch/roll axes (pinwheel,
+            // opensink, waterbomb) — yaw alone misses those.
             var birdTemplates = [
                 { name: "bird-d4-cw",            yaw:  1.00, pitch:  1.00, roll:  0.95 },
                 { name: "bird-d4-ccw",           yaw: -1.00, pitch: -1.00, roll: -0.95 },
                 { name: "bird-d4-cw-strong",     yaw:  1.12, pitch:  1.00, roll:  1.00 },
                 { name: "bird-d4-ccw-strong",    yaw: -1.12, pitch: -1.00, roll: -1.00 },
                 { name: "bird-d4-cw-pitch-neg",  yaw:  1.05, pitch: -0.60, roll:  0.82 },
-                { name: "bird-d4-ccw-pitch-neg", yaw: -1.05, pitch:  0.60, roll: -0.82 }
+                { name: "bird-d4-ccw-pitch-neg", yaw: -1.05, pitch:  0.60, roll: -0.82 },
+                // Pitch-dominant — paper tips fwd; reveals back faces under
+                // the leading edge (POV from above).
+                { name: "d4-pitch-pos",          yaw:  0.3, pitch:  1.2,  roll:  0.0 },
+                // Pitch-negative — paper tips back; reveals back faces
+                // under the trailing edge.
+                { name: "d4-pitch-neg",          yaw:  0.3, pitch: -1.2,  roll:  0.0 },
+                // Pitch-neg with opposite yaw — sweeps more of the back
+                // hemisphere.
+                { name: "d4-pitch-neg-ccw",      yaw: -0.3, pitch: -1.2,  roll:  0.0 },
+                // Roll-dominant — in-plane rotation; useful when back
+                // faces are along a diagonal axis.
+                { name: "d4-roll-pos",           yaw:  0.3, pitch:  0.3,  roll:  1.2 },
+                // Strong yaw-positive — exposes back faces on +x side.
+                { name: "d4-yaw-pos-strong",    yaw:  1.0, pitch:  0.5,  roll:  0.0 },
+                // Strong yaw-negative — back faces on -x side.
+                { name: "d4-yaw-neg-strong",    yaw: -1.0, pitch:  0.5,  roll:  0.0 },
+                // Roll-negative — opposite in-plane.
+                { name: "d4-roll-neg",          yaw:  0.3, pitch:  0.3,  roll: -1.2 },
+                // Pitch-pos with opposite yaw — sweeps front hemisphere's
+                // opposite side.
+                { name: "d4-pitch-pos-ccw",     yaw: -0.3, pitch:  1.2,  roll:  0.0 }
             ];
 
-            var requestedBird = cfg && cfg.rotationProfileCount != null ? cfg.rotationProfileCount : 6;
+            var requestedBird = cfg && cfg.rotationProfileCount != null ? cfg.rotationProfileCount : 30;
+            appendSampledTemplates(birdTemplates, "bird-d4", requestedBird);
             var birdCount = Math.max(1, Math.min(requestedBird, birdTemplates.length));
             var birdProfiles = [];
 
@@ -2018,13 +2154,13 @@ function initBenchmark(globals) {
             { name: "pitch-pos-ccw",   yaw: -0.3, pitch:  1.2, roll:  0.0 }
         ] : [];
         var templates = baseTemplates.concat(expositionTemplates);
-        // Default profile count: 6 (backwards compatible). When
-        // expose-backside extras are present, bump the default to
-        // cover them — the 4 exposition templates are the primary
-        // reason this fix exists. User override via rotationProfileCount
-        // still takes precedence.
-        var defaultCount = exposeBackside ? Math.min(templates.length, 14) : 6;
+        // Default profile count: 30 (with sampled augmentation). User
+        // override via rotationProfileCount still takes precedence. The
+        // hardcoded base/exposition templates remain at the head of the
+        // array; sampled templates are appended to fill out to `requested`.
+        var defaultCount = 30;
         var requested = cfg && cfg.rotationProfileCount != null ? cfg.rotationProfileCount : defaultCount;
+        appendSampledTemplates(templates, exposeBackside ? "d4" : "d3-gen", requested);
         var count = Math.max(1, Math.min(requested, templates.length));
         var profiles = [];
         for (var ti = 0; ti < count; ti++) {
@@ -2228,6 +2364,15 @@ function initBenchmark(globals) {
         // beginning.
         var enforceInitialTrackedVisible = !(cfg && cfg.enforceInitialTrackedVisible === false);
         var trackingEvalMode = normalizeTrackingEvalMode(cfg && cfg.trackingEvalMode);
+        // d4 back-exposure gate: when set, Phase 2 rejects trajectories whose
+        // final step does NOT expose at least N back-side faces. Combines with
+        // the existing front-anchor visibility gate so accepted trajectories
+        // satisfy BOTH (front trackability + back-reveal contract). Without
+        // this, lifting earlyStopCount accumulates "front-visible-but-no-back"
+        // trajectories that fail downstream selectFacePointsFromTrajectory.
+        var requireFinalBackExposure = (cfg && cfg.requireFinalBackExposure != null)
+            ? parseInt(cfg.requireFinalBackExposure, 10) | 0
+            : 0;
         // Verbose per-reject logs (reason=quality|tracked|primaryTracked|initialTracked|motion).
         // Default ON unless cfg.phase2VerboseRejects === false (quiet CI / prod runs).
         var phase2VerboseRejects = !(cfg && cfg.phase2VerboseRejects === false);
@@ -2273,6 +2418,51 @@ function initBenchmark(globals) {
             ? (cfg.phase2EarlyStopCount | 0)
             : Math.min(Math.max(3, maxCount | 0), 5);
         var rotationProfiles = buildAutoRotationProfiles(candidates[0] || [], cfg || {});
+
+        // ── Phase 2 evaluation cache ───────────────────────────────────
+        // Per-(traj_idx, profile_idx) memo. On a continuation pass with a
+        // larger trajectory budget, cache hits replay accept/reject results
+        // without running the simulator. Cache key includes seed + difficulty
+        // + model so different seeds / tiers don't collide.
+        var evalCacheKey = (function () {
+            var modelId = (cfg && cfg.model)
+                ? String(cfg.model).replace(/^\/+/, "").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 60)
+                : "unknown";
+            var seedPart = (cfg && cfg.rngSeed != null) ? String(cfg.rngSeed | 0) : "0";
+            var diffPart = (cfg && cfg.difficulty != null) ? String(parseInt(cfg.difficulty, 10) | 0) : "x";
+            // (traj_idx, profile_idx) is positional; the actual trajectory
+            // at index N depends on povGridSize, so it must be in the key
+            // or different grid sizes corrupt each other's caches.
+            // profileCount is NOT in the key (v3): profile templates are
+            // appended deterministically, so profile_idx 0..N is the same
+            // regardless of requestedCount. Dropping it lets escalation
+            // stages share one cache file across rotation-count bumps.
+            var gridPart = (cfg && cfg.povGridSize != null) ? String(cfg.povGridSize | 0) : "x";
+            return "eval_" + modelId + "_d" + diffPart + "_s" + seedPart + "_g" + gridPart;
+        })();
+        var evalCache = {};                     // populated post-load
+        var evalCacheReady = false;             // gate: evaluateNext waits for load
+        var evalCacheDirty = {};                // accumulated this run; flushed at end
+        function cacheLookup(trajIdx, profileIdx) {
+            if (!evalCacheReady) return null;
+            var k = trajIdx + "_" + profileIdx;
+            return evalCache[k] || null;
+        }
+        function cacheStore(trajIdx, profileIdx, entry) {
+            var k = trajIdx + "_" + profileIdx;
+            evalCache[k] = entry;
+            evalCacheDirty[k] = entry;
+        }
+        function flushEvalCache() {
+            if (Object.keys(evalCacheDirty).length === 0) return;
+            // Merge current evalCache (includes prior + new entries) and save.
+            saveEvalCache(evalCacheKey, evalCache, {
+                model: cfg && cfg.model,
+                difficulty: cfg && cfg.difficulty,
+                seed: cfg && cfg.rngSeed,
+                rotation_profile_count: cfg && cfg.rotationProfileCount
+            });
+        }
         var candidateCount = candidates.length;
         var profileCount = rotationProfiles.length;
         var totalProfiles = Math.max(1, candidateCount * profileCount);
@@ -2406,6 +2596,20 @@ function initBenchmark(globals) {
             if (reason === "primaryTracked") evaluationStats.rejectedByPrimaryTrackedPoints++;
             if (reason === "initialTracked") evaluationStats.rejectedByInitialTrackedPoints++;
             if (reason === "motion") evaluationStats.rejectedByMotionThresholds++;
+            // CACHE: store rejection result. The motion-reject path in the
+            // accept-block also calls skipCurrentTrajectoryProfile() (no
+            // reason); we already stored the rejection there, so guard
+            // against double-store by checking if already cached.
+            if (reason && currentTraj < candidates.length) {
+                var existing = (evalCache[currentTraj + "_" + currentProfile] != null);
+                if (!existing) {
+                    cacheStore(currentTraj, currentProfile, {
+                        accepted: false,
+                        reject_reason: reason,
+                        reject_step: currentStep
+                    });
+                }
+            }
             if (phase2VerboseRejects) {
                 try {
                     console.log("benchmark: Phase 2: reject traj " + (currentTraj + 1) +
@@ -2532,6 +2736,34 @@ function initBenchmark(globals) {
         }
 
         function evaluateNext() {
+            // CACHE: replay back-to-back cached (traj, profile) results
+            // until we hit one that needs live evaluation. Without this
+            // loop the accept-path advance (skipCurrentTrajectoryProfile()
+            // after validProgressions.push) bypasses the cache check for
+            // the next (traj, profile), and we'd run live for it.
+            while (currentStep === 0 && currentTraj < candidates.length) {
+                var cacheHit = cacheLookup(currentTraj, currentProfile);
+                if (!cacheHit) break;
+                if (cacheHit.accepted) {
+                    // Restore state and trigger the accept path. The
+                    // while-loop below sees currentStep >= traj.length
+                    // and runs the existing accept logic (which then
+                    // calls skipCurrentTrajectoryProfile() to advance,
+                    // bringing us back to currentStep=0 for the next
+                    // profile — outer loop continues if cache hits again).
+                    currentVisibilityTimeline = (cacheHit.visibility_timeline || []).slice();
+                    currentFaceStats = Object.assign({}, cacheHit.face_stats || {});
+                    currentFinalViewScore = cacheHit.final_view_score || 0;
+                    currentStep = candidates[currentTraj].length;
+                    break;  // exit cache loop; let while-loop process the accept
+                } else {
+                    // Cached rejection — advance and continue cache loop.
+                    skipCurrentTrajectoryProfile(cacheHit.reject_reason || "cached");
+                    // skipCurrentTrajectoryProfile resets currentStep=0
+                    // and increments currentProfile/currentTraj, so the
+                    // outer while-loop re-checks cache for the NEW combo.
+                }
+            }
             // Skip to next trajectory if current one has been fully evaluated or invalidated
             while (currentTraj < candidates.length && currentStep >= candidates[currentTraj].length) {
                 // Trajectory fully evaluated — compute consistentFaces and accept
@@ -2593,8 +2825,20 @@ function initBenchmark(globals) {
                         visibilityTimeline: currentVisibilityTimeline.slice()
                     });
                     evaluationStats.acceptedByMotionThresholds++;
+                    // CACHE: store accepted result for this (traj, profile).
+                    cacheStore(currentTraj, currentProfile, {
+                        accepted: true,
+                        visibility_timeline: currentVisibilityTimeline,
+                        face_stats: currentFaceStats,
+                        final_view_score: currentFinalViewScore
+                    });
                 } else {
                     evaluationStats.rejectedByMotionThresholds++;
+                    cacheStore(currentTraj, currentProfile, {
+                        accepted: false,
+                        reject_reason: "motion",
+                        reject_step: candidates[currentTraj].length
+                    });
                 }
 
                 skipCurrentTrajectoryProfile();
@@ -2611,6 +2855,15 @@ function initBenchmark(globals) {
                     }
                     currentTraj = candidates.length;
                 }
+
+                // CACHE: after advancing past an accepted trajectory,
+                // re-enter evaluateNext so the next (traj, profile) goes
+                // through the cache check. Without this, the per-step
+                // setTimeout block below kicks off a live evaluation
+                // even if cache could have served it.
+                if (currentTraj < candidates.length && evalCacheReady) {
+                    return evaluateNext();
+                }
             }
 
             if (currentTraj >= candidates.length) {
@@ -2620,6 +2873,8 @@ function initBenchmark(globals) {
                 evaluationStats.selectedAfterDiversity = selected.length;
                 emitPhase2Heartbeat();
                 console.log("evaluateTrajectoriesLive: " + validProgressions.length + " valid candidates out of " + candidates.length + ", selected " + selected.length);
+                // CACHE: flush dirty entries to disk (single batched POST).
+                flushEvalCache();
                 callback(selected, evaluationStats);
                 return;
             }
@@ -2715,6 +2970,18 @@ function initBenchmark(globals) {
                                     return;
                                 }
                             }
+                            // d4 back-exposure gate: trajectory is accepted
+                            // only if at least `requireFinalBackExposure`
+                            // back-side faces are camera-exposed at final.
+                            if (requireFinalBackExposure > 0) {
+                                var reBackVisible = (globals.facePoints && globals.facePoints.getBackSideVisibleFaceIds)
+                                    ? globals.facePoints.getBackSideVisibleFaceIds() : [];
+                                if (!reBackVisible || reBackVisible.length < requireFinalBackExposure) {
+                                    skipCurrentTrajectoryProfile("backExposure");
+                                    evaluateNext();
+                                    return;
+                                }
+                            }
                             currentFinalViewScore = computeFinalViewScore(reFaceQualities);
                             recordStepVisibility(step, stepRot, reVisibleFaceIds, reFaceQualities);
                             recordFaceStatsAndAdvance();
@@ -2805,7 +3072,18 @@ function initBenchmark(globals) {
             }, settleMs);
         }
 
-        evaluateNext();
+        // Async-load eval cache, then start the loop. If the cache has prior
+        // entries that match this run's seed + code state, evaluateNext()
+        // will hit them and skip the simulator.
+        loadEvalCache(evalCacheKey, function (loaded) {
+            evalCache = loaded || {};
+            evalCacheReady = true;
+            var hitCount = Object.keys(evalCache).length;
+            if (hitCount > 0) {
+                console.log("benchmark: phase2 eval cache loaded — " + hitCount + " cached entries from " + evalCacheKey);
+            }
+            evaluateNext();
+        });
     }
 
     // ── Scan mode: dense fold × POV face-visibility discovery (no screenshots) ──

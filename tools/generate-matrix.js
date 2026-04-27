@@ -38,6 +38,7 @@ const { values: args } = parseArgs({
         "server-url": { type: "string", default: "http://localhost:3000" },
         "build-progressions": { type: "string", default: "24" },
         "max-trajectory-candidates": { type: "string", default: "40" },
+        "pov-grid-size": { type: "string", default: "" },
         "max-scan-candidates": { type: "string", default: "20" },
         concurrency: { type: "string", default: "" },
         "shards-per-slot": { type: "string", default: "1" },
@@ -59,8 +60,13 @@ const OUT_DIR = String(args["out-dir"] || "new_dataset/matrix-gen");
 const COUNT = parseInt(String(args.count || "2"), 10) || 2;
 const SEED = parseInt(String(args.seed || "42"), 10) || 42;
 const SERVER_URL = String(args["server-url"] || "http://localhost:3000");
-const BUILD_RAW = parseInt(String(args["build-progressions"] || "24"), 10) || 24;
-const MAX_TRAJ = String(args["max-trajectory-candidates"] || "40");
+// Brute-force defaults: bumped for the eval-cache-driven continuation
+// orchestrator. Bigger trajectory pool → more chances of accepting back-
+// exposing trajectories for hard d4 cells. Phase 2 evaluation cache makes
+// continuation passes cheap (already-evaluated trajectories don't re-run).
+const BUILD_RAW = parseInt(String(args["build-progressions"] || "150"), 10) || 150;
+const MAX_TRAJ = String(args["max-trajectory-candidates"] || "600");
+const POV_GRID_SIZE = String(args["pov-grid-size"] || "");  // empty = use slot-config default (110 for d4)
 const MAX_SCAN = String(args["max-scan-candidates"] || "20");
 const CONCURRENCY_RAW = String(args.concurrency || "").trim();
 const CONCURRENCY = CONCURRENCY_RAW
@@ -195,6 +201,9 @@ async function runSlot(model, difficulty, shard = 0, totalShards = 1) {
         "--max-scan-candidates", MAX_SCAN,
         "--server-url", SERVER_URL,
     ];
+    if (POV_GRID_SIZE) {
+        procArgs.push("--pov-grid-size", POV_GRID_SIZE);
+    }
     if (model.finalFold != null) {
         procArgs.push("--final-fold", String(model.finalFold));
     }
