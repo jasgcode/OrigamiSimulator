@@ -1166,6 +1166,146 @@ function initPresetGenerator(globals) {
         // pipeline speedup; mesh convergence still stable at this floor.)
         var perStepSettle = Math.max(settleMs || 300, 400);
         var finalSettle = Math.max(settleMs || 300, 400);
+
+        // ── Build entries + candidates UP FRONT ────────────────────────
+        // Hoisted from inside scoreAndRefine so we can probe candidates'
+        // mid-fold visibility during the step-by-step walk below. Without
+        // this, refinement only knows whether a candidate is visible at the
+        // FINAL pose; many candidates pass at final but fail mid-fold,
+        // causing post-refinement validation to drop the preset.
+        function parseBaryEntry(e) {
+            if (!e) return null;
+            if (Array.isArray(e) && e.length >= 3) return { u: e[0], v: e[1], w: e[2] };
+            if (typeof e === "object" && "u" in e && "v" in e && "w" in e) return { u: e.u, v: e.v, w: e.w };
+            return null;
+        }
+        var entries = [];
+        var pointIndex = 0;
+        if (Array.isArray(preset.facePoints)) {
+            for (var ai0 = 0; ai0 < preset.facePoints.length; ai0++) {
+                var arrEntry0 = preset.facePoints[ai0];
+                var arrBary0 = parseBaryEntry(arrEntry0);
+                if (arrBary0) {
+                    entries.push({ ref: arrEntry0, idx: pointIndex++, hidden: !!arrEntry0.hidden });
+                } else {
+                    var c00 = parseInt(arrEntry0 && arrEntry0.count != null ? arrEntry0.count : 1, 10);
+                    pointIndex += (isNaN(c00) ? 0 : Math.max(1, c00));
+                }
+            }
+        } else if (typeof preset.facePoints === "object") {
+            for (var key0 in preset.facePoints) {
+                if (!preset.facePoints.hasOwnProperty(key0)) continue;
+                var val0 = preset.facePoints[key0];
+                if (Array.isArray(val0)) {
+                    for (var ki0 = 0; ki0 < val0.length; ki0++) {
+                        var bary0 = parseBaryEntry(val0[ki0]);
+                        if (bary0) {
+                            entries.push({ ref: val0[ki0], idx: pointIndex++, hidden: !!(val0[ki0] && val0[ki0].hidden) });
+                        } else {
+                            pointIndex++;
+                        }
+                    }
+                } else {
+                    var c10 = parseInt(val0, 10);
+                    if (!isNaN(c10) && c10 >= 1) pointIndex += c10;
+                }
+            }
+        }
+
+        // Build the candidate grid (deterministic per-preset jittered).
+        var jitterSeedHoisted = (function () {
+            var h = 2166136261;
+            var fp = preset && preset.facePoints;
+            if (fp && typeof fp === "object") {
+                var keysS = Object.keys(fp).sort();
+                for (var ks = 0; ks < keysS.length; ks++) {
+                    var keyS = keysS[ks];
+                    for (var ci = 0; ci < keyS.length; ci++) {
+                        h ^= keyS.charCodeAt(ci);
+                        h = Math.imul(h, 16777619);
+                    }
+                    var arrS = fp[keyS];
+                    if (Array.isArray(arrS)) {
+                        for (var asi = 0; asi < arrS.length; asi++) {
+                            var ent = arrS[asi];
+                            if (ent && typeof ent === "object") {
+                                h ^= Math.round((ent.u || 0) * 1000) | 0;
+                                h = Math.imul(h, 16777619);
+                                h ^= Math.round((ent.v || 0) * 1000) | 0;
+                                h = Math.imul(h, 16777619);
+                                h ^= Math.round((ent.w || 0) * 1000) | 0;
+                                h = Math.imul(h, 16777619);
+                                if (ent.hidden) { h ^= 0xdeadbeef; h = Math.imul(h, 16777619); }
+                            }
+                        }
+                    }
+                }
+            }
+            return h | 0;
+        })();
+        var jitterRngHoisted = makeRng(jitterSeedHoisted);
+        function jitterAxisH() { return jitterRngHoisted.randFloat(-0.025, 0.025); }
+        function mkH(u, v) {
+            var ju = u + jitterAxisH();
+            var jv = v + jitterAxisH();
+            if (ju < 0.20) ju = 0.20; else if (ju > 0.55) ju = 0.55;
+            if (jv < 0.20) jv = 0.20; else if (jv > 0.55) jv = 0.55;
+            var ru = Math.round(ju * 100) / 100;
+            var rv = Math.round(jv * 100) / 100;
+            var rw = Math.round((1 - ru - rv) * 100) / 100;
+            return { u: ru, v: rv, w: rw };
+        }
+        var refineTierH = (preset && preset.difficulty) ? clampDifficultyTier(preset.difficulty) : 4;
+        var gridValuesH = (refineTierH <= 2) ? [0.27, 0.37, 0.47] : [0.22, 0.30, 0.38, 0.45, 0.52];
+        var baseCandidates = [];
+        for (var uH = 0; uH < gridValuesH.length; uH++) {
+            for (var vH = 0; vH < gridValuesH.length; vH++) {
+                var cH = mkH(gridValuesH[uH], gridValuesH[vH]);
+                if (cH.w < 0.18) continue;
+                baseCandidates.push(cH);
+            }
+        }
+        baseCandidates.push(mkH(0.33, 0.33));
+
+        // survivesByEntry[entryIdx][candIdx] = true initially; flipped to
+        // false the first time a non-hidden point's candidate placement
+        // tests as invisible mid-fold. Used as a hard gate in scoring.
+        // Hidden entries are NOT probed (they only need final-step visibility,
+        // which scoreCandidate already checks).
+        var survivesByEntry = {};
+        for (var ei0 = 0; ei0 < entries.length; ei0++) {
+            var em0 = entries[ei0];
+            if (em0.hidden) continue;
+            survivesByEntry[em0.idx] = new Array(baseCandidates.length);
+            for (var ci0 = 0; ci0 < baseCandidates.length; ci0++) survivesByEntry[em0.idx][ci0] = true;
+        }
+
+        // After each settled step, save current bary per non-hidden entry,
+        // probe each candidate's visibility, restore. Cost ~150-300ms/step
+        // (set + check + restore × ~26 candidates × ~6 entries) — small
+        // vs the 400ms settle.
+        function probeCandidatesAtCurrentStep() {
+            var probePts = globals.facePoints.getPoints ? globals.facePoints.getPoints() : [];
+            for (var pe = 0; pe < entries.length; pe++) {
+                var pem = entries[pe];
+                if (pem.hidden) continue;
+                if (pem.idx < 0 || pem.idx >= probePts.length) continue;
+                var ppt = probePts[pem.idx];
+                if (!ppt) continue;
+                var pFaceId = ppt.faceId;
+                var pOrigU = ppt.u, pOrigV = ppt.v, pOrigW = ppt.w;
+                var survArr = survivesByEntry[pem.idx];
+                for (var pci = 0; pci < baseCandidates.length; pci++) {
+                    if (!survArr[pci]) continue;  // already failed at an earlier step
+                    var pcand = baseCandidates[pci];
+                    globals.facePoints.updatePointPosition(pem.idx, pFaceId, pcand.u, pcand.v, pcand.w);
+                    if (!globals.facePoints.isPointVisible(pem.idx)) survArr[pci] = false;
+                }
+                // Restore so subsequent points / steps see the original bary.
+                globals.facePoints.updatePointPosition(pem.idx, pFaceId, pOrigU, pOrigV, pOrigW);
+            }
+        }
+
         var stepIdx = 0;
         function applyNextStep() {
             if (stepIdx >= steps.length) {
@@ -1185,56 +1325,22 @@ function initPresetGenerator(globals) {
             } else {
                 globals.threeView.resetModel();
             }
-            stepIdx++;
-            setTimeout(applyNextStep, isLast ? finalSettle : perStepSettle);
+            setTimeout(function () {
+                // After settle, probe candidates BEFORE advancing to the
+                // next step. Skip probe at the final step — scoreCandidate
+                // already handles final-step visibility.
+                if (!isLast) {
+                    try { probeCandidatesAtCurrentStep(); } catch (_pe) {}
+                }
+                stepIdx++;
+                applyNextStep();
+            }, isLast ? finalSettle : perStepSettle);
         }
 
         function scoreAndRefine() {
             try {
-                // Walk preset.facePoints in the SAME order as facePoints.initFromConfig
-                // so the pointIndex we assign lines up with the point populated in
-                // globals.facePoints. See js/facePoints.js initFromConfig.
-                var entries = [];
-                var pointIndex = 0;
-                function parseBaryEntry(e) {
-                    if (!e) return null;
-                    if (Array.isArray(e) && e.length >= 3) return { u: e[0], v: e[1], w: e[2] };
-                    if (typeof e === "object" && "u" in e && "v" in e && "w" in e) return { u: e.u, v: e.v, w: e.w };
-                    return null;
-                }
-                if (Array.isArray(preset.facePoints)) {
-                    for (var ai = 0; ai < preset.facePoints.length; ai++) {
-                        var arrEntry = preset.facePoints[ai];
-                        var arrBary = parseBaryEntry(arrEntry);
-                        if (arrBary) {
-                            entries.push({ ref: arrEntry, idx: pointIndex++ });
-                        } else {
-                            // numeric-count form — skip (preset-generated presets always include u/v/w)
-                            var c0 = parseInt(arrEntry && arrEntry.count != null ? arrEntry.count : 1, 10);
-                            pointIndex += (isNaN(c0) ? 0 : Math.max(1, c0));
-                        }
-                    }
-                } else if (typeof preset.facePoints === "object") {
-                    for (var key in preset.facePoints) {
-                        if (!preset.facePoints.hasOwnProperty(key)) continue;
-                        var val = preset.facePoints[key];
-                        if (Array.isArray(val)) {
-                            for (var ki = 0; ki < val.length; ki++) {
-                                var bary = parseBaryEntry(val[ki]);
-                                if (bary) {
-                                    entries.push({ ref: val[ki], idx: pointIndex++ });
-                                } else {
-                                    // still occupies a point slot, but we can't refine it
-                                    pointIndex++;
-                                }
-                            }
-                        } else {
-                            var c1 = parseInt(val, 10);
-                            if (!isNaN(c1) && c1 >= 1) pointIndex += c1;
-                        }
-                    }
-                }
-
+                // entries / baseCandidates / jitter are pre-built up top so
+                // the per-step probe could run during the walk. Re-use them.
                 if (entries.length === 0) {
                     globals.threeView.resetModel();
                     callback(preset);
@@ -1262,86 +1368,8 @@ function initPresetGenerator(globals) {
                     } catch (_e) {}
                 }
 
-                // Barycentric grid over (u,v) ∈ [0.22, 0.52] with w ≥ 0.18.
-                // Every candidate sits inside the triangle with a margin
-                // from all three edges. Each candidate gets independent
-                // per-preset jitter so different presets land at distinct
-                // exact placements — avoids the "every preset picks the
-                // same cell" templated look. Jitter ±0.025 keeps grid
-                // spacing intact (d3/d4 spacing is 0.075–0.10).
-                //
-                // Determinism: jitter is seeded from a hash of the preset's
-                // facePoints structure (face IDs + (u,v,w) values). This
-                // gives stable per-preset jitter even if upstream RNG
-                // consumption changes between code revisions — the same
-                // preset always refines to the same exact bary on re-run,
-                // independent of batch order or preceding operations.
-                //
-                // Rounding is applied AFTER jitter, and the score is
-                // computed at the post-rounded value — same contract as
-                // before: the bary we score is the bary we write.
-                var jitterSeed = (function () {
-                    var h = 2166136261;
-                    var fp = preset && preset.facePoints;
-                    if (fp && typeof fp === "object") {
-                        var keysS = Object.keys(fp).sort();
-                        for (var ks = 0; ks < keysS.length; ks++) {
-                            var keyS = keysS[ks];
-                            for (var ci = 0; ci < keyS.length; ci++) {
-                                h ^= keyS.charCodeAt(ci);
-                                h = Math.imul(h, 16777619);
-                            }
-                            var arrS = fp[keyS];
-                            if (Array.isArray(arrS)) {
-                                for (var asi = 0; asi < arrS.length; asi++) {
-                                    var ent = arrS[asi];
-                                    if (ent && typeof ent === "object") {
-                                        h ^= Math.round((ent.u || 0) * 1000) | 0;
-                                        h = Math.imul(h, 16777619);
-                                        h ^= Math.round((ent.v || 0) * 1000) | 0;
-                                        h = Math.imul(h, 16777619);
-                                        h ^= Math.round((ent.w || 0) * 1000) | 0;
-                                        h = Math.imul(h, 16777619);
-                                        if (ent.hidden) { h ^= 0xdeadbeef; h = Math.imul(h, 16777619); }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    return h | 0;
-                })();
-                var jitterRng = makeRng(jitterSeed);
-                function jitterAxis() {
-                    return jitterRng.randFloat(-0.025, 0.025);
-                }
-                function mk(u, v) {
-                    var ju = u + jitterAxis();
-                    var jv = v + jitterAxis();
-                    if (ju < 0.20) ju = 0.20; else if (ju > 0.55) ju = 0.55;
-                    if (jv < 0.20) jv = 0.20; else if (jv > 0.55) jv = 0.55;
-                    var ru = Math.round(ju * 100) / 100;
-                    var rv = Math.round(jv * 100) / 100;
-                    var rw = Math.round((1 - ru - rv) * 100) / 100;
-                    return { u: ru, v: rv, w: rw };
-                }
-                // Tier-aware grid density. d1/d2 use a 3×3 grid (~9
-                // candidates) since their geometry is simpler and refinement
-                // is cosmetic. d3/d4 keep the 5×5 grid (~25 candidates) for
-                // tighter placement on rotated/two-sided poses where the
-                // rendered point is more sensitive to barycentric position.
-                var refineTier = (preset && preset.difficulty) ? clampDifficultyTier(preset.difficulty) : 4;
-                var gridValues = (refineTier <= 2)
-                    ? [0.27, 0.37, 0.47]
-                    : [0.22, 0.30, 0.38, 0.45, 0.52];
-                var baseCandidates = [];
-                for (var ui = 0; ui < gridValues.length; ui++) {
-                    for (var vi = 0; vi < gridValues.length; vi++) {
-                        var c = mk(gridValues[ui], gridValues[vi]);
-                        if (c.w < 0.18) continue;
-                        baseCandidates.push(c);
-                    }
-                }
-                baseCandidates.push(mk(0.33, 0.33));
+                // baseCandidates / jitter were built up top so the per-step
+                // probe could populate survivesByEntry during the walk.
 
                 // Scoring uses two tiers for the forward-clearance test:
                 //   Tier 1 (strict): candidate passes clearance. These get
@@ -1421,13 +1449,21 @@ function initPresetGenerator(globals) {
                         var faceId = pt.faceId;
                         var origU = pt.u, origV = pt.v, origW = pt.w;
 
-                        var cands = baseCandidates.slice();
-                        cands.push({ u: origU, v: origV, w: origW });
+                        // Use baseCandidates directly (so candidate indices
+                        // align with survivesByEntry). The original-bary
+                        // fallback is appended at the end with a sentinel
+                        // "always-survives" index so it can win when no
+                        // grid candidate survives mid-fold.
+                        var cands = baseCandidates;
+                        var survArr = survivesByEntry[idx];  // undefined for hidden entries
 
                         var bestScore = -Infinity;
                         var bestU = origU, bestV = origV, bestW = origW;
 
                         for (var ci = 0; ci < cands.length; ci++) {
+                            // Hard gate: for non-hidden entries, skip
+                            // candidates that failed mid-fold visibility.
+                            if (survArr && !survArr[ci]) continue;
                             var c = cands[ci];
                             globals.facePoints.updatePointPosition(idx, faceId, c.u, c.v, c.w);
                             var s = scoreCandidate(idx, c);
@@ -1435,6 +1471,16 @@ function initPresetGenerator(globals) {
                                 bestScore = s;
                                 bestU = c.u; bestV = c.v; bestW = c.w;
                             }
+                        }
+                        // Always evaluate the original (pre-refinement)
+                        // bary too — for hidden entries it's the only path,
+                        // and for non-hidden it's a fallback when no grid
+                        // candidate survived.
+                        globals.facePoints.updatePointPosition(idx, faceId, origU, origV, origW);
+                        var sOrig = scoreCandidate(idx, { u: origU, v: origV, w: origW });
+                        if (sOrig > bestScore) {
+                            bestScore = sOrig;
+                            bestU = origU; bestV = origV; bestW = origW;
                         }
 
                         var roundedU, roundedV, roundedW;
@@ -1511,6 +1557,30 @@ function initPresetGenerator(globals) {
     // still satisfies the validator. Determinism: per-preset fallback is
     // a pure function of the revalidation result, which itself is
     // deterministic given seeded candidate selection.
+    // Refine an entire batch of candidate presets BEFORE validation. With
+    // refineFacePointBarycentric's per-step survives check, refinement
+    // picks barycentric placements that pass mid-fold visibility for
+    // visible-front anchors. Running refinement first means downstream
+    // validateBatch sees candidates with already-survivable placements,
+    // dramatically lifting pass rate for d4 cells where the original bary
+    // grid often lands on edge-grazing positions.
+    function preRefineBatch(presets, settleMs, rng, progressCb, callback) {
+        if (!Array.isArray(presets) || presets.length === 0) {
+            callback(presets || []);
+            return;
+        }
+        var idx = 0;
+        function next() {
+            if (idx >= presets.length) { callback(presets); return; }
+            if (progressCb) progressCb(idx, presets.length);
+            refineFacePointBarycentric(presets[idx], settleMs, rng, function () {
+                idx++;
+                next();
+            });
+        }
+        next();
+    }
+
     function refineAndRevalidate(selected, settleMs, rng, callback) {
         if (!Array.isArray(selected) || selected.length === 0) {
             callback(selected || []);
@@ -2298,7 +2368,7 @@ function initPresetGenerator(globals) {
     // face picks still dedupe correctly.
     function selectFromTrajectoryK(tier) {
         if (tier === 4) return 10;
-        if (tier === 3) return 3;
+        if (tier === 3) return 5;  // bumped from 3 to give opensink-d3 enough configs to fill 30/shard cap
         return 1;
     }
 
@@ -2527,78 +2597,104 @@ function initPresetGenerator(globals) {
             return { u: u, v: v, w: w };
         }
 
+        // Barycentric grid: 9 positions spanning the interior of a face.
+        // Cycled by configIdx so each emitted config uses a different bary
+        // for the same face. Refinement's minNeighborPx constraint then
+        // diverges placements within a config; combined with rotated bary
+        // across configs, sibling configs from the same trajectory get
+        // visually distinct point layouts.
+        var baryGrid = [
+            { u: 0.34, v: 0.33, w: 0.33 },
+            { u: 0.50, v: 0.25, w: 0.25 },
+            { u: 0.25, v: 0.50, w: 0.25 },
+            { u: 0.25, v: 0.25, w: 0.50 },
+            { u: 0.42, v: 0.39, w: 0.19 },
+            { u: 0.19, v: 0.42, w: 0.39 },
+            { u: 0.39, v: 0.19, w: 0.42 },
+            { u: 0.35, v: 0.40, w: 0.25 },
+            { u: 0.25, v: 0.35, w: 0.40 }
+        ];
+
         var configs = [];
-        // Try up to maxShifts rank windows; keep at most K successful configs.
-        // Decoupling "max attempts" from "max kept" ensures K=1 doesn't kill
-        // a trajectory whose first rank window fails but later windows succeed.
-        var maxShifts = Math.max(K * 3, rankedFronts.length - plan.vF + 1);
-        for (var k = 0; k < maxShifts && configs.length < K; k++) {
-            var visF = rankedFronts.slice(k, k + plan.vF);
-            if (visF.length < plan.vF) break;
+        // Combinatorial K-expansion: enumerate distinct face-sets per
+        // trajectory by iterating front-pair combinations × hF offsets ×
+        // hB offsets. The original rank-window slide produced
+        // ≈rankedFronts.length-vF+1 configs (≈3 for pinwheel) regardless
+        // of K. With C(n, vF) front-pairs × hF cycle × hB cycle, K=10 is
+        // routinely reachable. Refinement diverges shared-face placements
+        // via minNeighborPx, so siblings stay distinct after refinement.
+        var seenSig = {};
+        var configIdx = 0;
+        var hFCycleMax = Math.max(1, rankedHiddenFronts.length);
+        var hBCycleMax = Math.max(1, rankedBacks.length);
+        var done = false;
+        for (var i = 0; i < rankedFronts.length - (plan.vF - 1) && !done; i++) {
+            for (var j = i + 1; j < rankedFronts.length && !done; j++) {
+                var visF = [rankedFronts[i], rankedFronts[j]];
+                var used0 = {};
+                used0[visF[0]] = true;
+                used0[visF[1]] = true;
 
-            var used = {};
-            for (var vi = 0; vi < visF.length; vi++) used[visF[vi]] = true;
+                for (var hOff = 0; hOff < hFCycleMax && !done; hOff++) {
+                    var hidF = [];
+                    var used1 = Object.assign({}, used0);
+                    for (var hi = 0; hi < rankedHiddenFronts.length && hidF.length < plan.hF; hi++) {
+                        var hidFid = rankedHiddenFronts[(hi + hOff) % rankedHiddenFronts.length];
+                        if (used1[hidFid]) continue;
+                        hidF.push(hidFid);
+                        used1[hidFid] = true;
+                    }
+                    if (hidF.length < plan.hF) continue;
 
-            var hidF = [];
-            for (var hi = 0; hi < rankedHiddenFronts.length && hidF.length < plan.hF; hi++) {
-                var hidFid = rankedHiddenFronts[(hi + k) % rankedHiddenFronts.length];
-                if (used[hidFid]) continue;
-                hidF.push(hidFid);
-                used[hidFid] = true;
-            }
-            if (hidF.length < plan.hF) continue;
+                    for (var bOff = 0; bOff < hBCycleMax && !done; bOff++) {
+                        var hidB = [];
+                        var used2 = Object.assign({}, used1);
+                        for (var bi = 0; bi < rankedBacks.length && hidB.length < plan.hB; bi++) {
+                            var hidBid = rankedBacks[(bi + bOff) % rankedBacks.length];
+                            if (used2[hidBid]) continue;
+                            hidB.push(hidBid);
+                            used2[hidBid] = true;
+                        }
+                        if (hidB.length < plan.hB) continue;
 
-            var hidB = [];
-            for (var bi = 0; bi < rankedBacks.length && hidB.length < plan.hB; bi++) {
-                var hidBid = rankedBacks[(bi + k) % rankedBacks.length];
-                if (used[hidBid]) continue;
-                hidB.push(hidBid);
-                used[hidBid] = true;
-            }
-            if (hidB.length < plan.hB) continue;
+                        var sig = visF.slice().sort().join(",")
+                                + "|" + hidF.slice().sort().join(",")
+                                + "|" + hidB.slice().sort().join(",");
+                        if (seenSig[sig]) continue;
+                        seenSig[sig] = true;
 
-            // Barycentric grid: 9 positions spanning the interior of a face.
-            // Cycled by config-index k so each of K configs per trajectory
-            // uses a different position for the same face. Stays clear of
-            // edges (min 0.18 margin) for visibility stability.
-            var baryGrid = [
-                { u: 0.34, v: 0.33, w: 0.33 },
-                { u: 0.50, v: 0.25, w: 0.25 },
-                { u: 0.25, v: 0.50, w: 0.25 },
-                { u: 0.25, v: 0.25, w: 0.50 },
-                { u: 0.42, v: 0.39, w: 0.19 },
-                { u: 0.19, v: 0.42, w: 0.39 },
-                { u: 0.39, v: 0.19, w: 0.42 },
-                { u: 0.35, v: 0.40, w: 0.25 },
-                { u: 0.25, v: 0.35, w: 0.40 }
-            ];
-            var baryForThisConfig = baryGrid[k % baryGrid.length];
-            var config = {};
-            function add(fid, hidden) {
-                var key = String(fid);
-                if (!config[key]) config[key] = [];
-                var entry = { u: baryForThisConfig.u, v: baryForThisConfig.v, w: baryForThisConfig.w };
-                if (hidden) entry.hidden = true;
-                config[key].push(entry);
-            }
-            for (var av = 0; av < visF.length; av++) add(visF[av], false);
-            for (var af = 0; af < hidF.length; af++) add(hidF[af], true);
-            // Hidden-back picks: use faceId = (idx + N) so the simulator
-            // treats the point as a back-surface marker (isPointVisible's
-            // `isFront = id < N` path will require the BACK normal to face
-            // the camera). Without this the point would be a front-side
-            // marker on the same face — visible only when the front is
-            // exposed, defeating the d2/d4 hidden-back-reveal semantic.
-            for (var ab = 0; ab < hidB.length; ab++) add(hidB[ab] + N, true);
+                        var baryForThisConfig = baryGrid[configIdx % baryGrid.length];
+                        var config = {};
+                        var addPoint = function (fid, hidden) {
+                            var key = String(fid);
+                            if (!config[key]) config[key] = [];
+                            var entry = { u: baryForThisConfig.u, v: baryForThisConfig.v, w: baryForThisConfig.w };
+                            if (hidden) entry.hidden = true;
+                            config[key].push(entry);
+                        };
+                        for (var av = 0; av < visF.length; av++) addPoint(visF[av], false);
+                        for (var af = 0; af < hidF.length; af++) addPoint(hidF[af], true);
+                        // Hidden-back picks: use faceId = (idx + N) so the simulator
+                        // treats the point as a back-surface marker (isPointVisible's
+                        // `isFront = id < N` path will require the BACK normal to face
+                        // the camera). Without this the point would be a front-side
+                        // marker on the same face — visible only when the front is
+                        // exposed, defeating the d2/d4 hidden-back-reveal semantic.
+                        for (var ab = 0; ab < hidB.length; ab++) addPoint(hidB[ab] + N, true);
 
-            configs.push({
-                facePoints: config,
-                _selection: {
-                    visibleFronts: visF,
-                    hiddenFronts: hidF,
-                    hiddenBacks: hidB
+                        configs.push({
+                            facePoints: config,
+                            _selection: {
+                                visibleFronts: visF,
+                                hiddenFronts: hidF,
+                                hiddenBacks: hidB
+                            }
+                        });
+                        configIdx++;
+                        if (configs.length >= K) done = true;
+                    }
                 }
-            });
+            }
         }
         return configs;
     }
@@ -2832,11 +2928,24 @@ function initPresetGenerator(globals) {
             // attrition (selectFacePointsFromTrajectory rejects, refinement
             // failures, etc.). 1.5× is the sweet spot — enough margin for
             // d4's lower pass-rate, not so much that we waste wall-time.
+            // d4: lifted to count*5 because the new requireFinalBackExposure
+            // gate filters out front-visible-but-no-back trajectories. The
+            // remaining accepted trajectories all satisfy d4's contract,
+            // giving refinement a much bigger pool of valid candidates.
             phase2EarlyStopCount: opts.phase2EarlyStopCount != null
                 ? opts.phase2EarlyStopCount
                 : (difficulty === 1
                     ? Math.max(3, count)
-                    : Math.max(5, Math.ceil(count * 1.5))),
+                    : difficulty === 4
+                        ? Math.max(5, Math.ceil(count * 5))
+                        : Math.max(5, Math.ceil(count * 1.5))),
+            // d4: require at least 1 back-side face to be camera-exposed at
+            // the final step. Combined with the front-anchor visibility gate
+            // (which checks every step), accepted trajectories satisfy both
+            // human-trackability AND the hidden-back-reveal contract.
+            requireFinalBackExposure: opts.requireFinalBackExposure != null
+                ? opts.requireFinalBackExposure
+                : (difficulty === 4 ? 1 : 0),
             maxTrajectoryCandidates: opts.maxTrajectoryCandidates != null
                 ? opts.maxTrajectoryCandidates
                 : Math.max(60, count * 18),
@@ -2859,9 +2968,22 @@ function initPresetGenerator(globals) {
             rotationYawMax: opts.rotationYawMax != null ? opts.rotationYawMax : rotBounds.yaw,
             rotationPitchMax: opts.rotationPitchMax != null ? opts.rotationPitchMax : rotBounds.pitch,
             rotationRollMax: opts.rotationRollMax != null ? opts.rotationRollMax : rotBounds.roll,
+            // Profile counts tuned for single-seed yield. Trajectory pool is
+            // small (~19 from pov90, ~23 from pov110), so (traj, profile)
+            // pair count is trajs × profiles. Higher profiles = more pairs
+            // = more chances to hit the earlyStop cap.
+            //   d4: 30 — count*5=105 cap; sampled profiles help d4 because
+            //        finalStepOnly mode validates anchors only at final step.
+            //   d3: 6  — strictAllSteps mode validates per-step visibility;
+            //        sampled (random) profiles fail per-step validation
+            //        downstream, hurting yield. Stay at 6 hardcoded only.
+            //   d1: 20 — finalStepOnly mode (only anchor visibility matters);
+            //        bump from 10 to fill count=84 cap from 19-traj pool.
             rotationProfileCount: opts.rotationProfileCount != null
                 ? opts.rotationProfileCount
-                : (difficulty >= 3 ? 6 : (slotTrackingMode === "finalStepOnly" ? 10 : 6)),
+                : (difficulty === 4 ? 30
+                   : (difficulty >= 3 ? 6
+                      : (slotTrackingMode === "finalStepOnly" ? 20 : 6))),
             targetSelectionMode: opts.targetSelectionMode || "all",
             includeInitialVisibleTrackedPoint: opts.includeInitialVisibleTrackedPoint === true,
             initialVisibleTrackedPointCount: opts.initialVisibleTrackedPointCount != null
@@ -2870,7 +2992,12 @@ function initPresetGenerator(globals) {
             // separation checks degrade to "in-frame" — exactly the loose
             // gate we want so post-hoc selection has room to work.
             targetPointLabels: ["A"],
-            primaryTargetPointLabels: ["A"]
+            primaryTargetPointLabels: ["A"],
+            // Plumb the per-shard seed into Phase 2 so buildAutoRotationProfiles
+            // can deterministically sample additional rotation profiles per
+            // shard. Same seed → same profile sequence.
+            // Per-shard seed for deterministic rotation profile sampling.
+            rngSeed: seed
         };
 
         // Tier slot plan (mirrors selectFacePointsFromTrajectory). Used by
@@ -3530,16 +3657,31 @@ function initPresetGenerator(globals) {
                 }
 
                 console.log("presetGenerator: generated " + scanCandidates.length + " progression candidates");
-                // Skip pre-refinement validateBatch for d1. d1 uses static
-                // constant-rotation profiles over a 5-step flat-paper walk
-                // with no back-side requirement — validation predictably
-                // passes, so the batch step is ~60s of wasted wall time.
-                // refineAndRevalidate below still runs a per-preset
-                // revalidate, so any genuinely broken preset (separation
-                // mishap, edge barycentric) is still caught there.
-                //
-                // Also short-circuits when caller explicitly opts out with
-                // --no-validate.
+
+                // d4 path: PRE-REFINE candidates before validateBatch. The
+                // per-step refinement check picks placements that survive
+                // mid-fold visibility for visible-front anchors. Without
+                // this, the original bary (often near face edges) fails
+                // validation on heavy-rotation steps and the candidate is
+                // dropped before refinement gets a chance. Pre-refining
+                // lets every candidate present its best-survivable shot to
+                // validation. Cost: ~5s per candidate (10 steps × 0.4s
+                // settle + per-step probe). 33 candidates ≈ 3 min — large
+                // but offset by 5x increase in passing-rate downstream.
+                if (difficulty === 4 && validate) {
+                    var preRefStart = Date.now();
+                    updateStatus("Pre-refining " + scanCandidates.length + " d4 candidates before validation...");
+                    preRefineBatch(scanCandidates, settleMs, rng, function (i, n) {
+                        updateStatus("Pre-refining d4 candidate " + (i + 1) + "/" + n + "...");
+                    }, function () {
+                        console.log("presetGenerator: pre-refine done (" + scanCandidates.length + " candidates, " + ((Date.now() - preRefStart) / 1000).toFixed(1) + "s)");
+                        runValidateBatch();
+                    });
+                    return;
+                }
+                runValidateBatch();
+
+                function runValidateBatch() {
                 // d1/d2 short-circuit batch validation — d1 because validation
                 // predictably passes for static-pose flat walks; d2 because it's
                 // derived post-hoc from d4's already-validated trajectory.
@@ -3580,6 +3722,7 @@ function initPresetGenerator(globals) {
                         finalize(finalPresets, baseName, startIndex, callback);
                     });
                 });
+                }  // end runValidateBatch
             });
         }
 
@@ -3603,7 +3746,10 @@ function initPresetGenerator(globals) {
     function finalize(selected, baseName, startIndex, callback) {
         var output = {};
         for (var si = 0; si < selected.length; si++) {
-            var name = baseName + "-" + String(startIndex + si).padStart(2, "0");
+            // 3-digit zero-pad: oversampling pushes counts past 99 (e.g.
+            // 30 per shard × 4 shards = 120). 2-digit padding broke
+            // alphabetic sort order in the assembler.
+            var name = baseName + "-" + String(startIndex + si).padStart(3, "0");
             var preset = selected[si];
 
             // Remove internal metadata before output
