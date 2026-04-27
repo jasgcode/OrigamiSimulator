@@ -33,7 +33,8 @@ def collect_for_cell(cell: str) -> dict:
     merged = {}
     patterns = [
         f"{cell}.json",
-        f"{cell}-s*.json",
+        f"{cell}-s*.json",          # also matches `{cell}-s<shard>-p<N>.json`
+        f"{cell}-p*.json",          # unsharded continuation passes
         f"{cell}-topup*-s*.json",
         f"{cell}-topup*.json",
         f"{cell}-pov*-s*.json",
