@@ -1,71 +1,170 @@
-# OrigamiSimulator
+# Origami Point-Tracking Dataset
 
-Live demo at <a href="https://origamisimulator.org/">origamisimulator.org</a><br/>
+A perception benchmark for vision-language models built on top of a real-time
+GPU origami simulator. Each item asks the model to identify which **labeled
+points on a folded piece of paper** correspond to **unmarked dots on the
+original flat sheet**, given a step-by-step folding sequence rendered from a
+deterministic camera trajectory.
 
-<img style="width: 100%; max-width:500px" src="assets/doc/crane.gif" />
+This repository contains the **dataset generator** (a headless Puppeteer
+pipeline driving an in-browser physics simulator) and the **benchmark
+runtime** (preset loader, JSONL emitter, point-visibility validator). The
+canonical 1008-preset release sits under [`dataset/`](dataset/).
 
-This app allows you to simulate how any origami crease pattern will fold.  It may look a little different
-from what you typically think of as "origami" - rather than folding paper in a set of sequential steps,
-this simulation attempts to fold every crease simultaneously. It does this by iteratively solving for small displacements in the geometry of an initially flat sheet due to forces
-exerted by creases.
-You can read more about it in our paper:
-<ul>
-<li><a target="_blank" href="http://erikdemaine.org/papers/OrigamiSimulator_Origami7/">Fast, Interactive Origami Simulation using GPU Computation</a> by Amanda Ghassaei, Erik Demaine, and Neil Gershenfeld (7OSME)
-</ul>
+## Quick start
 
-**If you have feedback about features you want to see in this app, please see [this thread](https://github.com/amandaghassaei/OrigamiSimulator/discussions/41).**
+```bash
+# One-liner — launches dev server in background then runs the full pipeline.
+DATASET_DIR=new_dataset/uniform-1000-render bun run dev &
+python3 tools/generate-uniform-1000.py
+```
 
-All simulation methods were written from scratch and are executed in parallel in several GPU fragment shaders for fast performance.
-The solver extends work from the following sources:
-<ul>
-<li><a target="_blank" href="http://www3.eng.cam.ac.uk/~sdg/preprint/5OSME.pdf">Origami Folding: A Structural Engineering Approach</a> by Mark Schenk and Simon D. Guest<br/>
-<li><a target="_blank" href="http://www.tsg.ne.jp/TT/cg/TachiFreeformOrigami2010.pdf">Freeform Variations of Origami</a> by Tomohiro Tachi<br/>
-</ul>
-<p>
-This app also uses the methods described in <a href="http://www.cgg.cs.tsukuba.ac.jp/projects/2020/RulingAwareTriangulation/index.html" target="_blank">Simple Simulation of Curved Folds Based on Ruling-aware Triangulation</a> to import curved crease patterns and pre-process them in a way that realistically simulates the bending between the creases.
-</p>
+The dev server must run with `DATASET_DIR=new_dataset/uniform-1000-render`
+so its `/api/jsonl-append`, `/api/metadata-merge`, and `/api/scan-cache`
+endpoints write to the same tree the orchestrator wipes and the renderer
+populates. The orchestrator probes this at startup and fails loudly if
+the env doesn't match.
 
-<p>
-Originally built by <a href="http://www.amandaghassaei.com/" target="_blank">Amanda Ghassaei</a> as a final project for <a href="http://courses.csail.mit.edu/6.849/spring17/" target="_blank">Geometric Folding Algorithms</a>.
-Other contributors include <a href="http://www.cgg.cs.tsukuba.ac.jp/~sasaki_k/" target="_blank">Sasaki Kosuke</a>, <a href="http://erikdemaine.org/" target="_blank">Erik Demaine</a>, and <a href="https://github.com/amandaghassaei/OrigamiSimulator/graphs/contributors" target="_blank">others</a>.
-Code available on <a href="https://github.com/amandaghassaei/OrigamiSimulator" target="_blank">Github</a>.  If you have interesting crease patterns that would
-make good demo files, please send them to me (Amanda) so I can add them to the <b>Examples</b> menu.  My email address is on my website.  Thanks!<br/>
-</p><br/>
-<b>Instructions:</b><br/><br/>
-<img style="width: 100%; max-width:600px" src="assets/doc/demoui.gif" /><br/>
+Outputs:
 
-<ul>
-    <li>Slide the <b>Fold Percent</b> slider to control the degree of folding of the pattern (100% is fully folded, 0% is unfolded,
-        and -100% is fully folded with the opposite mountain/valley assignments).</li>
-    <li>Drag to rotate the model, scroll to zoom.</li>
-    <li>Import other patterns under the <b>Examples</b> menu.</li>
-    <li>Upload your own crease patterns in SVG or <a href="https://github.com/edemaine/fold" target="_blank">FOLD</a> formats, following <a href="#" class="goToImportInstructions">these instructions</a>.</li>
-    <li>Export FOLD files or 3D models ( STL or OBJ ) of the folded state of your design ( <b>File > Save Simulation as...</b> ).</li>
-</ul>
-    <img style="width: 100%;" src="assets/doc/strain.jpg" />
-<ul>
-    <li>Visualize the internal strain of the origami as it folds using the <b>Strain Visualization</b> in the left menu of the <b>Advanced Options</b>.</li>
-</ul>
-    <img style="width: 100%; max-width:600px" src="assets/doc/huffmanvr.jpg" /><br/>
-<ul>
-    <li>If you are working from a computer connected to a VR headset and hand controllers, follow <a href="#" id="goToViveInstructions">these instructions</a>
-        to use this app in an interactive virtual reality mode. (sorry I think this may be deprecated now!)</li>
-</ul>
+| Path | Contents |
+|---|---|
+| `new_dataset/uniform-1000/` | Per-shard preset JSONs + `assembled.json` |
+| `new_dataset/uniform-1000-logs/` | Per-shard generator logs |
+| `new_dataset/uniform-1000-render/` | PNGs (`<id>/step_*.png`), `dataset.jsonl`, `metadata/`, `.scan-cache/` |
 
-<br/>
-<b>External Libraries:</b><br/><br/>
-<ul>
-    <li>All rendering and 3D interaction done with <a target="_blank" href="https://threejs.org/">three.js</a></li>
-    <li><a href="https://github.com/fontello/svgpath" target="_blank">svgpath</a> and <a href="https://www.npmjs.com/package/path-data-polyfill" target="_blank">path-data-polyfill</a> helps with SVG path parsing</li>
-    <li><a href="https://github.com/edemaine/fold" target="_blank">FOLD</a> is used as the internal data structure, methods from the
-        <a href="https://github.com/edemaine/fold/blob/master/doc/api.md" target="_blank">FOLD API</a> used for SVG parsing</li>
-    <li>Arbitrary polygonal faces of imported geometry are triangulated using the <a target="_blank" href="https://github.com/mapbox/earcut">Earcut Library</a> and <a href="https://github.com/mikolalysenko/cdt2d" target="_blank"></a>cdt2d</a></li>
-    <li><a href="http://www.numericjs.com/" target="_blank">numeric.js</a> for linear algebra operations</li>
-    <li>GIF and WebM video export uses <a target="_blank" href="https://github.com/spite/ccapture.js/">CCapture</a></li>
-</ul>
-<p>
-<br/>
-You can find additional information in <a href="http://erikdemaine.org/papers/OrigamiSimulator_Origami7/" target="_blank">our 7OSME paper</a> and <a href="http://www.amandaghassaei.com/projects/origami_simulator/" target="_blank">project website</a>.
-If you have feedback about features you want to see in this app, please see <a href="https://github.com/amandaghassaei/OrigamiSimulator/discussions/41" target="_blank">this thread</a>.
-<br/>
-</p>
+### Prerequisites
+
+- Linux or macOS host with ~32 GB RAM. The pipeline launches up to 28
+  parallel Puppeteer-Chromium workers (~600–800 MB each under SwiftShader).
+- [`bun`](https://bun.sh) on `$PATH`.
+- `python3` (stdlib only — no `pip install` step).
+- Dev server reachable at `http://localhost:3000`.
+
+No `npm install` — all JS dependencies are vendored under `dependencies/`.
+
+## Repository layout
+
+| Path | Contents |
+|---|---|
+| [`tools/`](tools/) | Generator and renderer scripts. See [`tools/README.md`](tools/README.md) for the pipeline diagram and per-script reference. |
+| [`dataset/`](dataset/) | Final rendered output (1008 presets × N PNGs + `dataset.jsonl`). See [`dataset/README.md`](dataset/README.md) for the JSONL schema. |
+| [`new_dataset/`](new_dataset/) | Intermediate per-shard preset JSONs and run logs. See [`new_dataset/README.md`](new_dataset/README.md). |
+| `js/` | In-page benchmark runtime, preset generator, and the upstream simulator. Module pattern; no bundler. |
+| `assets/` | SVG/FOLD crease patterns and the Phase 1 facepool cache. |
+| `tools/generate-uniform-1000.py` | Top-level pipeline orchestrator (Pass 1 + continuation passes + assembler + renderer). |
+| `CLAUDE.md` | Architecture notes, file conventions, benchmark schema. Helpful for navigating the JS codebase. |
+
+## Composition
+
+24 cells × 42 presets = **1008 presets**:
+
+| Model           | d1 (easy) | d3 (medium) | d4 (hard) |
+|-----------------|-----------|-------------|-----------|
+| `simplevertex`  | 42        | 42          | 42        |
+| `bird`          | 42        | 42          | 42        |
+| `waterbomb`     | 42        | 42          | 42        |
+| `pinwheel`      | 42        | 42          | 42        |
+| `boat`          | 42        | 42          | 42        |
+| `mapfold`       | 42        | 42          | 42        |
+| `opensink`      | 42        | 42          | 42        |
+| `square`        | 42        | 42          | 42        |
+
+Three difficulty tiers (d1/d3/d4) differ in **point set composition** and
+**camera motion**: d1 has a static tilted pose with all-visible front
+points, d3 adds ramping rotation, d4 introduces hidden front and hidden
+back points that reveal only at the final step. Full tier semantics in
+`CLAUDE.md`.
+
+## How a preset is produced
+
+The pipeline is **trajectory-first**: instead of fixing a face-point set
+and searching for a camera trajectory that keeps it visible, the generator
+discovers visibility-preserving fold/rotation trajectories first, then
+selects barycentric points on faces that the trajectory's visibility
+timeline supports. This avoids the death-spiral of trying to "rescue" a
+pre-chosen point that the geometry doesn't expose.
+
+Per (model, difficulty) slot:
+
+1. **Face-pool discovery** — cached at `assets/facepools/<model>.json`.
+2. **Phase 2 trajectory search** — evaluate candidate (POV, rotation)
+   trajectories live in the simulator; accept those whose per-step
+   visibility timeline supports the tier's point-set plan.
+3. **Per-tier point selection** — emit up to `K` distinct face-point
+   configs per accepted trajectory.
+4. **Barycentric refinement** — sweep a 5×5 grid per face for each
+   accepted preset; pick the placement with maximum edge-/neighbor-pixel
+   margin and forward clearance.
+5. **Step normalization + hero-shot** — freeze POV across steps; render
+   step 0 from an iso POV with no rotation as the "before" reference frame.
+6. **Validation** — replay the preset; reject if any tracked point fails
+   visibility under the tier's evaluation semantics.
+
+Full pipeline details in `CLAUDE.md` § "Preset Generation Pipeline".
+
+## Determinism
+
+Same seed (`CANONICAL_SEED = 12345`) + warm `new_dataset/uniform-1000-render/.scan-cache/`
++ same source tree produces byte-identical `assembled.json`. PNGs are
+GPU-rendered via SwiftShader and are deterministic per-machine but may
+differ across GPU/driver combinations.
+
+## Second-seed top-up
+
+The canonical run uses seed `12345`. Some geometrically hard cells
+(`mapfold-d3`, `mapfold-d4`, `pinwheel-d4`) don't reach the 42-preset
+target from a single seed — the continuation passes are deterministic,
+so re-running `--resume` with the same seed reproduces identical output
+and adds nothing.
+
+To add more presets to deficit cells, run a **second-seed top-up**:
+
+```bash
+# After the canonical run, with the dev server still up:
+python3 tools/generate-uniform-1000.py --resume --base-seed 12346
+```
+
+`--base-seed <N>` (any value ≠ 12345) makes the continuation passes:
+
+- seed every shard from `N` instead of `12345` → fresh trajectories;
+- offset preset start-indices by `+1000` → new preset names never
+  collide with the canonical batch;
+- tag shard files `-seed<N>` (e.g. `mapfold-d3-s0-p2-seed12346.json`) →
+  the assembler's `{cell}-s*.json` glob still picks them up, merging the
+  top-up batch alongside the canonical one.
+
+The assembler sorts preset names and caps each cell at 42, so canonical
+presets (names `…-001`…`…-NNN`) fill first and the top-up batch
+(names `…-1xxx`) backfills any remaining slots. Top-ups are repeatable
+with further distinct seeds (`12347`, `12348`, …); each is fully
+documented by its `--base-seed` value, so any run is replicable.
+
+## License
+
+Released under the same license as the upstream simulator (see below).
+
+---
+
+## Acknowledgements
+
+The interactive origami physics simulator at the heart of this project is
+**Origami Simulator** by **Amanda Ghassaei, Erik Demaine, and Neil
+Gershenfeld**:
+
+- Upstream repository: <https://github.com/amandaghassaei/OrigamiSimulator>
+- Live demo: <https://origamisimulator.org>
+- Paper: [Fast, Interactive Origami Simulation using GPU Computation](http://erikdemaine.org/papers/OrigamiSimulator_Origami7/) (7OSME)
+
+The simulator extends prior work on origami folding mechanics by Mark
+Schenk & Simon D. Guest ([5OSME](http://www3.eng.cam.ac.uk/~sdg/preprint/5OSME.pdf))
+and Tomohiro Tachi ([Freeform Variations of Origami](http://www.tsg.ne.jp/TT/cg/TachiFreeformOrigami2010.pdf)),
+and uses ruling-aware curved-fold preprocessing from
+[Sasaki & Mitani](http://www.cgg.cs.tsukuba.ac.jp/projects/2020/RulingAwareTriangulation/index.html).
+
+Code in `js/dynamic/`, `js/curvedFolding.js`, `js/pattern.js`, `js/importer.js`,
+and the SVG/FOLD demo patterns under `assets/` are derived from or unchanged
+from the upstream project. The dataset-generation pipeline (`tools/`,
+`js/presetGenerator.js`, `js/benchmark.js`, `js/facePoints.js`,
+`js/pointAnnotations.js`) and the perception-benchmark framing are
+contributed on top.

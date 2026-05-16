@@ -87,18 +87,26 @@ const LOG_DIR = String(args["log-dir"] || "");
 const PREWARM = !args["no-prewarm"];
 
 const ALL_MODELS = [
-    // 4-model matrix for uniform-1000 dataset. Boat/square/mapfold all
-    // dropped after d4 yield issues (boat: 2 back faces; square: 8-face
-    // collapse at fold=70/65; mapfold: flat sheet, anchor drops out at
-    // any d3/d4 rotation). Still dropped: simplevertex, frog (too dense).
+    // 8-model matrix. The four previously-dropped models (boat, square,
+    // mapfold, simplevertex) are back in — frog stays out (too dense).
+    // Known d4-yield caveats from prior runs (may want per-model count
+    // overrides on the `counts` map below if they undershoot target):
+    //   boat:         2 back faces — thin hidden-back pool
+    //   square:       8-face collapse around fold=65–70
+    //   mapfold:      flat sheet; anchor drops out under d3/d4 rotation
+    //   simplevertex: single-vertex pattern; low geometric diversity
     //
     // Per-(model,difficulty) count override via `counts` map. Used for
     // pinwheel-d4 where smoke showed ~60% yield — oversample to land
     // the uniform target.
-    { key: "bird", path: "/Bases/birdBase.svg" },
-    { key: "waterbomb", path: "/Bases/waterbombBase.svg" },
-    { key: "pinwheel", path: "/Bases/pinwheelBase.svg", counts: { 4: 140 } },
-    { key: "opensink", path: "/Bases/openSinkBase.svg" },
+    { key: "simplevertex", path: "/SimpleFolds/simpleVertex.svg" },
+    { key: "bird",         path: "/Bases/birdBase.svg" },
+    { key: "waterbomb",    path: "/Bases/waterbombBase.svg" },
+    { key: "pinwheel",     path: "/Bases/pinwheelBase.svg", counts: { 4: 70 } },
+    { key: "boat",         path: "/Bases/boatBase.svg" },
+    { key: "mapfold",      path: "/SimpleFolds/mapfold.svg" },
+    { key: "opensink",     path: "/Bases/openSinkBase.svg" },
+    { key: "square",       path: "/Bases/squareBase.svg" },
 ];
 
 const MODELS = MODELS_FILTER
@@ -238,96 +246,6 @@ async function runSlot(model, difficulty, shard = 0, totalShards = 1) {
     }
 }
 
-// Derive d2 presets from a model's successful d4 output. For each d4
-// preset:
-//   - Reuse trajectory POV and fold sequence
-//   - FREEZE rotation to the final-step value (d4's back-exposing pose)
-//   - Drop hidden-front face points (d2's plan has only vF + hidden-back)
-//   - Set difficulty=2, rename -d4- → -d2-
-// Writes <out-dir>/<model>-d2.json with the transformed presets. Skipped
-// when <model>-d4.json is missing or empty (d4 slot failed).
-async function deriveD2FromD4(model) {
-    // Collect d4 presets from both unsharded (<model>-d4.json) and sharded
-    // (<model>-d4-s0.json, -s1.json, ...) outputs. Merges across shard files.
-    const d2Path = join(ROOT, OUT_DIR, `${model.key}-d2.json`);
-    const { readdir } = await import("fs/promises");
-    let dirEntries;
-    try {
-        dirEntries = await readdir(join(ROOT, OUT_DIR));
-    } catch (e) {
-        console.warn(`[matrix] derive d2 ← d4: ${model.key} readdir error`, e && e.message);
-        return;
-    }
-    const d4Pattern = new RegExp(`^${model.key}-d4(-s\\d+)?\\.json$`);
-    const d4Files = dirEntries.filter(f => d4Pattern.test(f));
-    if (d4Files.length === 0) {
-        console.log(`[matrix] derive d2 ← d4: ${model.key} skipped (no d4 output)`);
-        return;
-    }
-
-    const d4 = {};
-    for (const fname of d4Files) {
-        try {
-            const shardData = await Bun.file(join(ROOT, OUT_DIR, fname)).json();
-            Object.assign(d4, shardData);
-        } catch (e) {
-            console.warn(`[matrix] derive d2 ← d4: ${model.key}/${fname} parse error`, e && e.message);
-        }
-    }
-    const d4Names = Object.keys(d4);
-    if (d4Names.length === 0) {
-        console.log(`[matrix] derive d2 ← d4: ${model.key} skipped (d4 output empty)`);
-        return;
-    }
-
-    const d2 = {};
-    let emitted = 0;
-    for (const d4Name of d4Names) {
-        const src = d4[d4Name];
-        if (!src || !Array.isArray(src.steps) || src.steps.length === 0) continue;
-        const finalRot = src.steps[src.steps.length - 1].rotation || null;
-        // Copy preset shallowly, override per-tier fields.
-        const out = JSON.parse(JSON.stringify(src));
-        out.difficulty = 2;
-        // Freeze rotation: every step uses d4's final-step rotation.
-        // (Step 0 still gets the hero-shot override downstream — that's
-        // applied at generation time by normalizeStepsForDifficulty which
-        // doesn't re-run here, so we mimic it: step 0 keeps no rotation,
-        // steps 1..N get the frozen rotation.)
-        if (Array.isArray(out.steps)) {
-            for (let i = 0; i < out.steps.length; i++) {
-                if (i === 0) {
-                    // Hero shot: iso-ish POV + no rotation. Copy step 0's
-                    // POV (which normalizeStepsForDifficulty set to iso
-                    // when d4 was emitted), strip rotation.
-                    delete out.steps[i].rotation;
-                } else if (finalRot) {
-                    out.steps[i].rotation = finalRot.slice();
-                }
-            }
-        }
-        // Drop hidden-front face points — d2 plan is vF + hB only.
-        // Keep visible-front (no hidden) and hidden-back (faceId >= N).
-        // We don't have N here without model face count, but we can tell
-        // hidden-back by the faceId being "large" AND hidden flag. Simpler:
-        // only drop entries with hidden:true AND faceId < some large number
-        // we can't easily derive here. Workable heuristic: most hidden
-        // entries that are INDEX-BASED back picks store faceId >= N where
-        // N is ~8-16, so faceId >= 8 is a reasonable cutoff. More
-        // defensive: drop hidden entries on face-ids that appear to be
-        // "front half" (id < median). For now just preserve all face
-        // points as-is — d2 validation with its relaxed semantics won't
-        // reject over-counted points, and cleanup can be a follow-up.
-        // Rename: "<model>-d4-01" → "<model>-d2-01"
-        const d2Name = d4Name.replace(/-d4-/, "-d2-");
-        d2[d2Name] = out;
-        emitted++;
-    }
-
-    await Bun.write(d2Path, JSON.stringify(d2, null, 4));
-    console.log(`[matrix] derive d2 ← d4: ${model.key} wrote ${emitted} preset(s) to ${d2Path}`);
-}
-
 // Worker pool over a flat slot queue. Each task is a {model, d, shard?,
 // totalShards?} item; workers pull from `queue` until empty, capped at
 // `limit`. Natural work-stealing: an idle worker grabs the next queue item
@@ -363,9 +281,7 @@ if (PREWARM) {
     await runQueue(phase1, Math.min(CONCURRENCY, MODELS.length), "phase 1 (prewarm d=1)");
 
     // Phase 2: run d3 and d4 slots in parallel, optionally split into
-    // SHARDS_PER_SLOT sub-shards each. d2 is ablated — previously derived
-    // from d4 here, removed when d2 became redundant with d4's richer
-    // two-sided semantics.
+    // SHARDS_PER_SLOT sub-shards each.
     const phase2 = [];
     for (const m of MODELS) {
         for (const d of [3, 4]) {

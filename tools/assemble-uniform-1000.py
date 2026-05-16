@@ -21,12 +21,16 @@ SRC_DIR = ROOT / "new_dataset" / "uniform-1000"
 OUT_PATH = SRC_DIR / "assembled.json"
 
 CELLS = [
-    "bird-d1", "bird-d3", "bird-d4",
-    "waterbomb-d1", "waterbomb-d3", "waterbomb-d4",
-    "pinwheel-d1", "pinwheel-d3", "pinwheel-d4",
-    "opensink-d1", "opensink-d3", "opensink-d4",
+    "simplevertex-d1", "simplevertex-d3", "simplevertex-d4",
+    "bird-d1",         "bird-d3",         "bird-d4",
+    "waterbomb-d1",    "waterbomb-d3",    "waterbomb-d4",
+    "pinwheel-d1",     "pinwheel-d3",     "pinwheel-d4",
+    "boat-d1",         "boat-d3",         "boat-d4",
+    "mapfold-d1",      "mapfold-d3",      "mapfold-d4",
+    "opensink-d1",     "opensink-d3",     "opensink-d4",
+    "square-d1",       "square-d3",       "square-d4",
 ]
-TARGET_PER_CELL = 84
+TARGET_PER_CELL = 42
 
 
 def collect_for_cell(cell: str) -> dict:

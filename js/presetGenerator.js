@@ -97,6 +97,19 @@ function initPresetGenerator(globals) {
         return String(model).replace(/^\/+/, "").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 120);
     }
 
+    // Resolve the effective final-fold target for a generation call.
+    // Honors explicit `opts.finalFold` if provided; otherwise applies
+    // per-model defaults (e.g. mapfold caps at 60 so panels stay less
+    // reoriented at the final pose — keeps face qualities closer to
+    // iso-flat baseline so the 0.6 floor in selectFacePointsFromTrajectory
+    // is achievable).
+    function resolveFinalFold(opts) {
+        if (opts && opts.finalFold != null) return opts.finalFold;
+        var m = String((opts && opts.model) || "");
+        if (m.indexOf("mapfold") >= 0) return 60;
+        return null;
+    }
+
     // Linearly rescale a fold ladder so its last entry equals `target`.
     // Used by the per-model `finalFold` override (e.g. squareBase needs a
     // shallower terminal fold so back faces remain exposed at the final
@@ -130,7 +143,7 @@ function initPresetGenerator(globals) {
     // original 4-POV set so that `frontAt70` / `backAt70` pick up faces
     // visible from any reasonable camera angle. findTwoSidedStaticPOVs
     // queries this same set to locate POVs where both front and back
-    // tracked faces are visible simultaneously at fold=70 (used by d2).
+    // tracked faces are visible simultaneously at fold=70.
     //
     // Camera stays in the upper hemisphere ("we in general should be in
     // iso or +y for this"); the two -y entries cover back-face classification.
@@ -293,63 +306,6 @@ function initPresetGenerator(globals) {
         }
     }
 
-    // ── Two-sided POV search ───────────────────────────────────────────
-    // Given a front face and back face, find all POVs in the face-pool scan
-    // set where BOTH faces are visible at fold=70. Returns a ranked list
-    // (best first by minimum face quality). Empty list means no two-sided
-    // static POV exists — d2 should degrade to the hidden-back-reveal
-    // model.
-
-    // ── Template extraction ───────────────────────────────────────────
-
-    function extractRotationTemplates(presets, namePattern) {
-        var templates = [];
-        var regex = new RegExp("^" + namePattern.replace(/\*/g, ".*") + "$");
-        var keys = Object.keys(presets);
-        for (var i = 0; i < keys.length; i++) {
-            var name = keys[i];
-            if (!regex.test(name)) continue;
-            var preset = presets[name];
-            if (!preset.steps || !Array.isArray(preset.steps)) continue;
-
-            var rotCurve = [];
-            var povCurve = [];
-            var foldSteps = [];
-            for (var si = 0; si < preset.steps.length; si++) {
-                var step = preset.steps[si];
-                foldSteps.push(step.fold != null ? step.fold : 0);
-                // Rotation — default to [0,0,0] for step 0
-                if (step.rotation) {
-                    var r = Array.isArray(step.rotation) ? step.rotation : [step.rotation.x || 0, step.rotation.y || 0, step.rotation.z || 0];
-                    rotCurve.push([r[0], r[1], r[2]]);
-                } else {
-                    rotCurve.push([0, 0, 0]);
-                }
-                // POV
-                if (Array.isArray(step.pov)) {
-                    povCurve.push([step.pov[0], step.pov[1], step.pov[2]]);
-                } else if (typeof step.pov === "string") {
-                    // Convert named POVs to vectors
-                    var pvec = namedPovToVec(step.pov);
-                    povCurve.push(pvec);
-                } else {
-                    povCurve.push([1, 0.55, 0]);
-                }
-            }
-            templates.push({
-                name: name,
-                rotationCurve: rotCurve,
-                povCurve: povCurve,
-                foldSteps: foldSteps,
-                facePoints: preset.facePoints,
-                colorMode: preset.colorMode,
-                color1: preset.color1,
-                color2: preset.color2
-            });
-        }
-        return templates;
-    }
-
     function namedPovToVec(name) {
         var map = {
             "iso": [1, 1, 1], "x": [1, 0, 0], "-x": [-1, 0, 0],
@@ -371,10 +327,8 @@ function initPresetGenerator(globals) {
         var tier = clampDifficultyTier(difficulty);
         return {
             tier: tier,
-            requiresBothSides: tier === 2 || tier === 4,
-            // d1 = no inter-step motion, d2 = "small" rotation but POV static.
-            // Both render with constant or near-constant rotation across steps.
-            isStaticTier: tier <= 2,
+            requiresBothSides: tier === 4,
+            isStaticTier: tier === 1,
             isMajorMotionTier: tier === 4
         };
     }
@@ -502,7 +456,7 @@ function initPresetGenerator(globals) {
 
         // Hero-shot step 0 uses a fixed iso POV for the thumbnail frame and
         // is not part of the tracking motion model. Classify motion from
-        // states 2..N (tracking-optimized POV) so d1/d2 thresholds stay
+        // states 2..N (tracking-optimized POV) so d1 thresholds stay
         // consistent regardless of the hero-shot override.
         var motionPovs = povs.length > 1 ? povs.slice(1) : povs;
         var motionRots = rotations.length > 1 ? rotations.slice(1) : rotations;
@@ -596,405 +550,6 @@ function initPresetGenerator(globals) {
         // All tiers render as labelOnly — uniform visual style across the
         // dataset. (Was tier-dependent faceTriangleID / labelOnly mix.)
         return "labelOnly";
-    }
-
-    // ── Rotation curve variation ─────���─────────────────────────────────
-
-    function generateRotationVariants(template, count, rng) {
-        var base = template.rotationCurve;
-        var n = base.length;
-        var variants = [];
-
-        for (var vi = 0; vi < count; vi++) {
-            var strategy = vi % 6;
-            var curve = [];
-            // Pre-compute per-variant random values (so they're consistent across steps)
-            var scale = rng.randFloat(0.75, 1.2);
-            var blend = rng.randFloat(0.3, 0.7);
-
-            for (var si = 0; si < n; si++) {
-                var bx = base[si][0], by = base[si][1], bz = base[si][2];
-
-                switch (strategy) {
-                    case 0: // Mirror Y + Z
-                        curve.push([bx, -by, -bz]);
-                        break;
-                    case 1: // Scale (consistent across all steps)
-                        curve.push([bx * scale, by * scale, bz * scale]);
-                        break;
-                    case 2: // Time-shift forward (delayed onset)
-                        var shifted = Math.max(0, si - 1);
-                        curve.push([base[shifted][0], base[shifted][1], base[shifted][2]]);
-                        break;
-                    case 3: // Axis blend — swap pitch/roll energy
-                        curve.push([bx * blend + bz * (1 - blend), by, bz * blend + bx * (1 - blend)]);
-                        break;
-                    case 4: // Perturb
-                        curve.push([
-                            bx + rng.gaussian(0, 0.04),
-                            by + rng.gaussian(0, 0.06),
-                            bz + rng.gaussian(0, 0.04)
-                        ]);
-                        break;
-                    case 5: // Envelope reshape — ease-in-out
-                        var t = n <= 1 ? 1 : si / (n - 1);
-                        var eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
-                        var linearT = t;
-                        var ratio = linearT > 0.01 ? eased / linearT : 1;
-                        curve.push([bx * ratio, by * ratio, bz * ratio]);
-                        break;
-                }
-            }
-
-            // Round values
-            for (var ri = 0; ri < curve.length; ri++) {
-                curve[ri] = [
-                    Math.round(curve[ri][0] * 100) / 100,
-                    Math.round(curve[ri][1] * 100) / 100,
-                    Math.round(curve[ri][2] * 100) / 100
-                ];
-            }
-            variants.push(curve);
-        }
-        return variants;
-    }
-
-    // ── POV curve variation ────────────────────────────────────────���───
-
-    function generatePovVariants(template, count, rng) {
-        var base = template.povCurve;
-        var n = base.length;
-        var variants = [];
-
-        for (var vi = 0; vi < count; vi++) {
-            var strategy = vi % 4;
-            var curve = [];
-
-            for (var si = 0; si < n; si++) {
-                var px = base[si][0], py = base[si][1], pz = base[si][2];
-
-                switch (strategy) {
-                    case 0: // Mirror Z
-                        curve.push([px, py, -pz]);
-                        break;
-                    case 1: // Shift Y
-                        var yShift = rng.randFloat(-0.08, 0.08);
-                        curve.push([px, py + yShift, pz]);
-                        break;
-                    case 2: // Scale Z drift
-                        var zScale = rng.randFloat(0.6, 1.4);
-                        var baseZ = base[0][2];
-                        var driftZ = (pz - baseZ) * zScale;
-                        curve.push([px, py, baseZ + driftZ]);
-                        break;
-                    case 3: // Perturb
-                        curve.push([
-                            px + rng.gaussian(0, 0.03),
-                            py + rng.gaussian(0, 0.03),
-                            pz + rng.gaussian(0, 0.06)
-                        ]);
-                        break;
-                }
-            }
-
-            // Round
-            for (var ri = 0; ri < curve.length; ri++) {
-                curve[ri] = [
-                    Math.round(curve[ri][0] * 100) / 100,
-                    Math.round(curve[ri][1] * 100) / 100,
-                    Math.round(curve[ri][2] * 100) / 100
-                ];
-            }
-            variants.push(curve);
-        }
-        return variants;
-    }
-
-    // ── Fresh rotation curves from parameters (not template-based) ────
-
-    function generateFreshRotationCurve(stepCount, rng, params) {
-        var yawMax = params.yawMax || rng.randFloat(1.0, 1.6);
-        var pitchMax = params.pitchMax || rng.randFloat(0.15, 0.7);
-        var rollMax = params.rollMax || rng.randFloat(0, 0.4);
-        var yawDir = params.yawDir || (rng.random() < 0.5 ? 1 : -1);
-        var easeType = params.easeType || rng.randInt(0, 3);
-
-        var curve = [];
-        for (var si = 0; si < stepCount; si++) {
-            var t = stepCount <= 1 ? 1 : si / (stepCount - 1);
-
-            // Apply easing to t
-            var et;
-            switch (easeType) {
-                case 0: et = t; break; // linear
-                case 1: et = t * t; break; // ease-in
-                case 2: et = 1 - (1 - t) * (1 - t); break; // ease-out
-                case 3: et = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; break; // ease-in-out
-                default: et = t;
-            }
-
-            // Yaw ramps up, may plateau or taper at end
-            var yawTaper = t > 0.8 ? 1 - (t - 0.8) * 1.5 : 1;
-            var yaw = yawDir * yawMax * et * Math.max(0.5, yawTaper);
-
-            // Pitch follows a bell curve (peaks mid-fold)
-            var pitch = pitchMax * 4 * t * (1 - t);
-
-            // Roll follows sine envelope
-            var roll = yawDir * rollMax * Math.sin(t * Math.PI);
-
-            curve.push([
-                Math.round(pitch * 100) / 100,
-                Math.round(yaw * 100) / 100,
-                Math.round(roll * 100) / 100
-            ]);
-        }
-        return curve;
-    }
-
-    // ── Fresh POV curves ──────────────────────────────────────────────
-
-    function generateFreshPovCurve(stepCount, rng, startZ) {
-        // Sample the full upper hemisphere rather than a narrow +x cone. The
-        // old form was [~1, ~0.5, z∈[-0.9,0.9]] which kept candidates looking
-        // from roughly +x and systematically failed on models whose tracked
-        // faces face -x or ±z (e.g. boat at fold=70). Pick a random azimuth
-        // plus a positive-y tilt so the camera still looks from above, then
-        // apply small drifts for the trajectory.
-        var azimuth = rng.randFloat(0, Math.PI * 2);
-        var startY = rng.randFloat(0.30, 0.70);
-        var horiz = Math.sqrt(Math.max(0, 1 - startY * startY));
-        var startX = Math.cos(azimuth) * horiz;
-        var zFromAzimuth = Math.sin(azimuth) * horiz;
-        var z = startZ != null ? startZ : zFromAzimuth;
-        var xDriftTotal = rng.randFloat(-0.4, 0.4);
-        var yDriftTotal = rng.randFloat(-0.3, 0.1);
-        var zDriftTotal = rng.randFloat(-0.4, 0.4);
-
-        var curve = [];
-        for (var si = 0; si < stepCount; si++) {
-            var t = stepCount <= 1 ? 1 : si / (stepCount - 1);
-            var et = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
-
-            curve.push([
-                Math.round((startX + xDriftTotal * et) * 100) / 100,
-                Math.round((startY + yDriftTotal * et) * 100) / 100,
-                Math.round((z + zDriftTotal * et) * 100) / 100
-            ]);
-        }
-        return curve;
-    }
-
-    // ── Face point selection ───��───────────────────────────────────────
-
-    function selectFacePoints(difficulty, rng, modelFaceCount, knownFrontFaces, knownBackFaces, options) {
-        var profile = getDifficultyProfile(difficulty);
-        var opts = options || {};
-        // When skipHidden is set, the hidden-point slots planned for this
-        // difficulty tier are reserved (plannedHiddenBack / plannedHiddenFront)
-        // but the actual face IDs are chosen later from the trajectory's
-        // final-step visibility (two-pass selection). This avoids rejecting
-        // good trajectories just because the pre-chosen hidden face isn't
-        // visible at the final POV.
-        var skipHidden = opts.skipHidden === true;
-        // For d2: forceHiddenBack overrides the default "try visible-back first"
-        // behavior. Set when findTwoSidedStaticPOVs returns no candidates —
-        // caller is asking us to build the hidden-back fallback model.
-        var forceHiddenBack = opts.forceHiddenBack === true;
-        var N = modelFaceCount;
-        if (!N || N < 1) return {
-            config: {}, visibleCount: 0, hiddenCount: 0,
-            plannedHiddenBack: 0, plannedHiddenFront: 0
-        };
-
-        function normalizePool(pool, useBackSide) {
-            var out = [];
-            var seen = {};
-            var src = Array.isArray(pool) ? pool : [];
-            for (var i = 0; i < src.length; i++) {
-                var raw = parseInt(src[i], 10);
-                if (isNaN(raw)) continue;
-                var faceId = raw;
-                if (useBackSide) {
-                    if (faceId >= 0 && faceId < N) faceId += N;
-                    if (faceId < N || faceId >= N * 2) continue;
-                } else {
-                    if (faceId >= N && faceId < N * 2) faceId -= N;
-                    if (faceId < 0 || faceId >= N) continue;
-                }
-                if (!seen[faceId]) {
-                    seen[faceId] = true;
-                    out.push(faceId);
-                }
-            }
-            if (out.length === 0) {
-                var start = useBackSide ? N : 0;
-                var end = useBackSide ? N * 2 : N;
-                for (var f = start; f < end; f++) out.push(f);
-            }
-            // stableOrder mode: caller cycles frontIndex/backIndex across
-            // scan candidates to force face diversity. Sort numerically so
-            // callers can rely on a deterministic (face-id-ordered) layout.
-            if (opts.stableOrder) {
-                return out.sort(function (a, b) { return a - b; });
-            }
-            return rng.shuffle(out);
-        }
-
-        var frontPool = normalizePool(knownFrontFaces, false);
-        var backPool = normalizePool(knownBackFaces, true);
-
-        function makeBary() {
-            return {
-                u: rng.randFloat(0.15, 0.55),
-                v: rng.randFloat(0.15, 0.55),
-                w: 0
-            };
-        }
-
-        function makePoint(faceId, hidden) {
-            var b = makeBary();
-            b.w = Math.round((1 - b.u - b.v) * 100) / 100;
-            b.u = Math.round(b.u * 100) / 100;
-            b.v = Math.round(b.v * 100) / 100;
-            if (b.w < 0.08) { b.w = 0.1; b.u = Math.round((1 - b.v - b.w) * 100) / 100; }
-            var pt = { faceId: faceId, u: b.u, v: b.v, w: b.w };
-            if (hidden) pt.hidden = true;
-            return pt;
-        }
-
-        function nextFace(pool, offset) {
-            if (!pool || pool.length === 0) return 0;
-            return pool[offset % pool.length];
-        }
-
-        // Tier mapping (static-POV + object-rotation motion model):
-        //   d1: one-sided, all visible front points
-        //   d2: two-sided; prefer hidden-back reveal when forced fallback
-        //   d3: one-sided with motion, all visible front points
-        //   d4: two-sided with hidden-back reveal (+ one hidden front)
-        //   d5: two-sided with hidden-back reveal (+ more hidden front)
-        //
-        // User constraint:
-        //   - Minimum 3 tracked points for every difficulty
-        //   - Maximum 6 tracked points
-        //   - Side placement depends on difficulty tier
-        //
-        // Hidden back slots are intentionally planned for d2/d4/d5 reveal
-        // tiers. In two-pass mode (skipHidden=true), their face IDs are
-        // chosen later from faces actually visible at the final step.
-        //
-        // Cycling indices across scan candidates (set by caller) force
-        // distinct face IDs per candidate, so that e.g. 20 d1 candidates
-        // each pick a different front face rather than all drawing from
-        // index 0 of a per-call-reshuffled pool (which produced exact
-        // duplicates on low-diversity pools).
-        var frontIdx = (opts.frontIndex != null) ? (opts.frontIndex | 0) : 0;
-        var backIdx  = (opts.backIndex  != null) ? (opts.backIndex  | 0) : 0;
-
-        function buildPointPlan() {
-            // Counts include hidden slots (whether materialized now or deferred
-            // to pass-2 depends on skipHidden).
-            if (profile.tier === 1) {
-                return { frontVisible: 3, backVisible: 0, frontHidden: 0, backHidden: 0 };
-            }
-            if (profile.tier === 2) {
-                // d2 visible-back (legacy path) keeps one back point visible.
-                // d2 hidden-back fallback reserves a hidden back reveal slot.
-                if (forceHiddenBack) {
-                    return { frontVisible: 2, backVisible: 0, frontHidden: 0, backHidden: 1 };
-                }
-                return { frontVisible: 2, backVisible: 1, frontHidden: 0, backHidden: 0 };
-            }
-            if (profile.tier === 3) {
-                return { frontVisible: 3, backVisible: 0, frontHidden: 0, backHidden: 0 };
-            }
-            if (profile.tier === 4) {
-                return { frontVisible: 2, backVisible: 0, frontHidden: 1, backHidden: 1 };
-            }
-            // tier 5: denser target set while staying <= 6 total points
-            return { frontVisible: 2, backVisible: 0, frontHidden: 2, backHidden: 1 };
-        }
-
-        function totalPlanCount(plan) {
-            return (plan.frontVisible || 0) + (plan.backVisible || 0) +
-                (plan.frontHidden || 0) + (plan.backHidden || 0);
-        }
-
-        function enforcePlanBounds(plan, minCount, maxCount) {
-            var p = {
-                frontVisible: Math.max(0, plan.frontVisible | 0),
-                backVisible: Math.max(0, plan.backVisible | 0),
-                frontHidden: Math.max(0, plan.frontHidden | 0),
-                backHidden: Math.max(0, plan.backHidden | 0)
-            };
-            while (totalPlanCount(p) < minCount) {
-                // Prefer adding visible front anchors.
-                p.frontVisible++;
-            }
-            while (totalPlanCount(p) > maxCount) {
-                // Trim in this order to preserve difficulty intent:
-                // optional hidden front -> hidden back -> extra visible front -> visible back.
-                if (p.frontHidden > 0) { p.frontHidden--; continue; }
-                if (p.backHidden > 0 && p.backHidden + p.backVisible > 1) { p.backHidden--; continue; }
-                if (p.frontVisible > 1) { p.frontVisible--; continue; }
-                if (p.backVisible > 0) { p.backVisible--; continue; }
-                break;
-            }
-            return p;
-        }
-
-        var pointPlan = enforcePlanBounds(buildPointPlan(), 3, 6);
-        var visiblePoints = [];
-        var plannedHiddenBack = 0;
-        var plannedHiddenFront = 0;
-        var frontCursor = frontIdx;
-        var backCursor = backIdx;
-
-        function addFrontPoint(hidden) {
-            visiblePoints.push(makePoint(nextFace(frontPool, frontCursor), hidden));
-            frontCursor++;
-        }
-
-        function addBackPoint(hidden) {
-            visiblePoints.push(makePoint(nextFace(backPool, backCursor), hidden));
-            backCursor++;
-        }
-
-        for (var vf = 0; vf < pointPlan.frontVisible; vf++) addFrontPoint(false);
-        for (var vb = 0; vb < pointPlan.backVisible; vb++) addBackPoint(false);
-        for (var hb = 0; hb < pointPlan.backHidden; hb++) {
-            if (skipHidden) plannedHiddenBack++;
-            else addBackPoint(true);
-        }
-        for (var hf = 0; hf < pointPlan.frontHidden; hf++) {
-            if (skipHidden) plannedHiddenFront++;
-            else addFrontPoint(true);
-        }
-
-        // Build facePoints config object (group by faceId)
-        var config = {};
-        for (var pi = 0; pi < visiblePoints.length; pi++) {
-            var p = visiblePoints[pi];
-            var key = String(p.faceId);
-            if (!config[key]) config[key] = [];
-            var entry = { u: p.u, v: p.v, w: p.w };
-            if (p.hidden) entry.hidden = true;
-            config[key].push(entry);
-        }
-
-        var hiddenCount = 0;
-        for (var vi = 0; vi < visiblePoints.length; vi++) {
-            if (visiblePoints[vi].hidden) hiddenCount++;
-        }
-
-        return {
-            config: config,
-            visibleCount: visiblePoints.length - hiddenCount,
-            hiddenCount: hiddenCount,
-            plannedHiddenBack: plannedHiddenBack,
-            plannedHiddenFront: plannedHiddenFront
-        };
     }
 
     // ── Pass 2: pick hidden points from the trajectory's final step ────
@@ -1147,6 +702,16 @@ function initPresetGenerator(globals) {
         }
         var steps = preset.steps || [];
         if (steps.length === 0) { callback(preset); return; }
+
+        // mapfold-only: stricter barycentric centrality requirement.
+        // Forces u, v, w ≥ 0.27 (the closer to {0.33, 0.33, 0.33} the
+        // better). Panels in mapfold's accordion fold can be tilted
+        // near edge-on to the camera at the final pose, and a point
+        // sitting near a face's edge can merge with the dark crease
+        // shadow at the adjacent panel boundary. Centering the point
+        // gives the rendered dot a clear "well inside one panel"
+        // appearance regardless of fold orientation.
+        var refineMinBaryMargin = (preset.model && preset.model.indexOf("mapfold") >= 0) ? 0.27 : 0;
 
         resetValidationBaseline();
 
@@ -1417,6 +982,7 @@ function initPresetGenerator(globals) {
                     // saturation thresholds).
                     if (edge < 30) return -Infinity;
                     if (minN < 30) return -Infinity;
+                    if (baryMargin < refineMinBaryMargin) return -Infinity;
                     // Cap each axis to a reasonable maximum so one alone
                     // can't dominate (e.g. a point 800px from the edge
                     // shouldn't beat one with better baryMargin). Units:
@@ -1457,9 +1023,13 @@ function initPresetGenerator(globals) {
                         var cands = baseCandidates;
                         var survArr = survivesByEntry[idx];  // undefined for hidden entries
 
-                        var bestScore = -Infinity;
-                        var bestU = origU, bestV = origV, bestW = origW;
-
+                        // Collect all scored candidates so we can pick
+                        // the Nth-best based on the preset's sibling
+                        // index. This is how sibling configs from the
+                        // same trajectory get distinct placements on
+                        // SHARED faces — config 0 picks the best,
+                        // config 1 picks the 2nd best, etc.
+                        var scoredCands = [];
                         for (var ci = 0; ci < cands.length; ci++) {
                             // Hard gate: for non-hidden entries, skip
                             // candidates that failed mid-fold visibility.
@@ -1467,9 +1037,8 @@ function initPresetGenerator(globals) {
                             var c = cands[ci];
                             globals.facePoints.updatePointPosition(idx, faceId, c.u, c.v, c.w);
                             var s = scoreCandidate(idx, c);
-                            if (s > bestScore) {
-                                bestScore = s;
-                                bestU = c.u; bestV = c.v; bestW = c.w;
+                            if (s > -Infinity) {
+                                scoredCands.push({ u: c.u, v: c.v, w: c.w, score: s });
                             }
                         }
                         // Always evaluate the original (pre-refinement)
@@ -1478,19 +1047,26 @@ function initPresetGenerator(globals) {
                         // candidate survived.
                         globals.facePoints.updatePointPosition(idx, faceId, origU, origV, origW);
                         var sOrig = scoreCandidate(idx, { u: origU, v: origV, w: origW });
-                        if (sOrig > bestScore) {
-                            bestScore = sOrig;
-                            bestU = origU; bestV = origV; bestW = origW;
+                        if (sOrig > -Infinity) {
+                            scoredCands.push({ u: origU, v: origV, w: origW, score: sOrig });
                         }
 
+                        // Sort descending by score. With sibling biasing,
+                        // config 0 picks index 0 (best), config 1 picks
+                        // index 1 (2nd-best), capped at scoredCands.length-1
+                        // so the worst case is "same as best" if there
+                        // aren't enough distinct candidates.
+                        scoredCands.sort(function (a, b) { return b.score - a.score; });
+                        var siblingIdx = preset._siblingIndex || 0;
+                        var pickIdx = Math.min(siblingIdx, scoredCands.length - 1);
                         var roundedU, roundedV, roundedW;
-                        if (bestScore > -Infinity) {
+                        if (scoredCands.length > 0 && pickIdx >= 0) {
                             // Grid values are already 2-decimal rounded, so
                             // pass them through verbatim; no extra rounding
                             // that could drift the scored position.
-                            roundedU = bestU;
-                            roundedV = bestV;
-                            roundedW = bestW;
+                            roundedU = scoredCands[pickIdx].u;
+                            roundedV = scoredCands[pickIdx].v;
+                            roundedW = scoredCands[pickIdx].w;
                         } else {
                             roundedU = origU; roundedV = origV; roundedW = origW;
                         }
@@ -1776,23 +1352,20 @@ function initPresetGenerator(globals) {
     }
 
     // Target rotation magnitudes per tier (yaw/pitch/roll Euler radians).
-    // d3 ≈ 30°, d4 ≈ 60°, d5 ≈ 90–110°. Pitch/roll scale to ≈25% of yaw.
+    // d3 ≈ 30°, d4 ≈ 60°. Pitch/roll scale to ≈25% of yaw.
     function rotationTargetForTier(tier, rng) {
-        if (tier <= 2) return [0, 0, 0];
+        if (tier === 1) return [0, 0, 0];
         var r = rng || { randFloat: function (a, b) { return (a + b) / 2; }, random: function () { return 0.5; } };
         var yawBase, pitchBase, rollBase;
         if (tier === 3) {
             yawBase = r.randFloat(0.4, 0.6);
             pitchBase = r.randFloat(0.08, 0.18);
             rollBase = r.randFloat(0.03, 0.1);
-        } else if (tier === 4) {
+        } else {
+            // tier === 4
             yawBase = r.randFloat(0.85, 1.15);
             pitchBase = r.randFloat(0.15, 0.28);
             rollBase = r.randFloat(0.05, 0.15);
-        } else {
-            yawBase = r.randFloat(1.5, 1.9);
-            pitchBase = r.randFloat(0.25, 0.4);
-            rollBase = r.randFloat(0.1, 0.22);
         }
         var yawDir = r.random && r.random() < 0.5 ? 1 : -1;
         var rollDir = r.random && r.random() < 0.5 ? 1 : -1;
@@ -1814,7 +1387,7 @@ function initPresetGenerator(globals) {
     // [-0.5, 0.63, -0.59] vs iso at [0.58, 0.58, 0.58] — the model appears
     // to flip left-right when stepping from 1 → 2). Keeping POV static
     // across all states eliminates that flip; only rotation distinguishes
-    // state 1 (zero) from states 2..N (frozen d2 / ramping d4).
+    // state 1 (zero) from states 2..N (ramping d3 / d4 motion).
     //
     // runStep / validatePreset honor per-step rotation and fall back to
     // resetModel() when step.rotation is absent.
@@ -1844,8 +1417,7 @@ function initPresetGenerator(globals) {
         // Detect incoming rotation from Phase 2 profiles BEFORE we strip
         // any rotation field. The presence of non-zero rotation means
         // Phase 2 validated this trajectory with those specific values
-        // — they must be preserved, even for static tiers (d2 hidden-
-        // back fallback is d2 + non-zero rotation).
+        // — they must be preserved.
         var hasIncomingRotation = false;
         for (var rci = 0; rci < steps.length; rci++) {
             var rv = parseRotationVec(steps[rci] && steps[rci].rotation);
@@ -1868,37 +1440,7 @@ function initPresetGenerator(globals) {
         // Preserve Phase 2's rotation curve when present — those specific
         // values are what made the trajectory succeed (brought the hidden
         // back face into view, kept the front face visible, etc).
-        //
-        // d2 exception: Phase 2 uses a ramping profile (to actually expose
-        // back faces during trajectory search), but the emitted preset must
-        // be STATIC (no inter-step motion per user spec). Freeze every step
-        // to the FINAL step's rotation — that's where the back-exposing
-        // pose lives. Final-state geometry matches d4's success; d2 differs
-        // only in that the paper is already pre-tilted to that pose at
-        // fold=0 rather than ramping into it.
         if (hasIncomingRotation) {
-            var isD2 = (profile.tier === 2);
-            if (isD2) {
-                var finalRv = null;
-                for (var fri = steps.length - 1; fri >= 0; fri--) {
-                    var frv = parseRotationVec(steps[fri] && steps[fri].rotation);
-                    if (Math.abs(frv[0]) > 1e-8 || Math.abs(frv[1]) > 1e-8 || Math.abs(frv[2]) > 1e-8) {
-                        finalRv = frv;
-                        break;
-                    }
-                }
-                if (finalRv) {
-                    var frozenRot = [
-                        Math.round(finalRv[0] * 100) / 100,
-                        Math.round(finalRv[1] * 100) / 100,
-                        Math.round(finalRv[2] * 100) / 100
-                    ];
-                    for (var rji2 = 0; rji2 < out.length; rji2++) {
-                        out[rji2].rotation = frozenRot.slice();
-                    }
-                    return applyHeroShotStep0(out);
-                }
-            }
             for (var rji = 0; rji < steps.length; rji++) {
                 var srv = parseRotationVec(steps[rji] && steps[rji].rotation);
                 if (Math.abs(srv[0]) > 1e-8 || Math.abs(srv[1]) > 1e-8 || Math.abs(srv[2]) > 1e-8) {
@@ -1909,15 +1451,22 @@ function initPresetGenerator(globals) {
                     ];
                 }
             }
+            // d1 (static tier): step 0 shares the constant per-preset tilt
+            // with steps 1..N. Hero-shot would unrotate only step 0, creating
+            // a visible "untilt → tilt" jump between state 1 and state 2.
+            // d3/d4 keep hero-shot: their rotation ramps from ~0 at step 1,
+            // so stripping step 0 rotation is near-invisible.
+            if (profile.isStaticTier) return out;
             return applyHeroShotStep0(out);
         }
 
         // No incoming rotation and static tier: emit static preset.
+        // No rotation anywhere → hero-shot is a no-op (nothing to strip).
         if (profile.isStaticTier) return applyHeroShotStep0(out);
 
         // Synthesize a tier-appropriate rotation: 0 → target with
         // ease-in-out so the reveal happens in the last ~30% of the
-        // sweep (matches hidden-point-reveal-at-end semantics for d4/d5).
+        // sweep (matches hidden-point-reveal-at-end semantics for d4).
         var target = rotationTargetForTier(profile.tier, rng);
         var n = out.length;
         for (var ri = 0; ri < n; ri++) {
@@ -1943,8 +1492,8 @@ function initPresetGenerator(globals) {
         if (matchesDifficultySideConfig(preset.facePoints, difficulty, modelFaceCount)) score += 2;
         if (matchesDifficultyMotion(preset.steps, difficulty)) score += 2;
         var tier = clampDifficultyTier(difficulty);
-        if ((tier <= 2 && preset.colorMode === "faceTriangleID") ||
-            (tier >= 4 && preset.colorMode === "labelOnly") ||
+        if ((tier === 1 && preset.colorMode === "faceTriangleID") ||
+            (tier === 4 && preset.colorMode === "labelOnly") ||
             (tier === 3 && (preset.colorMode === "faceTriangleID" || preset.colorMode === "labelOnly"))) {
             score += 1;
         }
@@ -1982,82 +1531,6 @@ function initPresetGenerator(globals) {
     }
 
     // ── Preset assembly ────────────────────────────────────────────────
-
-    function assemblePreset(rotCurve, povCurve, foldSteps, facePointsConfig, options) {
-        var opts = options || {};
-        var difficulty = clampDifficultyTier(opts.difficulty || 5);
-        if (!opts.rng) throw new Error("assemblePreset: opts.rng is required (deterministic seeding)");
-        var rng = opts.rng;
-        var colorMode = opts.colorMode || getColorModeForDifficulty(difficulty, rng);
-        var colors = opts.colors || ["e74c3c", "3498db"];
-        var bgColor = opts.backgroundColor || "f0f0f0";
-
-        var steps = [];
-        for (var si = 0; si < foldSteps.length; si++) {
-            var step = {
-                fold: foldSteps[si],
-                pov: povCurve[si].slice()
-            };
-            // Only add rotation if non-zero
-            if (si > 0 && (rotCurve[si][0] !== 0 || rotCurve[si][1] !== 0 || rotCurve[si][2] !== 0)) {
-                step.rotation = rotCurve[si].slice();
-            }
-            steps.push(step);
-        }
-
-        var normalizedSteps = normalizeStepsForDifficulty(steps, difficulty, rng);
-
-        var preset = {
-            model: opts.model || "/Bases/birdBase.svg",
-            colorMode: colorMode,
-            labelStyle: "arrow",
-            backgroundColor: bgColor,
-            fold: 0,
-            pauseDuration: 1,
-            showPointNumbers: true,
-            autoCapture: true,
-            hidePointsDuringAnimation: true,
-            difficulty: difficulty,
-            facePoints: facePointsConfig,
-            steps: normalizedSteps
-        };
-
-        if (colorMode === "labelOnly") {
-            preset.color1 = colors[0];
-            preset.color2 = colors[1];
-        }
-
-        var targets = chooseTrackingTargetsFromFacePoints(facePointsConfig, opts.targetSelectionMode || "all", opts);
-        if (targets.targetPointLabels && targets.targetPointLabels.length > 0) {
-            preset.targetPointLabels = targets.targetPointLabels;
-        }
-        if (targets.primaryTargetPointLabels && targets.primaryTargetPointLabels.length > 0) {
-            preset.primaryTargetPointLabels = targets.primaryTargetPointLabels;
-        }
-
-        preset.minPointSeparationPx = opts.minPointSeparationPx != null ? opts.minPointSeparationPx : 70;
-        var assembleFaceCount = opts.modelFaceCount;
-        if (assembleFaceCount == null && globals.model && globals.model.getFaces) {
-            var fs = globals.model.getFaces();
-            assembleFaceCount = fs ? fs.length : 0;
-        }
-        // Configs with hidden OR back-face points must use finalStepOnly —
-        // strictAllSteps would fail at fold=0 since back faces are not
-        // geometrically visible on flat paper. This overrides any caller-
-        // provided trackingEvalMode because CLI defaults (strictAllSteps)
-        // would otherwise break d2/d4/d5 silently.
-        if (facePointsNeedFinalStepOnly(facePointsConfig, assembleFaceCount)) {
-            preset.trackingEvalMode = "finalStepOnly";
-        } else {
-            preset.trackingEvalMode = opts.trackingEvalMode || "strictAllSteps";
-        }
-
-        // Attach internal metadata for diversity selection (not serialized to JSON)
-        preset._rotCurve = rotCurve;
-        preset._povCurve = povCurve;
-
-        return preset;
-    }
 
     function cloneObject(obj) {
         return JSON.parse(JSON.stringify(obj));
@@ -2266,17 +1739,16 @@ function initPresetGenerator(globals) {
             difficulty === 1
                 ? [0, 12, 25, 37, 50]
                 : [0, 8, 16, 24, 32, 40, 48, 56, 64, 70],
-            opts.finalFold
+            resolveFinalFold(opts)
         );
         var rawSteps = stepsFromProgression(progression, foldSteps);
         var normalizedSteps = normalizeStepsForDifficulty(rawSteps, difficulty, rng);
 
-        // trackingEvalMode: if any face point is hidden (d4/d5 always,
-        // d2 fallback) or on a back face (d2 visible-back tracks a back
-        // point that is not visible at fold=0), force finalStepOnly so
-        // validation only requires the point visible at the last fold step.
-        // This overrides caller-provided trackingEvalMode because CLI
-        // defaults (strictAllSteps) would break d2/d4/d5 silently.
+        // trackingEvalMode: if any face point is hidden (d4 always) force
+        // finalStepOnly so validation only requires the point visible at
+        // the last fold step. This overrides caller-provided
+        // trackingEvalMode because CLI defaults (strictAllSteps) would
+        // break d4's hidden-back reveal semantics silently.
         var createFaceCount = opts.modelFaceCount;
         if (createFaceCount == null && globals.model && globals.model.getFaces) {
             var cfs = globals.model.getFaces();
@@ -2303,7 +1775,14 @@ function initPresetGenerator(globals) {
             facePoints: cloneObject(facePointsConfig),
             steps: normalizedSteps,
             minPointSeparationPx: opts.minPointSeparationPx != null ? opts.minPointSeparationPx : 70,
-            trackingEvalMode: resolvedTrackingMode
+            trackingEvalMode: resolvedTrackingMode,
+            // Sibling index within a trajectory's K-config emission.
+            // Refinement uses this to pick the Nth-best barycentric
+            // candidate for each face, so sibling configs from the same
+            // trajectory end up with VISIBLY DIFFERENT point placements
+            // on shared faces (rather than all converging to the same
+            // global-optimum position).
+            _siblingIndex: opts.siblingIndex || 0
         };
         if (colorMode === "labelOnly") {
             preset.color1 = colors[0];
@@ -2335,18 +1814,16 @@ function initPresetGenerator(globals) {
     // ── Trajectory-first face-point selection ──────────────────────────
     //
     // Given an accepted progression (from evaluateTrajectoriesLive) with a
-    // per-step visibilityTimeline and the model's face pools, emit up to K=3
+    // per-step visibilityTimeline and the model's face pools, emit up to K
     // distinct facePoints configs that satisfy the difficulty tier's tracked-
     // point requirements (CLAUDE.md "Tracked point counts" + "Difficulty
     // tiers"). Returns [] if the trajectory cannot satisfy the tier (e.g. no
-    // back-pool face is visible at the final step for d2/d4/d5).
+    // back-pool face is visible at the final step for d4).
     //
     // Tier rules (canonical from CLAUDE.md):
     //   d1: 3 visible front, strictAllSteps
-    //   d2: 2 visible front + 1 hidden back, finalStepOnly
     //   d3: 3 visible front, strictAllSteps
     //   d4: 2 visible front + 1 hidden front + 1 hidden back, finalStepOnly
-    //   d5: 2 visible front + 2 hidden front + 1 hidden back, finalStepOnly
     //
     // Selection logic:
     //   - Visible-front slots: faces in frontPool that are visible at EVERY
@@ -2359,26 +1836,64 @@ function initPresetGenerator(globals) {
     //     FINAL step but excluded from the visible-front pick (so the same
     //     face isn't picked twice).
     //
-    // Configs per trajectory, per-tier. K=1 for d1/d2/d3 preserves
-    // "unique trajectory per preset". K=10 for d4 lifts yield past the
+    // Configs per trajectory, per-tier. K=1 for d1/d3 preserves
+    // "unique trajectory per preset". K=4 for d4 lifts yield past the
     // thin-back-pool ceiling — d4 presets can share POV/rotation but
     // differ in hidden-back pick and barycentric position, producing
     // visually distinct outputs. Safe: presetSignature() keys on
     // facePoints+steps jointly so shared trajectories with different
     // face picks still dedupe correctly.
     function selectFromTrajectoryK(tier) {
-        if (tier === 4) return 10;
-        if (tier === 3) return 5;  // bumped from 3 to give opensink-d3 enough configs to fill 30/shard cap
-        return 1;
+        // K=1 for d1, K=2 for d3/d4. Maximizes trajectory diversity per
+        // cell: each (POV, rotation) trajectory yields at most one config
+        // for d1 (single-side, no reveal) and at most two for d3/d4
+        // (room for hidden-front/hidden-back variants on the same path).
+        // Continuation passes lift cells whose geometry yields fewer
+        // unique trajectories than the per-cell target.
+        if (tier === 1) return 1;
+        return 2;
     }
 
-    function selectFacePointsFromTrajectory(trajectory, difficulty, modelFaceCount, frontPool, backPool, rng) {
+    function selectFacePointsFromTrajectory(trajectory, difficulty, modelFaceCount, frontPool, backPool, rng, model) {
         var tier = clampDifficultyTier(difficulty);
         var K = selectFromTrajectoryK(tier);
         var timeline = trajectory && trajectory.visibilityTimeline;
         if (!Array.isArray(timeline) || timeline.length === 0) return [];
         var N = modelFaceCount;
         if (!N || N < 1) return [];
+
+        // mapfold-only: enforce a final-step face-quality floor on all
+        // anchor pools. Mapfold's accordion fold leaves many faces at
+        // grazing angles to the camera at the final pose — they pass
+        // isPointVisible (which is binary front-facing + occlusion) but
+        // the rendered dot sits on a near-edge-on panel and reads as
+        // invisible.
+        //
+        // mapfold split thresholds:
+        //   minFinalQuality       — visible-front anchors (rankedFronts).
+        //   minHiddenFinalQuality — hidden-front + hidden-back picks.
+        // Split because visible-front anchors are also constrained by
+        // alwaysVisible (faces visible at first + final step), which
+        // shrinks mapfold's candidate pool to faces that stay roughly
+        // iso-flat-oriented throughout the trajectory — most cap at
+        // ~0.4 final quality at fold=60. The faces that DO reach 0.6+
+        // are the ones that swing favorably during folding, and those
+        // are typically only finalVisible (not alwaysVisible). So we
+        // accept 0.4 for the visible-front "throughout the trajectory"
+        // anchors and require 0.6 for the hidden anchors that only
+        // need to be visible at the answer frame — exactly where the
+        // user observed the "invisible point" rendering issue.
+        // For mapfold, gate at 0.4 across all anchor types. Combined
+        // with the stricter refinement baryMargin floor (≥0.27, see
+        // refineFacePointBarycentric) this gives "stronger visibility"
+        // without over-pruning the trajectory pool: candidates clear
+        // the face-quality gate freely, then refinement picks
+        // barycentric placements far enough from any crease line that
+        // the rendered dot doesn't blend with shadow/edge artifacts.
+        var modelStr = String(model || "");
+        var isMapfoldModel = modelStr.indexOf("mapfold") >= 0;
+        var minFinalQuality = isMapfoldModel ? 0.4 : 0;
+        var minHiddenFinalQuality = isMapfoldModel ? 0.4 : 0;
 
         // Front pool: keep visibility-discovered front faces (faces visible
         // from above at fold=0). Used for visible-front anchors.
@@ -2405,14 +1920,30 @@ function initPresetGenerator(globals) {
         // / waterbomb / simplevertex have their geometric back faces at
         // arbitrary indices (often [0,1] — outside any "second half"
         // range), so any pre-filter on index range deterministically kills
-        // d2/d4 for those models. Letting the geometric gate be the sole
+        // d4 for those models. Letting the geometric gate be the sole
         // filter satisfies the user's primary contract: "guarantee a point
         // on the back side of the paper visible at the final state."
         var backs = [];
         for (var bii = 0; bii < N; bii++) backs.push(bii);
 
         // Build alwaysVisible set + min-step quality from the timeline.
+        //
+        // mapfold-only: only require visibility at first + final step
+        // (skip intermediate steps). Mapfold's accordion fold stacks
+        // panels over each other at fold=24-40, transiently occluding
+        // even the panels that recover full visibility at the final
+        // pose. The strict "visible at every step" rule decimates the
+        // candidate pool — many faces that ARE clearly visible in the
+        // initial (flat) and final (folded) renders get dropped.
+        // The same trade-off appears in validatePreset (mid-step
+        // visibility check is skipped for mapfold) so this mirrors the
+        // accepted "ugly mid-fold frames OK, endpoint frames must be
+        // clean" semantic.
         var firstStep = timeline[0];
+        var finalStepForVis = timeline[timeline.length - 1];
+        var stepsToCheck = isMapfoldModel
+            ? [firstStep, finalStepForVis]
+            : timeline;
         var alwaysVisible = {};
         var minStepQuality = {};
         for (var i0 = 0; i0 < firstStep.visibleFaceIds.length; i0++) {
@@ -2421,8 +1952,8 @@ function initPresetGenerator(globals) {
             minStepQuality[fid0] = (firstStep.qualities && firstStep.qualities[fid0] != null)
                 ? firstStep.qualities[fid0] : 0;
         }
-        for (var s = 1; s < timeline.length; s++) {
-            var step = timeline[s];
+        for (var s = 1; s < stepsToCheck.length; s++) {
+            var step = stepsToCheck[s];
             var stepSet = {};
             for (var v = 0; v < step.visibleFaceIds.length; v++) {
                 stepSet[step.visibleFaceIds[v]] = true;
@@ -2448,7 +1979,7 @@ function initPresetGenerator(globals) {
         }
         // Final-step back-side-visible faces (face's back surface is
         // camera-facing AND unoccluded). Computed by getBackSideVisibleFaceIds
-        // in facePoints.js and recorded in the timeline. Used to gate d2/d4
+        // in facePoints.js and recorded in the timeline. Used to gate d4
         // hidden-back picks: a hidden back point only "guarantees back side
         // visibility" if the underlying face's back surface is actually
         // exposed at the final state.
@@ -2468,11 +1999,13 @@ function initPresetGenerator(globals) {
         // HIDDEN-point semantic (a hidden point reveals at the final step),
         // not a visible-anchor one.
         //
-        // Earlier this was tier-conditional and used finalVisible for d2/d4/d5
+        // Earlier this was tier-conditional and used finalVisible for d4
         // — but that let visible-fronts disappear mid-fold, producing presets
         // that look broken (the user observed this in the rendered output).
         var rankedFronts = fronts.filter(function (fid) {
-            return alwaysVisible[fid] && (minStepQuality[fid] || 0) > 0;
+            return alwaysVisible[fid]
+                && (minStepQuality[fid] || 0) > 0
+                && (finalQuality[fid] || 0) >= minFinalQuality;
         });
         rankedFronts.sort(function (a, b) {
             return (minStepQuality[b] || 0) - (minStepQuality[a] || 0);
@@ -2492,7 +2025,9 @@ function initPresetGenerator(globals) {
         function isBackSideExposed(fid) {
             return !!finalBackSideVisible[fid];
         }
-        var rankedBacks = backs.filter(isBackSideExposed);
+        var rankedBacks = backs.filter(function (fid) {
+            return isBackSideExposed(fid) && (finalBackQuality[fid] || 0) >= minHiddenFinalQuality;
+        });
         // Rank by how directly the back surface faces the camera at the final
         // step (1.0 = squarely back-facing, ~0 = grazing). Best-viewed first
         // so K-output picks land on faces that actually read as back surface
@@ -2506,13 +2041,15 @@ function initPresetGenerator(globals) {
         });
 
         // Hidden-front candidates: in frontPool, visible at final step.
-        // (Used by d4/d5 for "late reveal" of front anchors.)
-        var rankedHiddenFronts = fronts.filter(function (fid) { return finalVisible[fid]; });
+        // (Used by d4 for "late reveal" of front anchors.)
+        var rankedHiddenFronts = fronts.filter(function (fid) {
+            return finalVisible[fid] && (finalQuality[fid] || 0) >= minHiddenFinalQuality;
+        });
         rankedHiddenFronts.sort(function (a, b) {
             return (finalQuality[b] || 0) - (finalQuality[a] || 0);
         });
 
-        // Per-tier slot count RANGES (d1–d4 only; d5 dropped per user spec).
+        // Per-tier slot count RANGES (d1/d3/d4 only).
         // Constraint: every preset has at least 2 visible (non-hidden)
         // anchors so initial state is trackable, and the total fits the
         // tier's range. Each tier picks greedily from its range based on
@@ -2521,26 +2058,23 @@ function initPresetGenerator(globals) {
         //
         //   d1: static (no rotation across steps), 2 visible front + 1-3
         //       hidden front (revealed at final step). Total 3-5.
-        //   d2: static POV + small rotation, 2 visible front + 1-2 hidden
-        //       back (revealed at final via rotation). Total 3-4.
         //   d3: rotated, 2 visible front + 1-3 hidden front. Total 3-5.
         //   d4: rotated, 2 visible front + 1-2 hidden front + 1-2 hidden
         //       back (mix of late-front-reveal and back-via-rotation).
         //       Total 4-6.
         var ranges;
         if (tier === 1)      ranges = { vF: [2, 2], hF: [1, 3], hB: [0, 0] };
-        else if (tier === 2) ranges = { vF: [2, 2], hF: [0, 0], hB: [1, 2] };
         else if (tier === 3) ranges = { vF: [2, 2], hF: [1, 3], hB: [0, 0] };
         else                 ranges = { vF: [2, 2], hF: [1, 2], hB: [1, 2] };
 
-        // For two-sided tiers (d2, d4), the FINAL POSE must show at least
-        // hB.lower back-pool faces that are GEOMETRICALLY back-side-exposed
-        // at the final step — same definition rankedBacks uses (index in
-        // [N/2, N-1] AND front-normal quality < BACK_SIDE_QUALITY_MAX).
-        // This guarantees the rendered PNG actually has visible back-surface
-        // for the hidden reveal, not just a face-id in the back-half range
-        // that happens to be front-facing.
-        var requiresBothSides = (tier === 2 || tier === 4);
+        // For d4, the FINAL POSE must show at least hB.lower back-pool
+        // faces that are GEOMETRICALLY back-side-exposed at the final step
+        // — same definition rankedBacks uses (index in [N/2, N-1] AND
+        // front-normal quality < BACK_SIDE_QUALITY_MAX). This guarantees
+        // the rendered PNG actually has visible back-surface for the
+        // hidden reveal, not just a face-id in the back-half range that
+        // happens to be front-facing.
+        var requiresBothSides = (tier === 4);
         var backVisibleAtFinalCount = 0;
         for (var bvi = 0; bvi < backs.length; bvi++) {
             if (isBackSideExposed(backs[bvi])) backVisibleAtFinalCount++;
@@ -2615,86 +2149,140 @@ function initPresetGenerator(globals) {
             { u: 0.25, v: 0.35, w: 0.40 }
         ];
 
-        var configs = [];
-        // Combinatorial K-expansion: enumerate distinct face-sets per
-        // trajectory by iterating front-pair combinations × hF offsets ×
-        // hB offsets. The original rank-window slide produced
-        // ≈rankedFronts.length-vF+1 configs (≈3 for pinwheel) regardless
-        // of K. With C(n, vF) front-pairs × hF cycle × hB cycle, K=10 is
-        // routinely reachable. Refinement diverges shared-face placements
-        // via minNeighborPx, so siblings stay distinct after refinement.
-        var seenSig = {};
-        var configIdx = 0;
+        // Combinatorial K-expansion with max-diversity selection.
+        //
+        // Two-stage approach for stronger variance when K > 1:
+        //   1. Enumerate ALL valid (visF-pair, hF-offset, hB-offset)
+        //      combinations into a pool, tagged with their face-set.
+        //   2. Greedily pick K of them, maximizing per-pick the average
+        //      non-overlap-with-chosen face set.
+        // The original loop emitted the first K combinations from a
+        // nested iteration — for K=2 this meant sibling configs shared
+        // the same visF pair (only differing in hidden-back), so global
+        // refinement gave identical visible-front placements.
         var hFCycleMax = Math.max(1, rankedHiddenFronts.length);
         var hBCycleMax = Math.max(1, rankedBacks.length);
-        var done = false;
-        for (var i = 0; i < rankedFronts.length - (plan.vF - 1) && !done; i++) {
-            for (var j = i + 1; j < rankedFronts.length && !done; j++) {
-                var visF = [rankedFronts[i], rankedFronts[j]];
-                var used0 = {};
-                used0[visF[0]] = true;
-                used0[visF[1]] = true;
 
-                for (var hOff = 0; hOff < hFCycleMax && !done; hOff++) {
-                    var hidF = [];
-                    var used1 = Object.assign({}, used0);
-                    for (var hi = 0; hi < rankedHiddenFronts.length && hidF.length < plan.hF; hi++) {
-                        var hidFid = rankedHiddenFronts[(hi + hOff) % rankedHiddenFronts.length];
-                        if (used1[hidFid]) continue;
-                        hidF.push(hidFid);
-                        used1[hidFid] = true;
+        // Stage 1: collect all unique combinations into a pool.
+        var pool = [];
+        var seenSig = {};
+        for (var i = 0; i < rankedFronts.length - (plan.vF - 1); i++) {
+            for (var j = i + 1; j < rankedFronts.length; j++) {
+                var visFp = [rankedFronts[i], rankedFronts[j]];
+                var u0 = {};
+                u0[visFp[0]] = true;
+                u0[visFp[1]] = true;
+
+                for (var hOff = 0; hOff < hFCycleMax; hOff++) {
+                    var hidFp = [];
+                    var u1 = Object.assign({}, u0);
+                    for (var hi = 0; hi < rankedHiddenFronts.length && hidFp.length < plan.hF; hi++) {
+                        var hfid = rankedHiddenFronts[(hi + hOff) % rankedHiddenFronts.length];
+                        if (u1[hfid]) continue;
+                        hidFp.push(hfid);
+                        u1[hfid] = true;
                     }
-                    if (hidF.length < plan.hF) continue;
+                    if (hidFp.length < plan.hF) continue;
 
-                    for (var bOff = 0; bOff < hBCycleMax && !done; bOff++) {
-                        var hidB = [];
-                        var used2 = Object.assign({}, used1);
-                        for (var bi = 0; bi < rankedBacks.length && hidB.length < plan.hB; bi++) {
-                            var hidBid = rankedBacks[(bi + bOff) % rankedBacks.length];
-                            if (used2[hidBid]) continue;
-                            hidB.push(hidBid);
-                            used2[hidBid] = true;
+                    for (var bOff = 0; bOff < hBCycleMax; bOff++) {
+                        var hidBp = [];
+                        var u2 = Object.assign({}, u1);
+                        for (var bi = 0; bi < rankedBacks.length && hidBp.length < plan.hB; bi++) {
+                            var bfid = rankedBacks[(bi + bOff) % rankedBacks.length];
+                            if (u2[bfid]) continue;
+                            hidBp.push(bfid);
+                            u2[bfid] = true;
                         }
-                        if (hidB.length < plan.hB) continue;
+                        if (hidBp.length < plan.hB) continue;
 
-                        var sig = visF.slice().sort().join(",")
-                                + "|" + hidF.slice().sort().join(",")
-                                + "|" + hidB.slice().sort().join(",");
-                        if (seenSig[sig]) continue;
-                        seenSig[sig] = true;
+                        var sigP = visFp.slice().sort().join(",")
+                                 + "|" + hidFp.slice().sort().join(",")
+                                 + "|" + hidBp.slice().sort().join(",");
+                        if (seenSig[sigP]) continue;
+                        seenSig[sigP] = true;
 
-                        var baryForThisConfig = baryGrid[configIdx % baryGrid.length];
-                        var config = {};
-                        var addPoint = function (fid, hidden) {
-                            var key = String(fid);
-                            if (!config[key]) config[key] = [];
-                            var entry = { u: baryForThisConfig.u, v: baryForThisConfig.v, w: baryForThisConfig.w };
-                            if (hidden) entry.hidden = true;
-                            config[key].push(entry);
-                        };
-                        for (var av = 0; av < visF.length; av++) addPoint(visF[av], false);
-                        for (var af = 0; af < hidF.length; af++) addPoint(hidF[af], true);
-                        // Hidden-back picks: use faceId = (idx + N) so the simulator
-                        // treats the point as a back-surface marker (isPointVisible's
-                        // `isFront = id < N` path will require the BACK normal to face
-                        // the camera). Without this the point would be a front-side
-                        // marker on the same face — visible only when the front is
-                        // exposed, defeating the d2/d4 hidden-back-reveal semantic.
-                        for (var ab = 0; ab < hidB.length; ab++) addPoint(hidB[ab] + N, true);
+                        var faceSet = {};
+                        for (var fk = 0; fk < visFp.length; fk++) faceSet[visFp[fk]] = true;
+                        for (var fk2 = 0; fk2 < hidFp.length; fk2++) faceSet[hidFp[fk2]] = true;
+                        for (var fk3 = 0; fk3 < hidBp.length; fk3++) faceSet[hidBp[fk3]] = true;
 
-                        configs.push({
-                            facePoints: config,
-                            _selection: {
-                                visibleFronts: visF,
-                                hiddenFronts: hidF,
-                                hiddenBacks: hidB
-                            }
+                        pool.push({
+                            visF: visFp.slice(),
+                            hidF: hidFp.slice(),
+                            hidB: hidBp.slice(),
+                            faceSet: faceSet
                         });
-                        configIdx++;
-                        if (configs.length >= K) done = true;
                     }
                 }
             }
+        }
+
+        if (pool.length === 0) return [];
+
+        // Stage 2: greedy max-diversity selection. Seed with pool[0]
+        // (top-ranked combination by enumeration order). Each subsequent
+        // pick maximizes the average non-overlap-face-count against the
+        // already-chosen set.
+        var chosen = [pool[0]];
+        var chosenSet = {}; chosenSet[0] = true;
+        while (chosen.length < K && chosen.length < pool.length) {
+            var bestIdx = -1;
+            var bestScore = -1;
+            for (var pi = 0; pi < pool.length; pi++) {
+                if (chosenSet[pi]) continue;
+                var cand = pool[pi];
+                var totalNonOverlap = 0;
+                for (var ci = 0; ci < chosen.length; ci++) {
+                    var nonOverlap = 0;
+                    for (var f in cand.faceSet) {
+                        if (!chosen[ci].faceSet[f]) nonOverlap++;
+                    }
+                    totalNonOverlap += nonOverlap;
+                }
+                var avgNonOverlap = totalNonOverlap / chosen.length;
+                if (avgNonOverlap > bestScore) {
+                    bestScore = avgNonOverlap;
+                    bestIdx = pi;
+                }
+            }
+            if (bestIdx < 0) break;
+            chosen.push(pool[bestIdx]);
+            chosenSet[bestIdx] = true;
+        }
+
+        // Stage 3: materialize selected combinations into config
+        // objects with per-config bary positions (cycled through grid).
+        var configs = [];
+        for (var ck = 0; ck < chosen.length; ck++) {
+            var sel = chosen[ck];
+            var baryForThisConfig = baryGrid[ck % baryGrid.length];
+            var config = {};
+            var addPoint = function (fid, hidden) {
+                var key = String(fid);
+                if (!config[key]) config[key] = [];
+                var entry = { u: baryForThisConfig.u, v: baryForThisConfig.v, w: baryForThisConfig.w };
+                if (hidden) entry.hidden = true;
+                config[key].push(entry);
+            };
+            for (var av = 0; av < sel.visF.length; av++) addPoint(sel.visF[av], false);
+            for (var af = 0; af < sel.hidF.length; af++) addPoint(sel.hidF[af], true);
+            // Hidden-back picks: use faceId = (idx + N) so the simulator
+            // treats the point as a back-surface marker (isPointVisible's
+            // `isFront = id < N` path will require the BACK normal to face
+            // the camera). Without this the point would be a front-side
+            // marker on the same face — visible only when the front is
+            // exposed, defeating d4's hidden-back-reveal semantic.
+            for (var ab = 0; ab < sel.hidB.length; ab++) addPoint(sel.hidB[ab] + N, true);
+
+            configs.push({
+                facePoints: config,
+                siblingIndex: ck,
+                _selection: {
+                    visibleFronts: sel.visF,
+                    hiddenFronts: sel.hidF,
+                    hiddenBacks: sel.hidB
+                }
+            });
         }
         return configs;
     }
@@ -2776,10 +2364,7 @@ function initPresetGenerator(globals) {
     }
 
     // Rotation bounds per CLAUDE.md "Rotation magnitude per tier" table.
-    // Single source of truth — replaces per-candidate rotationBoundsForCandidate
-    // logic from the legacy generator. d1=static, d2=small (hidden-back reveal
-    // needs a rotation budget to expose the back face at fold=70), d3=moderate
-    // single-side, d4=moderate two-sided, d5=large two-sided.
+    // d1=static-tilted-pose, d3=moderate single-side, d4=moderate two-sided.
     function rotationBoundsForTier(difficulty) {
         var tier = clampDifficultyTier(difficulty);
         // d1: STATIC (no motion across steps), but each preset can sit at a
@@ -2788,15 +2373,6 @@ function initPresetGenerator(globals) {
         // pose can be. Without this d1 collapses to the single "flat from
         // above" view.
         if (tier === 1) return { yaw: 0.5, pitch: 0.15, roll: 0.08 };
-        // d2: Phase 2 uses ramping rotation (like d4) so it actually finds
-        // back-exposing trajectories, then normalizeStepsForDifficulty
-        // FREEZES the emitted preset's rotation to the final step's value.
-        // Uses d4-magnitude rotation (yaw/pitch ≈ 1.0) — smaller magnitudes
-        // don't reliably expose back-side faces at the final state. The
-        // hero-shot step-0 override (iso POV + no rotation) prevents the
-        // initial frame from being edge-on, so validation of step 0 passes
-        // even under large constant rotation for steps 1..N.
-        if (tier === 2) return { yaw: 1.4, pitch: 1.3, roll: 0.4 };
         // d3: rotated single-side, moderate envelope — larger than d1
         // (static-pose) so the ramping motion is visually noticeable,
         // but stays below d4's full two-sided envelope.
@@ -2822,7 +2398,7 @@ function initPresetGenerator(globals) {
             difficulty === 1
                 ? [0, 12, 25, 37, 50]
                 : [0, 8, 16, 24, 32, 40, 48, 56, 64, 70],
-            opts.finalFold
+            resolveFinalFold(opts)
         );
         var maxScanCandidates = opts.maxScanCandidates || Math.max(count * 3, 12);
 
@@ -2914,7 +2490,16 @@ function initPresetGenerator(globals) {
             // bird-d3 — the single anchor face went grazing mid-fold and
             // every rotation profile was rejected). 0.05 still weeds out
             // trajectories where the anchor folds in on itself entirely.
-            minFaceQuality: opts.minFaceQuality != null ? opts.minFaceQuality : 0.05,
+            //
+            // mapfold-specific cap at 0.5: even with the stricter Stage A/B
+            // values of 0.6, mapfold's coplanar normals sit just under the
+            // gate. Capping ensures the stage never rises above 0.5 for
+            // mapfold while preserving Stage C's 0.05 (which is already
+            // more permissive than the cap).
+            minFaceQuality: (function () {
+                var def = opts.minFaceQuality != null ? opts.minFaceQuality : 0.05;
+                return model.indexOf("mapfold") >= 0 ? Math.min(def, 0.5) : def;
+            })(),
             phase2VerboseRejects: opts.phase2VerboseRejects === false ? false : true,
             phase2MaxTargetFaces: opts.phase2MaxTargetFaces != null
                 ? opts.phase2MaxTargetFaces
@@ -2997,17 +2582,22 @@ function initPresetGenerator(globals) {
             // can deterministically sample additional rotation profiles per
             // shard. Same seed → same profile sequence.
             // Per-shard seed for deterministic rotation profile sampling.
-            rngSeed: seed
+            rngSeed: seed,
+            // mapfold-only override: skip the initial-step (currentStep===0,
+            // fold=0) visibility gate. The flat sheet's coplanar normals fail
+            // isPointVisible under d3/d4 rotation, but step 0 will be rendered
+            // at zero rotation thanks to applyHeroShotStep0 — so the gate is
+            // asserting visibility under a pose that never actually renders.
+            // Other models curl up enough at fold=0 not to need this.
+            enforceInitialTrackedVisible: model.indexOf("mapfold") < 0
         };
 
         // Tier slot plan (mirrors selectFacePointsFromTrajectory). Used by
         // the safety top-off below.
         var tierPlan = (function () {
             if (difficulty === 1) return { hB: 0, hF: 0 };
-            if (difficulty === 2) return { hB: 1, hF: 0 };
             if (difficulty === 3) return { hB: 0, hF: 0 };
-            if (difficulty === 4) return { hB: 1, hF: 1 };
-            return                     { hB: 1, hF: 2 };
+            return                     { hB: 1, hF: 1 };  // d4
         })();
 
         var earlyStopThreshold = Math.max(count * 2, 15);
@@ -3155,7 +2745,7 @@ function initPresetGenerator(globals) {
                 var prog = progressions[pi];
                 pi++;
 
-                var configs = selectFacePointsFromTrajectory(prog, difficulty, modelFaceCount, frontFaces, backFaces, rng);
+                var configs = selectFacePointsFromTrajectory(prog, difficulty, modelFaceCount, frontFaces, backFaces, rng, model);
                 if (configs.length === 0) {
                     trajectoriesEmpty++;
                     processProgression();
@@ -3185,7 +2775,8 @@ function initPresetGenerator(globals) {
                         targetSelectionMode: slotScanCfg.targetSelectionMode,
                         includeInitialVisibleTrackedPoint: slotScanCfg.includeInitialVisibleTrackedPoint,
                         initialVisibleTrackedPointCount: slotScanCfg.initialVisibleTrackedPointCount,
-                        modelFaceCount: modelFaceCount
+                        modelFaceCount: modelFaceCount,
+                        siblingIndex: cfg.siblingIndex || 0
                     });
 
                     // Safety top-off: in normal operation,
@@ -3363,31 +2954,24 @@ function initPresetGenerator(globals) {
             // same mesh state. (Was 800ms historically, then 500ms; further
             // dropped to 400ms as a pipeline speedup.)
             var actualSettle = Math.max(settle, 400);
+            // mapfold-only: skip intermediate-step visibility checks
+            // (non-final, fold>0). Mapfold's accordion fold stacks panels
+            // over anchor points at fold=24-40, causing isPointVisible to
+            // return false even though the trajectory's final pose recovers
+            // full visibility. Final-step visibility (the answer frame) and
+            // step-0 / hero-shot visibility remain enforced.
+            var isMapfold = preset.model && preset.model.indexOf("mapfold") >= 0;
+            var skipMidStepVisibility = isMapfold && !isLast && step.fold > 0;
             setTimeout(function () {
 
                 var requiredIndices = [];
-                // d2 presets are emitted with FROZEN rotation (final-step
-                // value applied to every step) even though Phase 2 tested a
-                // ramping trajectory. This means middle-step geometry in
-                // the emitted preset is NOT what Phase 2 validated — face
-                // visibility at mid-folds with max rotation can flicker.
-                // For d2 we therefore only check non-hidden points at the
-                // boundary states (step 0 hero-shot and final step),
-                // mirroring what the user actually sees: state 0 is the
-                // high-visibility iso overview, final state is the proven
-                // back-exposing pose. Middle-state flicker is accepted.
-                var isD2Preset = (preset.difficulty === 2);
-                var isBoundaryStep = (stepIdx === 0) || isLast;
                 for (var i = 0; i < pointIndices.length; i++) {
                     var pInfo = pointIndices[i];
                     // Hidden points only need to be visible at final step.
                     if (pInfo.hidden && !isLast) continue;
                     requiredIndices.push(pInfo.idx);
 
-                    // Non-hidden: all tiers except d2 require visible at
-                    // every step. d2 requires visible only at boundary
-                    // (state 0 hero + final state).
-                    if (isD2Preset && !isBoundaryStep) continue;
+                    if (skipMidStepVisibility) continue;
 
                     var visible = globals.facePoints.isPointVisible(pInfo.idx);
                     if (!visible) {
@@ -3466,13 +3050,12 @@ function initPresetGenerator(globals) {
         var count = opts.count || 7;
         var baseName = opts.baseName || "bird-frontback";
         var startIndex = opts.startIndex || 9;
-        var templatePattern = opts.templatePattern || "bird-frontback-0*";
         var seed = opts.seed || Date.now();
         var foldSteps = opts.foldSteps || rescaleFoldLadder(
             difficulty === 1
                 ? [0, 12, 25, 37, 50]
                 : [0, 8, 16, 24, 32, 40, 48, 56, 64, 70],
-            opts.finalFold
+            resolveFinalFold(opts)
         );
         var validate = opts.validate !== false;
         var settleMs = opts.settleMs || 300;
@@ -3480,16 +3063,6 @@ function initPresetGenerator(globals) {
         var normalizedTrajectoryMode = String(trajectoryMode).trim().toLowerCase();
 
         var rng = makeRng(seed);
-
-        // Get presets from benchmark module
-        var presets = {};
-        if (globals.benchmark && globals.benchmark.getPresets) {
-            presets = globals.benchmark.getPresets() || {};
-        }
-
-        // Extract templates
-        var templates = extractRotationTemplates(presets, templatePattern);
-        console.log("presetGenerator: extracted " + templates.length + " templates from '" + templatePattern + "'");
 
         // Determine face pools (async — cached per model)
         var frontFaces = null;
@@ -3500,145 +3073,16 @@ function initPresetGenerator(globals) {
             modelFaceCount = faces ? faces.length : 0;
         }
 
-        // Build existing preset references for diversity
+        // Existing references for diversity scoring. Scan-progression path
+        // does not preload from benchmark presets; selectDiverse handles an
+        // empty list gracefully.
         var existingRefs = [];
-        for (var ti = 0; ti < templates.length; ti++) {
-            existingRefs.push({
-                _rotCurve: templates[ti].rotationCurve,
-                _povCurve: templates[ti].povCurve,
-                facePoints: templates[ti].facePoints
-            });
-        }
 
-        function runLegacyGeneration(existingRefs) {
-        // ── Generate candidates ────────────────────────────────────
-
-        var candidates = [];
-        var targetCandidates = count * 5;
-
-        // Strategy 1: Variants from existing templates
-        if (templates.length > 0) {
-            var variantsPerTemplate = Math.ceil(targetCandidates / templates.length / 2);
-            for (var tpl = 0; tpl < templates.length; tpl++) {
-                var rotVars = generateRotationVariants(templates[tpl], variantsPerTemplate, rng);
-                var povVars = generatePovVariants(templates[tpl], variantsPerTemplate, rng);
-
-                for (var rv = 0; rv < rotVars.length; rv++) {
-                    var pvIdx = rv % povVars.length;
-                    var fp = selectFacePoints(difficulty, rng, modelFaceCount, frontFaces, backFaces);
-                    var colorIdx = rng.randInt(0, COLOR_PAIRS.length - 1);
-                    var tunedRot = tuneRotationCurveForDifficulty(rotVars[rv], difficulty, rng);
-                    var tunedPov = tunePovCurveForDifficulty(povVars[pvIdx], difficulty, rng);
-                    var colorMode = getColorModeForDifficulty(difficulty, rng);
-
-                    candidates.push(assemblePreset(
-                        tunedRot, tunedPov, foldSteps, fp.config,
-                        {
-                            model: model,
-                            difficulty: difficulty,
-                            colorMode: colorMode,
-                            colors: COLOR_PAIRS[colorIdx],
-                            backgroundColor: rng.pick(["f0f0f0", "f5f5f5", "ffffff"]),
-                            targetSelectionMode: opts.targetSelectionMode || "all",
-                            includeInitialVisibleTrackedPoint: opts.includeInitialVisibleTrackedPoint === true,
-                            initialVisibleTrackedPointCount: opts.initialVisibleTrackedPointCount != null ? opts.initialVisibleTrackedPointCount : 1,
-                            rng: rng
-                        }
-                    ));
-                }
-            }
-        }
-
-        // Strategy 2: Fresh curves (when templates are sparse or for extra diversity)
-        var freshCount = Math.max(targetCandidates - candidates.length, targetCandidates / 2);
-        for (var fi = 0; fi < freshCount; fi++) {
-            var startZ = rng.pick([-0.9, -0.6, -0.3, 0, 0.3, 0.6, 0.9]);
-            var freshRot = generateFreshRotationCurve(foldSteps.length, rng, {
-                yawMax: rng.randFloat(0.4, 1.0),
-                pitchMax: rng.randFloat(0.08, 0.35),
-                rollMax: difficulty >= 3 ? rng.randFloat(0.0, 0.4) : 0,
-                yawDir: rng.random() < 0.5 ? 1 : -1,
-                easeType: rng.randInt(0, 3)
-            });
-            var freshPov = generateFreshPovCurve(foldSteps.length, rng, startZ);
-            var freshFp = selectFacePoints(difficulty, rng, modelFaceCount, frontFaces, backFaces);
-            var freshColorIdx = rng.randInt(0, COLOR_PAIRS.length - 1);
-            freshRot = tuneRotationCurveForDifficulty(freshRot, difficulty, rng);
-            freshPov = tunePovCurveForDifficulty(freshPov, difficulty, rng);
-            var freshColorMode = getColorModeForDifficulty(difficulty, rng);
-
-            candidates.push(assemblePreset(
-                freshRot, freshPov, foldSteps, freshFp.config,
-                {
-                    model: model,
-                    difficulty: difficulty,
-                    colorMode: freshColorMode,
-                    colors: COLOR_PAIRS[freshColorIdx],
-                    backgroundColor: rng.pick(["f0f0f0", "f5f5f5", "ffffff"]),
-                    targetSelectionMode: opts.targetSelectionMode || "all",
-                    includeInitialVisibleTrackedPoint: opts.includeInitialVisibleTrackedPoint === true,
-                    initialVisibleTrackedPointCount: opts.initialVisibleTrackedPointCount != null ? opts.initialVisibleTrackedPointCount : 1,
-                    rng: rng
-                }
-            ));
-        }
-
-        candidates = filterCandidatesByDifficulty(candidates, difficulty, modelFaceCount, count, rng);
-
-        console.log("presetGenerator: generated " + candidates.length + " candidates");
-
-        if (!validate) {
-            // Skip validation — select diverse subset directly
-            var selected = selectDiverse(candidates, count, existingRefs);
-            finalize(selected, baseName, startIndex, callback);
-            return;
-        }
-
-        // ── Validate, pick top-N, then refine only the winners ────
-        //
-        // Refinement is a step-walk at validator-matching settle times
-        // (~8s per preset for a 10-step trajectory). Running it on every
-        // candidate would add minutes per generation; running it only on
-        // the diverse subset picked for output is ~N × 8s and produces
-        // the same final quality because refinement is a purely local
-        // barycentric search per face, independent of the other
-        // candidates in the pool.
-
-        updateStatus("Validating " + candidates.length + " candidates...");
-        validateBatch(candidates, settleMs, function (idx, total) {
-            updateStatus("Validating candidate " + (idx + 1) + "/" + total + "...");
-        }, function (results) {
-            var passing = [];
-            for (var vi = 0; vi < results.length; vi++) {
-                if (results[vi].valid) {
-                    passing.push(candidates[results[vi].presetIndex]);
-                }
-            }
-            console.log("presetGenerator: " + passing.length + "/" + candidates.length + " passed validation");
-            updateStatus(passing.length + " candidates passed validation");
-
-            if (passing.length === 0) {
-                callback({ error: "No candidates passed validation", generated: [] });
-                return;
-            }
-
-            passing = filterCandidatesByDifficulty(passing, difficulty, modelFaceCount, Math.min(count, passing.length), rng);
-            var selected = selectDiverse(passing, count, existingRefs);
-            refineAndRevalidate(selected, settleMs, rng, function (finalPresets) {
-                finalize(finalPresets, baseName, startIndex, callback);
-            });
-        });
-        }
-
-        function runHybridOrScan(existingRefs, strictScanMode) {
+        function runHybridOrScan() {
             generateFromScanProgressions(opts, function (scanGen) {
                 if (scanGen && scanGen.error) {
                     console.warn("presetGenerator: scan progression generation failed", scanGen.error);
-                    if (strictScanMode) {
-                        callback({ error: scanGen.error, generated: [] });
-                        return;
-                    }
-                    runLegacyGeneration(existingRefs);
+                    callback({ error: scanGen.error, generated: [] });
                     return;
                 }
 
@@ -3647,12 +3091,7 @@ function initPresetGenerator(globals) {
                     : [];
 
                 if (scanCandidates.length === 0) {
-                    if (strictScanMode) {
-                        callback({ error: "No progression candidates generated", generated: [] });
-                        return;
-                    }
-                    console.log("presetGenerator: hybrid fallback to legacy generator (no scan candidates)");
-                    runLegacyGeneration(existingRefs);
+                    callback({ error: "No progression candidates generated", generated: [] });
                     return;
                 }
 
@@ -3682,12 +3121,11 @@ function initPresetGenerator(globals) {
                 runValidateBatch();
 
                 function runValidateBatch() {
-                // d1/d2 short-circuit batch validation — d1 because validation
-                // predictably passes for static-pose flat walks; d2 because it's
-                // derived post-hoc from d4's already-validated trajectory.
-                // refineAndRevalidate still does per-preset validation below, so
-                // any genuinely broken preset is caught.
-                var skipBatchValidation = !validate || difficulty <= 2;
+                // d1 short-circuit batch validation — d1's static-pose flat
+                // walks predictably pass. refineAndRevalidate still does
+                // per-preset validation below, so any genuinely broken
+                // preset is caught.
+                var skipBatchValidation = !validate || difficulty <= 1;
                 if (skipBatchValidation) {
                     scanCandidates = filterCandidatesByDifficulty(scanCandidates, difficulty, modelFaceCount, count, rng);
                     var scanSelected = selectDiverse(scanCandidates, count, existingRefs);
@@ -3722,12 +3160,7 @@ function initPresetGenerator(globals) {
                                     + " failures=" + JSON.stringify((r.failures || []).slice(0, 3)));
                             }
                         } catch (e) { /* noop */ }
-                        if (strictScanMode) {
-                            callback({ error: "No scan progression candidates passed validation", generated: [] });
-                            return;
-                        }
-                        console.log("presetGenerator: hybrid fallback to legacy generator (scan candidates failed validation)");
-                        runLegacyGeneration(existingRefs);
+                        callback({ error: "No scan progression candidates passed validation", generated: [] });
                         return;
                     }
 
@@ -3745,16 +3178,17 @@ function initPresetGenerator(globals) {
             frontFaces = pools.front;
             backFaces = pools.back;
 
-            if (normalizedTrajectoryMode === "scanprogression" || normalizedTrajectoryMode === "scan") {
-                runHybridOrScan(existingRefs, true);
+            if (normalizedTrajectoryMode === "scanprogression" ||
+                normalizedTrajectoryMode === "scan" ||
+                normalizedTrajectoryMode === "hybrid") {
+                runHybridOrScan();
                 return;
             }
-            if (normalizedTrajectoryMode === "hybrid") {
-                runHybridOrScan(existingRefs, false);
-                return;
-            }
-
-            runLegacyGeneration(existingRefs);
+            callback({
+                error: "Unsupported trajectoryMode: '" + normalizedTrajectoryMode +
+                    "' (supported: 'scan', 'scanprogression', 'hybrid')",
+                generated: []
+            });
         });
     }
 
@@ -3791,39 +3225,13 @@ function initPresetGenerator(globals) {
         console.log("presetGenerator: " + msg);
     }
 
-    // ── Save to server ─────────────────────────────────────────────────
-
-    function saveToServer(presets, callback) {
-        var xhr = new XMLHttpRequest();
-        xhr.open("POST", "/api/save-benchmarks", true);
-        xhr.setRequestHeader("Content-Type", "application/json");
-        xhr.onload = function () {
-            if (xhr.status === 200) {
-                var resp = JSON.parse(xhr.responseText);
-                callback(null, resp);
-            } else {
-                callback("Server error: " + xhr.status);
-            }
-        };
-        xhr.onerror = function () { callback("Network error"); };
-        xhr.send(JSON.stringify(presets));
-    }
-
     // ── Public API ─────────────────────────────────────────────────────
 
     return {
         generate: generate,
         validatePreset: validatePreset,
         validateBatch: validateBatch,
-        saveToServer: saveToServer,
-        extractRotationTemplates: extractRotationTemplates,
-        generateRotationVariants: generateRotationVariants,
-        generatePovVariants: generatePovVariants,
-        generateFreshRotationCurve: generateFreshRotationCurve,
-        generateFreshPovCurve: generateFreshPovCurve,
-        selectFacePoints: selectFacePoints,
         selectDiverse: selectDiverse,
-        assemblePreset: assemblePreset,
         COLOR_PAIRS: COLOR_PAIRS,
         makeRng: makeRng
     };

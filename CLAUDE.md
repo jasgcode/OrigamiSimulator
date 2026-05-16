@@ -5,7 +5,7 @@ Real-time GPU-accelerated origami folding simulator. Live at https://origamisimu
 ## Running Locally
 
 ```bash
-bun run dev          # serves static files via bunx serve on localhost:3000
+bun run dev          # runs server.js (Bun.serve) on localhost:3000, exposes /api/jsonl-append + /api/metadata-merge
 ```
 
 Or open `index.html` directly (some fetch-based features require HTTP).
@@ -74,18 +74,21 @@ js/
   dynamic/
     dynamicSolver.js      — GPU simulation solver
     GPUMath.js            — WebGL compute abstraction
-benchmarks.json           — Benchmark preset definitions
 dependencies/             — Vendored third-party libs (do NOT npm install)
 assets/                   — Demo patterns (SVG/FOLD) + facepool cache
 tools/
   generate-presets.js     — Puppeteer driver for presetGenerator
   generate-matrix.js      — Multi-(model, difficulty) parallel runner
   render_dataset_parallel.py — Multi-worker PNG renderer
+  validate-presets.js     — Replay a preset bank and verify visibility against semantics
+  reverse-presets.js      — Reverse-step transform; stamps direction:"reverse" for unfolding variants
+  assemble-uniform-1000.py — Selects uniform-distribution presets across (model, difficulty) cells
+  generate-uniform-1000.py — Orchestrates uniform-1000 generation passes
 ```
 
-## Benchmark System (`benchmarks.json`)
+## Benchmark System
 
-Runs configurable sequences: load a model, apply view/color settings, step through fold % or animate. Select via `?benchmark=<name>` or batch with `?runAll=true`. Any JSON parameter is URL-overridable.
+Runs configurable sequences: load a model, apply view/color settings, step through fold % or animate. Presets live in a JSON bank loaded via `?benchmarks=<path>&benchmark=<name>` (e.g. `new_dataset/uniform-1000/assembled.json`); batch all with `?runAll=true`. Any JSON parameter is URL-overridable. Without a `?benchmarks=` URL param the app starts with no preset loaded.
 
 Core parameters: `model`, `colorMode`, `color1`/`color2`, `fold`, `facePoints`, `labelStyle`, `steps`, `foldAnimation`, `previewRotation`, `difficulty`, `trackingEvalMode`, `scanMode`. Full parameter list in `js/benchmark.js`.
 
@@ -127,7 +130,7 @@ Metadata for dataset labeling. Presets use **static camera + per-step model `rot
 
 Rotation bounds per tier (radians): d1 `{yaw 0.5, pitch 0.15, roll 0.08}`; d3 `{yaw 0.8, pitch 0.5, roll 0.2}`; d4 `{yaw 1.4, pitch 1.3, roll 0.4}`.
 
-State 1 always renders at zero rotation (hero shot — fold=0, flat paper) from the trajectory's static POV; states 2..N apply the chosen rotation.
+For d3/d4, state 1 renders at zero rotation (hero shot — fold=0, flat paper) from the trajectory's static POV; states 2..N apply the chosen rotation. For d1, state 1 keeps the same constant tilt as states 2..N — d1 has no rotation animation, so a hero-shot strip would create a visible "untilt → tilt" jump between state 1 and state 2.
 
 ### Validation semantics
 
@@ -195,7 +198,7 @@ bun tools/generate-presets.js --model /Bases/boatBase.svg --difficulty 4 \
 
 1. **Face-pool discovery** — cached at `assets/facepools/<key>.json`. Sweeps POVs × fold ∈ {0, 70}; records visible face IDs. Front pool = visibility-discovered; back pool = **all face indices `[0, N-1]`**, gated downstream by `getBackSideVisibleFaceIds` at the final step.
 2. **Phase 2 trajectory search** — one `evaluateTrajectoriesLive` run per slot with a generic anchor. Each accepted progression carries a `visibilityTimeline` (per-step `visibleFaceIds`, `backSideVisibleFaceIds`, etc.) and a `finalViewScore`.
-3. **Per-tier point selection** — `selectFacePointsFromTrajectory` emits up to **K** configs per trajectory via `selectFromTrajectoryK(tier)`: **K=10 for d4, K=3 for d3, K=1 for d1** (~`js/presetGenerator.js`). Loop tries up to `rankedFronts.length - plan.vF + 1` rank-window shifts until configs fit the tier plan. Visible-front anchors drawn from `alwaysVisible`. Hidden-front from `finalVisible`. Hidden-back from `[0,N-1] ∩ finalBackSideVisible`, stored with `faceId = idx + N` so `isPointVisible`'s `isFront = id < N` path checks the back normal. Enforces 3–6 total points, ≥2 visible non-hidden.
+3. **Per-tier point selection** — `selectFacePointsFromTrajectory` emits up to **K** configs per trajectory via `selectFromTrajectoryK(tier)` (see `js/presetGenerator.js` for current K values — typically `K=1` for d1 and larger for d3/d4; tuned for trajectory diversity vs. preset count). Loop tries up to `rankedFronts.length - plan.vF + 1` rank-window shifts until configs fit the tier plan. Visible-front anchors drawn from `alwaysVisible`. Hidden-front from `finalVisible`. Hidden-back from `[0,N-1] ∩ finalBackSideVisible`, stored with `faceId = idx + N` so `isPointVisible`'s `isFront = id < N` path checks the back normal. Enforces 3–6 total points, ≥2 visible non-hidden.
 4. **Barycentric refinement** — `refineFacePointBarycentric` runs on final selections. Drives to final pose with ≥800 ms settle; sweeps 5×5 barycentric grid (`u,v ∈ [0.22, 0.52]`, `w ≥ 0.18`) in two passes.
 5. **Step normalization + hero-shot** — `normalizeStepsForDifficulty` freezes POV across steps (tier motion model); `applyHeroShotStep0` strips `step[0].rotation`.
 6. **Validation** — replay with `Math.max(settle, 800)` ms. Regressions revert to pre-refinement barycentric.
@@ -219,9 +222,9 @@ Use clamped (not saturating) terms — saturating `clamp01` causes ties and coll
 
 ## Matrix runner (`tools/generate-matrix.js`)
 
-Runs slots in parallel. Models in `ALL_MODELS`: `bird`, `waterbomb`, `pinwheel`, `opensink`, `boat` (5 total). `simplevertex` and `frog` remain dropped (back faces don't reliably expose under d4 rotation, or models too dense).
+Runs slots in parallel. Models in `ALL_MODELS`: `simplevertex`, `bird`, `waterbomb`, `pinwheel`, `boat`, `mapfold`, `opensink`, `square` (8 total). `frog` remains dropped (too dense). Several models have known d4-yield caveats (thin back pools, anchor drop-out, fold-collapse) and may need per-model `counts` overrides to hit a uniform target.
 
-- `--models <key>[,<key>]` — filter which models from `ALL_MODELS` to run. Default = all 5.
+- `--models <key>[,<key>]` — filter which models from `ALL_MODELS` to run. Default = all 8.
 - `--concurrency` default `min(28, cpus - 4)`. Leaves 4 threads for OS + dev server; saturates 32-thread boxes. SwiftShader Chrome is ~1 core/instance.
 - `--shards-per-slot N` — splits each (model, tier) slot into N sub-shards with distinct seeds (`SEED + shard*1009`) and contiguous start-index ranges. Each shard is a separate `generate-presets.js` process; the worker-pool queue work-steals across shards. File naming: `<model>-d<n>-s<shard>.json` when sharded, `<model>-d<n>.json` when unsharded.
 - `--build-progressions` auto-scales to `max(24, ceil(count * 1.5))` (e.g. count=75 → build=113).
@@ -229,17 +232,17 @@ Runs slots in parallel. Models in `ALL_MODELS`: `bird`, `waterbomb`, `pinwheel`,
   1. All models run at d=1 in parallel (each writes its own facepool cache, no contention).
   2. Remaining (model, d∈{3,4}) slots run parallel up to `--concurrency`.
 
-Total Phase-2 work: 4–5 models × 2 tiers (d3, d4) × `--shards-per-slot` shards per slot, plus d1 unsharded in Phase 1. (d2 ablated: `deriveD2FromD4` exists in the source but is no longer invoked.)
+Total Phase-2 work: 8 models × 2 tiers (d3, d4) × `--shards-per-slot` shards per slot, plus d1 unsharded in Phase 1. (d2 ablated.)
 
 ## Render parallelism (`tools/render_dataset_parallel.py`)
 
 Default `--workers = min(28, cpus * 7/8)`. Each worker = one Puppeteer Chromium (~600–800 MB RAM, ~1 core under SwiftShader). `selectPresetFromConfig` skips `importDemoFile` when the requested model is already loaded — saves ~1–2 s per preset on same-model shards.
 
-Skip-existing check uses `step_0000_current.png` presence (not `metadata.json`, since metadata is now consolidated per-object so a per-preset existence check from file presence isn't possible).
+Skip-existing check looks for the preset name as a key in any `<DATASET_DIR>/metadata/*_metadata.json` (see `metadata_exists` in `render_dataset_parallel.py`). To force re-render of a subset of presets, delete those preset-name keys from the metadata file(s) — PNG deletion alone is not enough.
 
 ## Key trade-offs
 
-- **Thin back pools** (boat has 2 back faces) limit d4 diversity — presets often share hidden-back faces.
+- **Thin back pools** (e.g. opensink, pinwheel under d4) limit hidden-back diversity — presets within a cell often share hidden-back faces.
 - **Phase 2 settle (300 ms) vs validation settle (≥800 ms)** — Phase 2 accepts can fail validation if paper is mid-transition; fallback picks up slack.
 
 ## Important Conventions

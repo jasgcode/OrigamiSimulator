@@ -2,12 +2,16 @@
 """
 One-command orchestrator for the uniform-1000 (1008-preset) dataset.
 
+24 cells (8 models × 3 difficulty tiers) × 42 presets each = 1008.
+
 Pipeline:
-  1. Wipe `dataset/` (preserving `.scan-cache/`) and `new_dataset/uniform-1000{,-logs}/`.
+  1. Wipe `new_dataset/uniform-1000{,-logs,-render}/`. Preserves
+     `new_dataset/uniform-1000-render/.scan-cache/` (Phase 2 cache) so
+     re-runs are cache-warm.
   2. Pass 1: full matrix via `generate-matrix.js` with the tier-default
-     rotation profile counts (d1=20, d3=12, d4=50). Handles prewarm +
-     parallelism + per-shard seed derivation. Targets 84 per cell.
-  3. Pass 2+ (continuation): for cells short of 84, re-run those cells
+     rotation profile counts (d1=20, d3=6, d4=30). Handles prewarm +
+     parallelism + per-shard seed derivation. Targets 42 per cell.
+  3. Pass 2+ (continuation): for cells short of 42, re-run those cells
      with progressively higher `--rotation-profile-count`. The (traj,
      profile) pair count is the binding knob on Phase 2 acceptance for
      low-yield cells (opensink, pinwheel-d4) — bumping it gives Phase 2
@@ -15,12 +19,14 @@ Pipeline:
      Pass 1, so files are SUPERSETS (cache hits replay; new accepts only
      come from the additional profiles). Same filename = atomic rewrite
      with strictly more presets.
-  4. Final assemble (`assemble-uniform-1000.py`) and parallel render.
+  4. Final assemble (`assemble-uniform-1000.py`) and parallel render to
+     `new_dataset/uniform-1000-render/`.
 
 Usage:
-  bun run dev            # in another terminal
+  DATASET_DIR=new_dataset/uniform-1000-render bun run dev   # in another terminal
   python3 tools/generate-uniform-1000.py
 """
+import argparse
 import json
 import os
 import shutil
@@ -32,9 +38,22 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-TARGET = 84
+TARGET = 42  # 24 cells × 42 = 1008 (closest uniform distribution to 1000)
+CANONICAL_SEED = 12345  # the canonical first-pass seed (do not change)
+# BASE_SEED is overridable via --base-seed for second-seed top-up runs.
+# A non-canonical seed shifts every continuation seed, offsets preset
+# start-indices by +1000, and tags shard filenames with `-seed<N>` so a
+# top-up run produces a FRESH batch of presets that the assembler merges
+# alongside the canonical batch (rather than deterministically
+# overwriting it). See README "Second-seed top-up".
 BASE_SEED = 12345
 DEV_SERVER = "http://localhost:3000"
+# Render output + scan-cache home. The dev server's DATASET_DIR env must
+# match this path or its /api/jsonl-append, /api/metadata-merge, and
+# /api/scan-cache endpoints will write to the wrong filesystem location.
+# Kept under new_dataset/ alongside the preset bank + logs so the entire
+# run lives in one tree.
+RENDER_DIR = "new_dataset/uniform-1000-render"
 
 # Worker concurrency for continuation passes (Pass 2+). Leaves 4 threads
 # for OS + dev server + renderer; SwiftShader-backed Chrome is ~1 core
@@ -43,29 +62,53 @@ CPU_COUNT = os.cpu_count() or 4
 WORKERS = max(2, min(28, CPU_COUNT - 4))
 
 # Per-cell metadata. (cell_name, model_path, difficulty, sharded, count).
-# Oversample: count exceeds TARGET=84 so the assembler can cap at 84.
-# Slack lets cells with attrition (validation drops, refinement drops)
-# still reach 84 even when some shards underperform.
-#   d1 unsharded: count=120 (vs 84). Phase 2 earlyStop = max(3, count) = 120.
-#   d3/d4 sharded: count=30 per shard (vs 21). 4×30 = 120 max per cell.
+# 8 models × 3 tiers = 24 cells. Oversample (~1.43×) gives the assembler
+# slack to hit TARGET=42 even when cells suffer validation/refinement drops.
+#   d1 unsharded: count=60 (vs TARGET=42). Phase 2 earlyStop = max(3, count) = 60.
+#   d3/d4 sharded: count=15 per shard (vs ~11). 4×15 = 60 max per cell.
+# Known low-yield models (boat thin-back, square fold-collapse,
+# mapfold flat-sheet, simplevertex single-vertex) rely on continuation
+# passes to reach TARGET.
 CELLS = [
-    ("bird-d1",      "/Bases/birdBase.svg",      1, False, 120),
-    ("waterbomb-d1", "/Bases/waterbombBase.svg", 1, False, 120),
-    ("pinwheel-d1",  "/Bases/pinwheelBase.svg",  1, False, 120),
-    ("opensink-d1",  "/Bases/openSinkBase.svg",  1, False, 120),
-    ("bird-d3",      "/Bases/birdBase.svg",      3, True,  30),
-    ("waterbomb-d3", "/Bases/waterbombBase.svg", 3, True,  30),
-    ("pinwheel-d3",  "/Bases/pinwheelBase.svg",  3, True,  30),
-    ("opensink-d3",  "/Bases/openSinkBase.svg",  3, True,  30),
-    ("bird-d4",      "/Bases/birdBase.svg",      4, True,  30),
-    ("waterbomb-d4", "/Bases/waterbombBase.svg", 4, True,  30),
-    ("pinwheel-d4",  "/Bases/pinwheelBase.svg",  4, True,  30),
-    ("opensink-d4",  "/Bases/openSinkBase.svg",  4, True,  30),
+    # d1: 8 cells × 42 = 336
+    ("simplevertex-d1", "/SimpleFolds/simpleVertex.svg", 1, False, 60),
+    ("bird-d1",         "/Bases/birdBase.svg",           1, False, 60),
+    ("waterbomb-d1",    "/Bases/waterbombBase.svg",      1, False, 60),
+    ("pinwheel-d1",     "/Bases/pinwheelBase.svg",       1, False, 60),
+    ("boat-d1",         "/Bases/boatBase.svg",           1, False, 60),
+    ("mapfold-d1",      "/SimpleFolds/mapfold.svg",      1, False, 60),
+    ("opensink-d1",     "/Bases/openSinkBase.svg",       1, False, 60),
+    ("square-d1",       "/Bases/squareBase.svg",         1, False, 60),
+    # d3: 8 cells × 42 = 336
+    ("simplevertex-d3", "/SimpleFolds/simpleVertex.svg", 3, True,  15),
+    ("bird-d3",         "/Bases/birdBase.svg",           3, True,  15),
+    ("waterbomb-d3",    "/Bases/waterbombBase.svg",      3, True,  15),
+    ("pinwheel-d3",     "/Bases/pinwheelBase.svg",       3, True,  15),
+    ("boat-d3",         "/Bases/boatBase.svg",           3, True,  15),
+    ("mapfold-d3",      "/SimpleFolds/mapfold.svg",      3, True,  15),
+    ("opensink-d3",     "/Bases/openSinkBase.svg",       3, True,  15),
+    ("square-d3",       "/Bases/squareBase.svg",         3, True,  15),
+    # d4: 8 cells × 42 = 336
+    ("simplevertex-d4", "/SimpleFolds/simpleVertex.svg", 4, True,  15),
+    ("bird-d4",         "/Bases/birdBase.svg",           4, True,  15),
+    ("waterbomb-d4",    "/Bases/waterbombBase.svg",      4, True,  15),
+    ("pinwheel-d4",     "/Bases/pinwheelBase.svg",       4, True,  15),
+    ("boat-d4",         "/Bases/boatBase.svg",           4, True,  15),
+    ("mapfold-d4",      "/SimpleFolds/mapfold.svg",      4, True,  15),
+    ("opensink-d4",     "/Bases/openSinkBase.svg",       4, True,  15),
+    ("square-d4",       "/Bases/squareBase.svg",         4, True,  15),
 ]
 SHARDS_PER_SLOT = 4
-PER_CELL_TOTAL = 120  # oversample target (assembler caps at 84)
+PER_CELL_TOTAL = 60  # oversample target (assembler caps at TARGET=42)
 BUILD = 300
 MAX_TRAJ = 1200
+# Scan-candidate pool ceiling per slot. Wider pool → more raw trajectories
+# enter Phase 2 acceptance, lifting yield on geometry-dense cells before
+# the continuation stages have to step in. presetGenerator's in-page
+# default would be max(count*3, 12) (e.g. 180 for d1 count=60, 45 for
+# d3/d4 shard count=15); pinning to 60 keeps Phase 1 sweep cost bounded
+# while doubling what the orchestrator previously requested (30).
+MAX_SCAN = 60
 
 # Pass 1 is `generate-matrix.js` with these baseline profile counts.
 PROFILE_INITIAL = {"d1": 20, "d3": 6, "d4": 30}
@@ -90,7 +133,6 @@ PROFILE_CEILING = {"d1": 200, "d3": 6, "d4": 200}
 #     Knob: lower minFaceQuality (0.05 → 0.02). Affects Phase 2 accept
 #     decision → invalidates cache for the run; cold restart on deficit
 #     cells.
-#   Stage D — All loosened + max profile multiplier. Last-resort.
 #
 # Adaptive scaling: each stage's profile multiplier scales with the
 # WORST deficit going in (deficit > 30 → 4×, deficit > 10 → 2×, else
@@ -102,7 +144,7 @@ PROFILE_CEILING = {"d1": 200, "d3": 6, "d4": 200}
 STAGES = [
     # min_face_q=0.6 matches `generate-matrix.js`'s effective default
     # (CLI default for generate-presets.js is 0.6) so Stage A and B
-    # share the eval cache file with Pass 1. Stage C onward changes
+    # share the eval cache file with Pass 1. Stage C changes
     # min_face_q → cache key changes → cold restart for those cells.
     {"name": "profile-bump",
      "min_sep_px": 70, "min_face_q": 0.6},
@@ -110,8 +152,6 @@ STAGES = [
      "min_sep_px": 50, "min_face_q": 0.6},
     {"name": "loosen-face-quality",
      "min_sep_px": 50, "min_face_q": 0.05},
-    {"name": "max-fallback",
-     "min_sep_px": 40, "min_face_q": 0.02},
 ]
 
 
@@ -129,11 +169,10 @@ def stage_profiles(stage_idx, max_deficit):
     bumps stack across stages: stage 0 = base mult, stage 1+ keeps
     momentum (so loosening stages still get the prior bump)."""
     base_mult = adaptive_profile_mult(max_deficit)
-    # Stage A doubles. Subsequent stages keep at least 2× to stay above
-    # baseline; stage D goes to 4×.
-    if stage_idx >= 3:
-        mult = max(4, base_mult)
-    elif stage_idx >= 1:
+    # Stage A applies the deficit-scaled mult. Stages B/C keep at least
+    # 2× to stay above baseline (loosening alone won't help if Phase 2
+    # is starved for trajectories).
+    if stage_idx >= 1:
         mult = max(2, base_mult)
     else:
         mult = base_mult
@@ -150,20 +189,66 @@ def fail(msg):
 
 
 def check_dev_server():
+    """Verify the dev server is up AND that its DATASET_DIR matches
+    RENDER_DIR. The match check writes a sentinel file via
+    /api/jsonl-append and checks the filesystem — there's no
+    introspection endpoint."""
     try:
         with urllib.request.urlopen(DEV_SERVER, timeout=3) as r:
             if r.status != 200:
-                fail(f"dev server at {DEV_SERVER} returned {r.status}; start with 'bun run dev'")
+                fail(f"dev server at {DEV_SERVER} returned {r.status}; "
+                     f"start with 'DATASET_DIR={RENDER_DIR} bun run dev'")
     except Exception as e:
-        fail(f"dev server at {DEV_SERVER} unreachable ({e}); start with 'bun run dev'")
+        fail(f"dev server at {DEV_SERVER} unreachable ({e}); "
+             f"start with 'DATASET_DIR={RENDER_DIR} bun run dev'")
+
+    # DATASET_DIR sanity probe: ask the server to truncate-write a
+    # sentinel jsonl file under its DATASET_DIR. If we find it at
+    # <ROOT>/<RENDER_DIR>/<sentinel>, the env matches. Otherwise the
+    # server is writing elsewhere (likely default ./dataset).
+    sentinel = ".dataset-dir-check.jsonl"
+    target = ROOT / RENDER_DIR / sentinel
+    # Pre-clean both the expected target and the default-dataset
+    # location so we never get a stale-file false-positive across runs.
+    for candidate in (target, ROOT / "dataset" / sentinel):
+        try:
+            candidate.unlink()
+        except FileNotFoundError:
+            pass
+    body = json.dumps({"path": sentinel, "line": "{}", "fresh": True}).encode("utf-8")
+    req = urllib.request.Request(
+        f"{DEV_SERVER}/api/jsonl-append",
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        urllib.request.urlopen(req, timeout=5).read()
+    except Exception as e:
+        fail(f"dev server /api/jsonl-append probe failed ({e})")
+    if not target.exists():
+        wrong = ROOT / "dataset" / sentinel
+        actual = "./dataset" if wrong.exists() else "(unknown)"
+        fail(f"dev server DATASET_DIR mismatch — sentinel landed at {actual}, "
+             f"expected {RENDER_DIR}. Restart dev server with "
+             f"'DATASET_DIR={RENDER_DIR} bun run dev'.")
+    target.unlink()
 
 
 def wipe_outputs():
-    """Clear render output and matrix output, but preserve `.scan-cache/`
-    (the Phase 2 evaluation cache survives wipes by design)."""
-    dataset_dir = ROOT / "dataset"
-    if dataset_dir.exists():
-        for entry in dataset_dir.iterdir():
+    """Clear all run output, preserving the Phase 2 scan-cache.
+
+    Layout (all under new_dataset/):
+      new_dataset/uniform-1000/         — preset JSON shards + assembled.json
+      new_dataset/uniform-1000-logs/    — per-shard logs
+      new_dataset/uniform-1000-render/  — PNGs, dataset.jsonl, metadata/,
+                                          .scan-cache/ (preserved)
+    """
+    # Render dir: wipe contents but keep .scan-cache (the Phase 2 cache
+    # survives runs by design).
+    render_path = ROOT / RENDER_DIR
+    if render_path.exists():
+        for entry in render_path.iterdir():
             if entry.name == ".scan-cache":
                 continue
             if entry.is_dir():
@@ -171,7 +256,9 @@ def wipe_outputs():
             else:
                 entry.unlink()
     else:
-        dataset_dir.mkdir(parents=True, exist_ok=True)
+        render_path.mkdir(parents=True, exist_ok=True)
+    (render_path / ".scan-cache").mkdir(parents=True, exist_ok=True)
+    # Preset bank + logs: full wipe.
     for p in ["new_dataset/uniform-1000", "new_dataset/uniform-1000-logs"]:
         path = ROOT / p
         if path.exists():
@@ -189,12 +276,19 @@ def run_matrix_pass1():
         "--seed", str(BASE_SEED),
         "--build-progressions", str(BUILD),
         "--max-trajectory-candidates", str(MAX_TRAJ),
-        "--max-scan-candidates", "30",
+        "--max-scan-candidates", str(MAX_SCAN),
         "--out-dir", "new_dataset/uniform-1000",
         "--log-dir", "new_dataset/uniform-1000-logs",
     ]
     print(f"[pass 1] {' '.join(cmd)}", flush=True)
-    subprocess.run(cmd, cwd=ROOT, check=True)
+    # Tolerate partial failures: a model that returns no presets (e.g. mapfold-d3/d4
+    # under known anchor-dropout pathology) makes generate-matrix.js exit non-zero,
+    # but the continuation passes are designed to backfill those exact deficits.
+    # Crashing here would abandon the 100+ minutes of Phase 2 work already on disk.
+    result = subprocess.run(cmd, cwd=ROOT, check=False)
+    if result.returncode != 0:
+        print(f"[warn] generate-matrix.js exited {result.returncode}; "
+              "proceeding to continuation stages to backfill deficits.", flush=True)
 
 
 def run_one_shard(cell, shard, profile_count, min_sep_px, min_face_q, pass_idx):
@@ -211,28 +305,39 @@ def run_one_shard(cell, shard, profile_count, min_sep_px, min_face_q, pass_idx):
     log_dir = ROOT / "new_dataset/uniform-1000-logs"
     # Pass 1 (matrix) starts at 1; each subsequent pass offsets by
     # PER_CELL_TOTAL to leave room for Pass 1's full range (which can
-    # be up to PER_CELL_TOTAL per shard for cells without overrides,
-    # or 35×4=140 for pinwheel-d4 due to model.counts override).
+    # be up to PER_CELL_TOTAL=60 per cell for cells without overrides,
+    # or 70 for pinwheel-d4 due to its model.counts override in
+    # generate-matrix.js). The 60 floor leaves a small gap above the
+    # pinwheel-d4 ceiling, which is fine — pass_offset only needs to
+    # exceed the within-shard names emitted by Pass 1.
     pass_offset = PER_CELL_TOTAL * (pass_idx - 1)
+    # Second-seed top-up: a non-canonical BASE_SEED shifts preset
+    # start-indices into a fresh range (+1000) and tags shard filenames
+    # with `-seed<N>` so the assembler's `{cell}-s*.json` glob still
+    # picks them up but they never collide with the canonical batch.
+    seed_suffix = ""
+    if BASE_SEED != CANONICAL_SEED:
+        pass_offset += 1000
+        seed_suffix = f"-seed{BASE_SEED}"
     if sharded:
         start = pass_offset + shard * count + 1
         seed = BASE_SEED + shard * 1009
         if pass_idx == 1:
-            out_path = out_dir / f"{cell_name}-s{shard}.json"
-            log_path = log_dir / f"{cell_name}-s{shard}.log"
+            out_path = out_dir / f"{cell_name}-s{shard}{seed_suffix}.json"
+            log_path = log_dir / f"{cell_name}-s{shard}{seed_suffix}.log"
         else:
-            out_path = out_dir / f"{cell_name}-s{shard}-p{pass_idx}.json"
-            log_path = log_dir / f"{cell_name}-s{shard}-p{pass_idx}.log"
+            out_path = out_dir / f"{cell_name}-s{shard}-p{pass_idx}{seed_suffix}.json"
+            log_path = log_dir / f"{cell_name}-s{shard}-p{pass_idx}{seed_suffix}.log"
         shard_label = shard
     else:
         start = pass_offset + 1
         seed = BASE_SEED
         if pass_idx == 1:
-            out_path = out_dir / f"{cell_name}.json"
-            log_path = log_dir / f"{cell_name}.log"
+            out_path = out_dir / f"{cell_name}{seed_suffix}.json"
+            log_path = log_dir / f"{cell_name}{seed_suffix}.log"
         else:
-            out_path = out_dir / f"{cell_name}-p{pass_idx}.json"
-            log_path = log_dir / f"{cell_name}-p{pass_idx}.log"
+            out_path = out_dir / f"{cell_name}-p{pass_idx}{seed_suffix}.json"
+            log_path = log_dir / f"{cell_name}-p{pass_idx}{seed_suffix}.log"
         shard_label = None
     args = [
         "bun", "tools/generate-presets.js",
@@ -244,7 +349,7 @@ def run_one_shard(cell, shard, profile_count, min_sep_px, min_face_q, pass_idx):
         "--seed", str(seed),
         "--build-progressions", str(BUILD),
         "--max-trajectory-candidates", str(MAX_TRAJ),
-        "--max-scan-candidates", "30",
+        "--max-scan-candidates", str(MAX_SCAN),
         "--rotation-profile-count", str(profile_count),
         "--min-point-separation-px", str(min_sep_px),
         "--min-face-quality", str(min_face_q),
@@ -308,19 +413,53 @@ def deficit_cells_from(counts):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Uniform-1000 dataset orchestrator.")
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="Skip wipe_outputs() and run_matrix_pass1(); start from the "
+             "current contents of new_dataset/uniform-1000/ and go straight "
+             "to continuation passes + assemble + render. Use when Pass 1 "
+             "completed (or partially completed) and you want to backfill "
+             "deficits without redoing the matrix run.",
+    )
+    parser.add_argument(
+        "--base-seed", type=int, default=CANONICAL_SEED,
+        help=f"Generation seed (default {CANONICAL_SEED}, the canonical "
+             "first run). Pass a different value (e.g. 12346) together "
+             "with --resume to do a SECOND-SEED TOP-UP: continuation "
+             "passes run with fresh trajectories, write to `-seed<N>`-"
+             "tagged shard files, and use preset start-indices offset by "
+             "+1000 so the new presets MERGE with — never overwrite — the "
+             "canonical-seed batch. Repeatable with further distinct seeds.",
+    )
+    args = parser.parse_args()
+
+    global BASE_SEED
+    BASE_SEED = args.base_seed
+    if BASE_SEED != CANONICAL_SEED:
+        print(f"[seed] second-seed top-up: BASE_SEED={BASE_SEED} "
+              f"(canonical={CANONICAL_SEED}); shard files tagged -seed{BASE_SEED}",
+              flush=True)
+
     check_dev_server()
-    wipe_outputs()
 
     started = time.time()
 
-    # Pass 1: full matrix run with tier-default rotationProfileCount.
-    print("\n[pass 1] full matrix run with defaults", flush=True)
-    pass_started = time.time()
-    run_matrix_pass1()
-    print(f"[pass 1] matrix took {time.time() - pass_started:.0f}s", flush=True)
+    if args.resume:
+        existing = sorted((ROOT / "new_dataset/uniform-1000").glob("*.json"))
+        print(f"[resume] skipping wipe + Pass 1; found {len(existing)} existing "
+              f"shard JSONs in new_dataset/uniform-1000/", flush=True)
+    else:
+        wipe_outputs()
+
+        # Pass 1: full matrix run with tier-default rotationProfileCount.
+        print("\n[pass 1] full matrix run with defaults", flush=True)
+        pass_started = time.time()
+        run_matrix_pass1()
+        print(f"[pass 1] matrix took {time.time() - pass_started:.0f}s", flush=True)
 
     final_counts = assemble_and_count()
-    print(f"[pass 1] yields: {final_counts}", flush=True)
+    print(f"[{'resume' if args.resume else 'pass 1'}] yields: {final_counts}", flush=True)
 
     # Continuation: walk through STAGES, each addressing a different
     # bottleneck. Skip a stage that produces no progress (rather than
@@ -370,14 +509,16 @@ def main():
         ["python3", "tools/assemble-uniform-1000.py"],
         cwd=ROOT, check=True,
     )
-    print("\n[render] launching parallel render of assembled.json", flush=True)
+    print(f"\n[render] launching parallel render of assembled.json into {RENDER_DIR}/", flush=True)
+    render_env = dict(os.environ)
+    render_env["DATASET_DIR"] = RENDER_DIR
     subprocess.run([
         "python3", "tools/render_dataset_parallel.py",
         "--dataset", "new_dataset/uniform-1000/assembled.json",
         "--workers", "12",
         "--server-url", DEV_SERVER,
         "--skip-existing",
-    ], cwd=ROOT, check=True)
+    ], cwd=ROOT, env=render_env, check=True)
 
     total = time.time() - started
     print(f"\n[done] total wall time: {total:.0f}s ({total/60:.1f} min)", flush=True)
