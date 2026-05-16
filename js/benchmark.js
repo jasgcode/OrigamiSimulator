@@ -2,13 +2,18 @@
  * Benchmark system for Origami Simulator.
  *
  * Supports two configuration sources:
- *   1. JSON preset file (benchmarks.json) — selected via ?benchmark=<name>
+ *   1. JSON preset file — selected via `?benchmarks=<path>&benchmark=<name>`
  *   2. Ad-hoc URL parameters — override or replace JSON values
+ *
+ * Without `?benchmarks=`, the app starts with no preset loaded and is
+ * fully interactive. The dataset pipeline (`tools/generate-presets.js`,
+ * `tools/render-dataset.js`) drives this module via URL params and the
+ * exported JS API (`loadJson`, `selectPreset`, etc.).
  *
  * URL parameters:
  *   model        — demo file path (e.g. Origami/flappingBird.svg)
- *   benchmark    — name of preset in benchmarks.json
- *   benchmarks   — JSON path for runAll (e.g. benchmarks.json)
+ *   benchmark    — name of preset within the loaded JSON
+ *   benchmarks   — path to a presets JSON (e.g. new_dataset/uniform-1000/assembled.json)
  *   runAll       — "true" to run all presets from the benchmarks JSON in sequence
  *   colorMode    — color mode to apply after load
  *   pointA       — face ID for highlight point A
@@ -1256,7 +1261,7 @@ function initBenchmark(globals) {
     var JSONL_QUESTION_TEMPLATE = [
         "[Task]",
         "You are solving origami point tracking.",
-        "In this task, you must identify which labeled points on a folded piece of paper correspond to the unmarked dots placed on the original flat (unfolded) paper. The first image shows the flat paper with {num_initial} unmarked dot(s) printed on it. The following images show the same paper being folded step by step, ending with the fully folded result where every visible point is labeled using the letters {all_labels}. Paper is opaque: points on the back side may be hidden by overlying layers, and the same physical dot may appear in different positions across steps as the paper folds. You must track each unmarked dot through the fold sequence and report the letter(s) in the final image that correspond to the original unmarked dot(s).",
+        "In this task, you must identify which labeled points on a folded piece of paper correspond to the unmarked dots placed on the original flat (unfolded) paper. The first image shows the flat paper with {num_initial} unmarked dot(s) printed on it. The following images show the same paper being folded step by step, ending with the fully folded result where every visible point is labeled using the letters {all_labels}. Paper is opaque: points on the back side may be hidden by overlying layers, and the same physical dot may appear in different positions across steps as the paper folds. If there's rotating in the process, it's rotating slowly. You must track each unmarked dot through the fold sequence and report the letter(s) in the final image that correspond to the original unmarked dot(s).",
         "If this task depends on a specific visual definition, use this definition exactly: not applicable",
         "The visual evidence for this question is provided below.",
         "{images}",
@@ -1280,7 +1285,7 @@ function initBenchmark(globals) {
     var JSONL_QUESTION_TEMPLATE_REVERSE = [
         "[Task]",
         "You are solving origami reverse point tracking.",
-        "In this task, you must identify which labeled points on a folded piece of paper will end up at the location of the unmarked dot(s) once the paper is unfolded back to flat. The first image shows the fully folded paper with every visible point labeled using the letters {all_labels}. The following images show the paper being reversed (unfolded) step by step. The final image shows the flat, unfolded paper with {num_initial} unmarked dot(s) printed on it. Paper is opaque: in the folded state, points on the back side may be hidden by overlying layers, and the same physical point may appear in different positions across steps as the paper unfolds. You must track each labeled point back through the unfold sequence and report which letter(s) land on the unmarked dot(s) in the flat image.",
+        "In this task, you must identify which labeled points on a folded piece of paper will end up at the location of the unmarked dot(s) once the paper is unfolded back to flat. The first image shows the fully folded paper with every visible point labeled using the letters {all_labels}. The following images show the paper being reversed (unfolded) step by step. The final image shows the flat, unfolded paper with {num_initial} unmarked dot(s) printed on it. Paper is opaque: in the folded state, points on the back side may be hidden by overlying layers, and the same physical point may appear in different positions across steps as the paper unfolds. If there's rotating in the process, it's rotating slowly. You must track each labeled point back through the unfold sequence and report which letter(s) land on the unmarked dot(s) in the flat image.",
         "If this task depends on a specific visual definition, use this definition exactly: not applicable",
         "The visual evidence for this question is provided below.",
         "{images}",
@@ -1516,7 +1521,6 @@ function initBenchmark(globals) {
         // poses is layered in by presetGenerator.js's rotationBoundsForTier
         // and propagated via cfg.rotationYawMax/Pitch/Roll, not here.)
         if (tier === 1) return { yaw: 0, pitch: 0, roll: 0 };
-        if (tier === 2) return { yaw: 0.2, pitch: 0.2, roll: 0.05 };
         if (tier === 3) return { yaw: 0.5, pitch: 0.15, roll: 0.08 };
         if (tier === 4) return { yaw: 1.0, pitch: 1.0, roll: 0.25 };
         // Fallback for custom/manual scan configs without a difficulty.
@@ -1527,8 +1531,7 @@ function initBenchmark(globals) {
         var tier = normalizeDifficultyTier(difficulty);
         if (tier === 4) return { end: 0.45, total: 0.95 };
         if (tier === 3) return { end: 0.20, total: 0.45 };
-        // d1/d2: no default rotation gate. d1 is static; d2 can be
-        // geometry-constrained on thin back pools, so keep permissive.
+        // d1: static, no motion gate.
         return { end: 0, total: 0 };
     }
 
@@ -1958,50 +1961,6 @@ function initBenchmark(globals) {
             return d1Profiles;
         }
 
-        // d2: Phase 2 uses d4's RAMPING profiles (so it actually finds
-        // back-exposing trajectories — constant rotation from step 0 makes
-        // Phase 2 reject most trajectories because anchor fails visibility
-        // at flat-paper-plus-max-tilt). The "no inter-step motion" contract
-        // is enforced POST-PHASE-2 by normalizeStepsForDifficulty: for d2
-        // it overrides every step's rotation with the FINAL step's value,
-        // yielding a constant-rotation preset whose final pose matches
-        // Phase 2's proven back-exposing state. User insight: "for d2 we
-        // can use final states of d4 rather than manually finding angles."
-        if (!isNaN(difficulty) && difficulty === 2) {
-            var d2YawEnv = [0.00, 0.10, 0.22, 0.34, 0.46, 0.58, 0.70, 0.82, 0.92, 1.00];
-            var d2PitchEnv = [0.00, 0.10, 0.22, 0.34, 0.46, 0.58, 0.70, 0.82, 0.92, 1.00];
-            var d2RollEnv = [0.00, 0.04, 0.10, 0.18, 0.28, 0.40, 0.54, 0.70, 0.86, 1.00];
-            var d2Templates = [
-                { name: "d2-cw",            yaw:  1.00, pitch:  1.00, roll:  0.95 },
-                { name: "d2-ccw",           yaw: -1.00, pitch: -1.00, roll: -0.95 },
-                { name: "d2-cw-strong",     yaw:  1.12, pitch:  1.00, roll:  1.00 },
-                { name: "d2-ccw-strong",    yaw: -1.12, pitch: -1.00, roll: -1.00 },
-                { name: "d2-cw-pitch-neg",  yaw:  1.05, pitch: -0.60, roll:  0.82 },
-                { name: "d2-ccw-pitch-neg", yaw: -1.05, pitch:  0.60, roll: -0.82 }
-            ];
-            var requestedD2 = (cfg && cfg.rotationProfileCount != null) ? cfg.rotationProfileCount : 30;
-            appendSampledTemplates(d2Templates, "d2", requestedD2);
-            var d2Count = Math.max(1, Math.min(requestedD2, d2Templates.length));
-            var d2Profiles = [];
-            for (var d2t = 0; d2t < d2Count; d2t++) {
-                var d2Tpl = d2Templates[d2t];
-                var d2Rots = [];
-                for (var d2s = 0; d2s < stepCount; d2s++) {
-                    var d2Norm = stepCount <= 1 ? 1 : (d2s / (stepCount - 1));
-                    var d2Yaw = d2Tpl.yaw * yawMax * sampleEnvelope(d2YawEnv, d2Norm);
-                    var d2Pitch = d2Tpl.pitch * pitchMax * sampleEnvelope(d2PitchEnv, d2Norm);
-                    var d2Roll = d2Tpl.roll * rollMax * sampleEnvelope(d2RollEnv, d2Norm);
-                    d2Rots.push({
-                        x: Math.round(d2Pitch * 1000) / 1000,
-                        y: Math.round(d2Yaw * 1000) / 1000,
-                        z: Math.round(d2Roll * 1000) / 1000
-                    });
-                }
-                d2Profiles.push({ name: d2Tpl.name, rotations: d2Rots });
-            }
-            return d2Profiles;
-        }
-
         // d3 (single-side moderate motion): keep a fixed POV and use a
         // compact, low-amplitude rotation family with a mild late crest.
         // This preserves trackability while still creating clearly
@@ -2122,7 +2081,7 @@ function initBenchmark(globals) {
         // roll*rollMax) when exposeBackside=true (monotonic ramp).
         //
         // The default 6 templates remain yaw-dominant CW/CCW. When
-        // exposeBackside=true (d2-hidden / d4), 4 extra templates
+        // exposeBackside=true (d4 hidden-back reveal), 4 extra templates
         // cover pitch-dominant + negative-pitch + roll-dominant — these
         // reach thin back pools (2–3 back faces) where a specific axis
         // direction is the only way to bring a back face into view.
@@ -2573,7 +2532,7 @@ function initBenchmark(globals) {
         // gate, so no extra GPU work.
         function recordStepVisibility(step, stepRot, visibleFaceIds, qualityMap) {
             // Also record faces whose BACK side is camera-facing — used by
-            // selectFacePointsFromTrajectory to detect d2/d4 hidden-back
+            // selectFacePointsFromTrajectory to detect d4 hidden-back
             // candidates. Without this the timeline only knows about
             // front-facing faces and can't tell whether a back surface is
             // exposed at the final step.
@@ -3635,11 +3594,17 @@ function initBenchmark(globals) {
     }
 
     // ── Public: run all presets from a JSON file in sequence ──
-    // jsonPath: path to JSON (e.g. "benchmarks.json"). If null, uses current presets.
+    // jsonPath: path to a presets JSON (e.g. new_dataset/uniform-1000/assembled.json).
+    // Required — caller must specify which bank to run.
     // onComplete: optional callback when all presets finish.
 
     function runAll(jsonPath, onComplete) {
-        var path = jsonPath || "benchmarks.json";
+        if (!jsonPath) {
+            console.warn("benchmark.runAll: jsonPath required");
+            if (onComplete) onComplete();
+            return;
+        }
+        var path = jsonPath;
         // Reset JSONL batch state so the first preset of this run truncates
         // dataset.jsonl (subsequent presets append).
         jsonlBatchStarted = false;
@@ -3727,117 +3692,39 @@ function initBenchmark(globals) {
         }
     }
 
-    function ensureJsonPathOption(path) {
-        if (!path || !$("#benchmarkJsonPath").length) return;
-        var $sel = $("#benchmarkJsonPath");
-        var exists = false;
-        $sel.find("option").each(function () {
-            if ($(this).val() === path) {
-                exists = true;
-                return false;
-            }
-        });
-        if (!exists) {
-            $sel.append($("<option></option>").attr("value", path).text(path));
-        }
-    }
-
-    function refreshJsonPaths(selectedPath, callback) {
-        var $sel = $("#benchmarkJsonPath");
-        var pathFromUrl = getParam("benchmarks");
-        var targetPath = selectedPath || pathFromUrl || ($sel.length ? $sel.val() : null) || "benchmarks.json";
-
-        if (!$sel.length) {
-            if (callback) callback(targetPath);
-            return;
-        }
-
-        var basePaths = [];
-        $sel.find("option").each(function () {
-            var v = $(this).val();
-            if (v && basePaths.indexOf(v) === -1) basePaths.push(v);
-        });
-        if (basePaths.length === 0) basePaths.push("benchmarks.json");
-
-        $.getJSON("/api/candidates?_=" + Date.now())
-            .done(function (resp) {
-                var candidates = (resp && Array.isArray(resp.files)) ? resp.files : [];
-                var allPaths = basePaths.slice();
-                candidates.forEach(function (path) {
-                    if (allPaths.indexOf(path) === -1) allPaths.push(path);
-                });
-                if (targetPath && allPaths.indexOf(targetPath) === -1) allPaths.push(targetPath);
-
-                $sel.empty();
-                allPaths.forEach(function (path) {
-                    $sel.append($("<option></option>").attr("value", path).text(path));
-                });
-                $sel.val(targetPath);
-            })
-            .fail(function () {
-                ensureJsonPathOption(targetPath);
-                $sel.val(targetPath);
-            })
-            .always(function () {
-                if (callback) callback($sel.val() || targetPath || "benchmarks.json");
-            });
-    }
-
     // ── Public: initialize — called from main.js before model load ──
     // loadModelCallback(modelPath) is called once config is parsed,
-    // passing the model path to load (from benchmark preset, URL, or null for default).
-
+    // passing the model path to load (from benchmark preset, URL, or null
+    // for default). Without a `?benchmarks=` URL param the app loads with
+    // no presets and the user can interact with the simulator freely.
     function init(cb) {
         loadModelCallback = cb;
-        refreshJsonPaths(null, function (jsonPath) {
-            $.getJSON(jsonPath + "?_=" + Date.now())
-                .done(function (loaded) {
-                    presets = loaded;
-                    config = buildConfig(presets);
-                    populatePresetDropdown();
-                    startWatching(jsonPath);
-                    onConfigReady(cb);
-                })
-                .fail(function () {
-                    presets = null;
-                    config = buildConfig(null);
-                    updateStatus("No benchmark JSON found at " + jsonPath + ".");
-                    onConfigReady(cb);
-                });
-            });
-    }
-
-    function populatePresetDropdown() {
-        var $sel = $("#benchmarkPresetSelect");
-        $sel.find("option:not(:first)").remove();
-        if (!presets) return;
-        var names = Object.keys(presets).sort();
-        names.forEach(function (name) {
-            $sel.append($("<option></option>").attr("value", name).text(name));
-        });
-    }
-
-    function populateStepSelect() {
-        var $sel = $("#benchmarkStepSelect");
-        if (!$sel.length) return;
-        $sel.empty();
-        if (!config || !config.steps || config.steps.length === 0) {
-            $sel.append("<option value=''>— no steps —</option>");
+        var jsonPath = getParam("benchmarks");
+        if (!jsonPath) {
+            presets = null;
+            config = buildConfig(null);
+            onConfigReady(cb);
             return;
         }
-        for (var i = 0; i < config.steps.length; i++) {
-            var s = config.steps[i];
-            var desc = "Step " + (i + 1) + ": fold " + s.fold + "%";
-            if (s.pov) desc += ", " + (Array.isArray(s.pov) ? "[" + s.pov.join(",") + "]" : s.pov);
-            if (s.rotation) desc += " +rot";
-            $sel.append($("<option></option>").attr("value", i).text(desc));
-        }
+        $.getJSON(jsonPath + "?_=" + Date.now())
+            .done(function (loaded) {
+                presets = loaded;
+                config = buildConfig(presets);
+                startWatching(jsonPath);
+                onConfigReady(cb);
+            })
+            .fail(function () {
+                presets = null;
+                config = buildConfig(null);
+                updateStatus("No benchmark JSON found at " + jsonPath + ".");
+                onConfigReady(cb);
+            });
     }
 
     function selectPreset(name) {
         if (!presets || !name || !presets[name]) {
             config = null;
-            updateStatus("Select a preset or use URL params to configure.");
+            updateStatus("Preset \"" + name + "\" not found.");
             return;
         }
         currentBenchmarkName = name;
@@ -3850,25 +3737,14 @@ function initBenchmark(globals) {
             waitForModelLoad(function () {
                 applySettings(config);
                 updateStatus("Preset \"" + name + "\" ready. " + config.steps.length + " steps.");
-                populateStepSelect();
             });
         } else {
             applySettings(config);
             updateStatus("Preset \"" + name + "\" applied. " + config.steps.length + " steps.");
-            populateStepSelect();
         }
     }
 
     function onConfigReady(cb) {
-        var benchmarkName = getParam("benchmark");
-        if (benchmarkName && $("#benchmarkPresetSelect").length) {
-            $("#benchmarkPresetSelect").val(benchmarkName);
-        }
-        var benchmarksPath = getParam("benchmarks");
-        if (benchmarksPath && $("#benchmarkJsonPath").length) {
-            ensureJsonPathOption(benchmarksPath);
-            $("#benchmarkJsonPath").val(benchmarksPath);
-        }
         var benchmarkModel = config ? config.model : null;
         if (cb) cb(benchmarkModel);
 
@@ -3888,8 +3764,8 @@ function initBenchmark(globals) {
                 }
             }
             if (getParamBool("runAll")) {
-                var jsonPath = getParam("benchmarks") || "benchmarks.json";
-                setTimeout(function () { runAll(jsonPath); }, 500);
+                var jsonPath = getParam("benchmarks");
+                if (jsonPath) setTimeout(function () { runAll(jsonPath); }, 500);
             }
         });
     }
@@ -3900,27 +3776,18 @@ function initBenchmark(globals) {
             .done(function (loaded) {
                 presets = loaded;
                 var prevPreset = currentBenchmarkName;
-                populatePresetDropdown();
-                // re-select and refresh current preset if it still exists
                 if (prevPreset && presets[prevPreset]) {
-                    var prevStep = parseInt($("#benchmarkStepSelect").val(), 10);
                     config = $.extend(true, {}, presets[prevPreset]);
                     if (!config.pauseDuration) config.pauseDuration = 2;
                     if (!config.steps) config.steps = [{ fold: 0, pov: "iso" }];
-                    $("#benchmarkPresetSelect").val(prevPreset);
-                    populateStepSelect();
-                    if (!isNaN(prevStep) && prevStep >= 0 && config.steps && prevStep < config.steps.length) {
-                        $("#benchmarkStepSelect").val(prevStep);
-                    }
                     if (!silent) updateStatus("Reloaded \"" + prevPreset + "\" (" + config.steps.length + " steps).");
-                } else {
-                    if (!silent) updateStatus("Loaded " + Object.keys(loaded).length + " presets from " + path);
+                } else if (!silent) {
+                    updateStatus("Loaded " + Object.keys(loaded).length + " presets from " + path);
                 }
             })
             .fail(function () {
                 if (!silent) {
                     presets = null;
-                    populatePresetDropdown();
                     updateStatus("Could not load " + path);
                 }
             });
@@ -3963,81 +3830,6 @@ function initBenchmark(globals) {
         _watchLastModified = null;
     }
 
-    function goToStep(index) {
-        if (!config || !config.steps) return;
-        var steps = config.steps;
-        if (index < 0 || index >= steps.length) return;
-        var step = steps[index];
-        currentStep = index;
-
-        // set fold
-        globals.setCreasePercent(step.fold / 100);
-        globals.shouldChangeCreasePercent = true;
-
-        // set camera POV
-        setPOV(step.pov);
-
-        // apply rotation
-        if (step.rotation !== undefined && step.rotation !== null) {
-            applyRotation(step.rotation);
-        } else {
-            globals.threeView.resetModel();
-        }
-
-        // reveal hidden points only on last step
-        globals.revealHiddenPoints = (index === steps.length - 1);
-        globals.hideFacePointsDuringAnimation = false;
-
-        if (globals.model && globals.model.updateFaceColors) globals.model.updateFaceColors();
-        if (globals.controls && globals.controls.updateCreasePercent) globals.controls.updateCreasePercent();
-
-        updateStatus("Step " + (index + 1) + "/" + steps.length +
-                     " — fold " + step.fold + "%" +
-                     (step.pov ? ", POV " + (Array.isArray(step.pov) ? "[" + step.pov.join(", ") + "]" : step.pov) : ""));
-    }
-
-    function saveViewToStep(index) {
-        if (!config || !config.steps) return null;
-        var steps = config.steps;
-        if (index < 0 || index >= steps.length) return null;
-        var step = steps[index];
-
-        var cam = globals.threeView.camera;
-        var mw = globals.threeView.modelWrapper;
-        if (!cam || !mw) return null;
-
-        // Current camera direction → pov
-        var camPos = cam.position.clone().normalize();
-        var pov = [
-            parseFloat(camPos.x.toFixed(2)),
-            parseFloat(camPos.y.toFixed(2)),
-            parseFloat(camPos.z.toFixed(2))
-        ];
-        step.pov = pov;
-
-        // Current model rotation
-        var rx = parseFloat(mw.rotation.x.toFixed(2));
-        var ry = parseFloat(mw.rotation.y.toFixed(2));
-        var rz = parseFloat(mw.rotation.z.toFixed(2));
-        if (rx !== 0 || ry !== 0 || rz !== 0) {
-            step.rotation = [rx, ry, rz];
-        } else {
-            delete step.rotation;
-        }
-
-        // Also update the master presets object so it can be saved
-        if (presets && currentBenchmarkName && presets[currentBenchmarkName]) {
-            presets[currentBenchmarkName].steps[index] = $.extend(true, {}, step);
-        }
-
-        populateStepSelect();
-        $("#benchmarkStepSelect").val(index);
-
-        updateStatus("Saved view to step " + (index + 1) + ": pov [" + pov.join(", ") + "]" +
-            (step.rotation ? ", rot [" + step.rotation.join(", ") + "]" : ""));
-        return step;
-    }
-
     return {
         init: init,
         run: run,
@@ -4045,10 +3837,7 @@ function initBenchmark(globals) {
         runScan: runScan,
         loadJson: loadJson,
         startWatching: startWatching,
-        refreshJsonPaths: refreshJsonPaths,
         selectPreset: selectPreset,
-        goToStep: goToStep,
-        saveViewToStep: saveViewToStep,
         getConfig: function () { return config; },
         getPresets: function () { return presets; },
         isRunning: function () { return running; },

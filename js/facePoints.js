@@ -475,7 +475,7 @@ function initFacePoints(globals) {
     // is one where front-normal · toCamera < 0 (so back normal points
     // toward camera) and the centroid is unoccluded by other geometry.
     // This is the primitive used by the trajectory-first preset generator
-    // to pick d2/d4 hidden-back face indices, which are then stored in the
+    // to pick d4 hidden-back face indices, which are then stored in the
     // preset with faceId = (idx + N) so isPointVisible's `isFront = id < N`
     // path correctly checks back-facing visibility.
     function getBackSideVisibleFaceIds() {

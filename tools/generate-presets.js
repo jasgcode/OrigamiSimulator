@@ -20,7 +20,7 @@
  *     --templates "bird-frontback-0*" \
  *     --seed 42 \
  *     --output generated-presets.json \
- *     [--merge benchmarks.json] \
+ *     [--merge <existing-presets.json>] \
  *     [--no-validate] \
  *     [--settle-ms 300] \
  *     [--server-url http://localhost:3000]
@@ -37,7 +37,7 @@ const ROOT = join(import.meta.dir, "..");
 const { values: args } = parseArgs({
     options: {
         model:         { type: "string", default: "/Bases/birdBase.svg" },
-        difficulty:    { type: "string", default: "5" },
+        difficulty:    { type: "string", default: "4" },
         count:         { type: "string", default: "7" },
         "base-name":   { type: "string", default: "bird-frontback" },
         "start-index": { type: "string", default: "9" },
@@ -328,16 +328,6 @@ async function runSingleAttempt(attemptIndex) {
             { timeout: 45000, polling: 500 }
         );
 
-        await page.waitForFunction(
-            () => {
-                try {
-                    var p = window.globals.benchmark.getPresets();
-                    return p && Object.keys(p).length > 0;
-                } catch(e) { return false; }
-            },
-            { timeout: 15000, polling: 500 }
-        );
-
         const faceCount = await page.evaluate(() => globals.model.getFaces().length);
         console.log("Model loaded. Face count:", faceCount);
         await sleep(2000);
@@ -421,7 +411,7 @@ if (OUTPUT) {
     console.log("\nWritten to:", outputPath);
 }
 
-// Merge into benchmarks.json
+// Merge into an existing presets JSON
 if (MERGE) {
     const mergePath = MERGE.startsWith("/") ? MERGE : join(ROOT, MERGE);
     const existing = await Bun.file(mergePath).json();

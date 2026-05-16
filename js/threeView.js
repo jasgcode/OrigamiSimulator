@@ -9,9 +9,15 @@ function initThreeView(globals) {
 
     var camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 500);
     // var camera = new THREE.OrthographicCamera(window.innerWidth / -2, window.innerWidth / 2, window.innerHeight / 2, window.innerHeight / -2, -10000, 10000);//-40, 40);
-    var renderer = new THREE.WebGLRenderer({antialias: true});
+    var renderer = new THREE.WebGLRenderer({antialias: true, alpha: true, premultipliedAlpha: false});
     // var svgRenderer = new THREE.SVGRenderer();
     var controls;
+
+    // Static reference pole drawn into every captured PNG: a thin
+    // vertical line spanning the full canvas height. Sits in the
+    // background (semi-transparent muted color) so it doesn't compete
+    // visually with the origami model but is always available as a
+    // fixed vertical reference for the viewer to anchor against.
 
     init();
 
@@ -22,8 +28,12 @@ function initThreeView(globals) {
         renderer.setSize(window.innerWidth, window.innerHeight);
         container.append(renderer.domElement);
 
-        scene.background = new THREE.Color(0xffffff);//new THREE.Color(0xe6e6e6);
-        setBackgroundColor();
+        // Transparent WebGL canvas so the merge-step background color
+        // and reference pole show through where the model isn't drawn.
+        // The bg color is painted onto the merged 2D canvas in _render
+        // before the WebGL canvas is composited on top.
+        scene.background = null;
+        renderer.setClearColor(0xffffff, 0);
         scene.add(modelWrapper);
         var directionalLight1 = new THREE.DirectionalLight(0xffffff, 0.8);
         directionalLight1.position.set(0, 100, 0);
@@ -228,6 +238,19 @@ function initThreeView(globals) {
     }
 
     var captureStats = $("#stopRecord>span");
+    function drawReferencePole(ctx, canvasW, canvasH) {
+        // Vertical pole spanning the full canvas height. Static, sits
+        // behind the model. Warm dark-orange color so it reads as
+        // visibly distinct from the blue/purple paper material the
+        // models render with.
+        var poleWidth = Math.max(6, Math.round(canvasW * 0.009));
+        var poleX = Math.round(canvasW * 0.92);  // ~8% from right edge
+        ctx.save();
+        ctx.fillStyle = "rgba(150, 80, 40, 0.75)";
+        ctx.fillRect(poleX, 0, poleWidth, canvasH);
+        ctx.restore();
+    }
+
     function _render(){
         if (globals.vrEnabled){
             globals.vive.render();
@@ -249,12 +272,23 @@ function initThreeView(globals) {
                 globals.shouldScaleCanvas = false;
                 globals.shouldAnimateFoldPercent = false;
                 var sourceCanvas = canvas;
-                var needsMerge = (annotationCanvas && annotationCanvas.style.display !== "none") || globals.stepNumberText;
+                // Always merge so the rotation gizmo can be composited in
+                // the top-right corner of every captured PNG.
+                var needsMerge = true;
                 if (needsMerge) {
                     var merged = document.createElement("canvas");
                     merged.width = canvas.width;
                     merged.height = canvas.height;
                     var mergedCtx = merged.getContext("2d");
+                    // Paint the background color first (the WebGL canvas
+                    // is alpha-transparent now). Then the reference pole
+                    // (so it sits BEHIND the model in the rendered PNG),
+                    // then the WebGL canvas with the model on top, then
+                    // labels.
+                    var bgHex = (globals.backgroundColor || "ffffff").replace(/^#/, "");
+                    mergedCtx.fillStyle = "#" + bgHex;
+                    mergedCtx.fillRect(0, 0, merged.width, merged.height);
+                    drawReferencePole(mergedCtx, merged.width, merged.height);
                     mergedCtx.drawImage(canvas, 0, 0);
                     if (annotationCanvas && annotationCanvas.style.display !== "none") {
                         mergedCtx.drawImage(annotationCanvas, 0, 0, merged.width, merged.height);
@@ -387,8 +421,9 @@ function initThreeView(globals) {
     }
 
     function setBackgroundColor(color){
-        if (color === undefined) color = globals.backgroundColor;
-        scene.background.setStyle( "#" + color);
+        // No-op: scene.background is null (alpha-transparent WebGL).
+        // The actual bg color is painted in _render's merge step from
+        // globals.backgroundColor, which is set by preset configs.
     }
 
     return {
