@@ -1,19 +1,51 @@
-assets/attrib.txt
+# Editors and OS
 .idea/
-todo.rtf
 *.DS_Store
+todo.rtf
+
+# Secrets
+.env
+*.env
+
+# Dependencies and caches
 node_modules
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+/wandb/
+test_suite/wandb/
+
+# Generated data. The released dataset is hosted separately; its exact
+# presets are tracked in release/.
+/data/
+/dataset/
+/new_dataset/
+/eval/
+/output/
+/screenshots/
+/candidates/
+/tmp/
+*.zip
+*.log
+tools/.render-parallel-runs/
+test_suite/m/*
+test_suite/results/
+output/*
+
+# JSON and images are generated almost everywhere; track only these.
+*.json
+!package.json
+!tsconfig.json
+!release/**/*.json
+*.png
+!docs/img/*.png
+!assets/*.png
+
+# Upstream build inputs
+assets/attrib.txt
 CreasePatternScripts/**/*.pdf
 CreasePatternScripts/**/*.svg
-screenshots
-*.env
-wandb
-wandb/*
-eval*
-test_suite/m/*
-*.log
-*.json
-*.png
-data
-test_suite
-output/*
+
+# Personal agent state
+.claude/settings.local.json
+.remember/

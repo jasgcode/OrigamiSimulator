@@ -1,5 +1,7 @@
 # Test Suite
 
+> **Legacy.** This harness reads the old per-preset `screenshots/<name>/metadata.json` output, which the pipeline no longer writes, so it cannot evaluate the released dataset. Use [`tools/score-predictions.py`](../tools/score-predictions.py) to score predictions on any `dataset.jsonl`, and [`tools/eval-claude.py`](../tools/eval-claude.py) for the reference Claude runs. See [docs/dataset.md](../docs/dataset.md#scoring). The tier table below describes an earlier tier scheme.
+
 ## Setup
 
 ```bash

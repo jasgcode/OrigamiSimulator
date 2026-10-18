@@ -1,254 +1,65 @@
-# Origami Simulator
+# Origami Point Tracking
 
-Real-time GPU-accelerated origami folding simulator. Live at https://origamisimulator.org/
+Origami Simulator (GPU origami physics, upstream by Ghassaei et al.) extended into a generator for a VLM point-tracking benchmark. The release is 150 medium (tier 3) + 150 expert (tier 5) items. Its exact presets are in `release/dataset-300b/presets.json`.
 
-## Running Locally
-
-```bash
-bun run dev          # runs server.js (Bun.serve) on localhost:3000, exposes /api/jsonl-append + /api/metadata-merge
-```
-
-Or open `index.html` directly (some fetch-based features require HTTP).
-
-## Tooling
-
-Default to Bun over Node.js. `bun run`, `bun install`, `bun test`, `Bun.serve()`.
-
-## Architecture
-
-**Static frontend, no build step.** All code runs client-side.
-
-- **No module system** — global functions + shared `globals` object. No `import`/`export`.
-- **No bundler** — scripts loaded via `<script>` tags in `index.html`.
-- **Dependencies vendored** in `dependencies/` (Three.js, jQuery, numeric.js). NOT installed via npm.
-- `package.json` exists only for the `bun run dev` convenience script.
-
-## Key Patterns
-
-### Module pattern
-
-Every JS file exposes `initX(globals)` returning a module object. Wired in `js/main.js`:
-
-```js
-globals.threeView = initThreeView(globals);
-globals.model = initModel(globals);
-```
-
-### Globals object
-
-`globals` (in `js/globals.js`) is the central shared state — simulation params, flags, module refs. UI controls read/write it directly.
-
-### GPU compute via WebGL shaders
-
-Physics runs on the GPU via fragment shaders. GLSL source is embedded as `<script type="x-shader/x-fragment">` blocks in `index.html`. GPU abstraction in `js/dynamic/GPUMath.js`.
-
-### UI
-
-jQuery + jQuery UI + Bootstrap + Flat UI. `$()` selectors throughout. No component framework.
-
-### Point visibility tests (`js/facePoints.js`)
-
-Two tests, both using raw ray-triangle intersection (no `material.side` culling — folded panels caught from either side):
-
-- **`isPointVisible(index)`** — correctness contract for rendering/validation. Checks: face-normal (`dot(toCamera, normal) > 0` front / `< 0` back) → frustum (NDC in `[-1,1]`) → occlusion (ray to camera, origin nudged by `OCCL_EPSILON = 0.002`).
-- **`hasForwardClearance(index, dist)`** — stricter ranking signal for the barycentric refiner. Imagines a short arrow along +normal and checks both along-path clearance and tip→camera visibility. Catches panels hovering *above* a point offset toward the camera.
-
-### Point annotations
-
-`labelStyle: "arrow"` uses a screen-space overlay (`#pointAnnotationCanvas`). Anchors projected from 3D positions; visibility via `isPointVisible`; PNG captures include the overlay.
-
-## File Structure
-
-```
-index.html                — Entry point. HTML + inline GLSL + all <script> tags
-js/
-  main.js                 — Init sequence, URL param parsing
-  globals.js              — Shared state
-  model.js                — Geometry, materials, colors, labels
-  facePoints.js           — Barycentric points + visibility tests
-  pointAnnotations.js     — Screen-space arrow label overlay
-  threeView.js            — Three.js scene, camera, renderer
-  controls.js             — UI event handlers
-  benchmark.js            — Benchmark runner (presets, runAll)
-  presetGenerator.js      — Trajectory-first preset generation
-  dynamic/
-    dynamicSolver.js      — GPU simulation solver
-    GPUMath.js            — WebGL compute abstraction
-dependencies/             — Vendored third-party libs (do NOT npm install)
-assets/                   — Demo patterns (SVG/FOLD) + facepool cache
-tools/
-  generate-presets.js     — Puppeteer driver for presetGenerator
-  generate-matrix.js      — Multi-(model, difficulty) parallel runner
-  render_dataset_parallel.py — Multi-worker PNG renderer
-  validate-presets.js     — Replay a preset bank and verify visibility against semantics
-  reverse-presets.js      — Reverse-step transform; stamps direction:"reverse" for unfolding variants
-  assemble-uniform-1000.py — Selects uniform-distribution presets across (model, difficulty) cells
-  generate-uniform-1000.py — Orchestrates uniform-1000 generation passes
-```
-
-## Benchmark System
-
-Runs configurable sequences: load a model, apply view/color settings, step through fold % or animate. Presets live in a JSON bank loaded via `?benchmarks=<path>&benchmark=<name>` (e.g. `new_dataset/uniform-1000/assembled.json`); batch all with `?runAll=true`. Any JSON parameter is URL-overridable. Without a `?benchmarks=` URL param the app starts with no preset loaded.
-
-Core parameters: `model`, `colorMode`, `color1`/`color2`, `fold`, `facePoints`, `labelStyle`, `steps`, `foldAnimation`, `previewRotation`, `difficulty`, `trackingEvalMode`, `scanMode`. Full parameter list in `js/benchmark.js`.
-
-### Face points
-
-Points on mesh faces with deterministic barycentric positions. Three forms:
-
-```json
-// Counts
-"facePoints": { "0": 3, "5": 2 }
-
-// Explicit barycentric per face
-"facePoints": { "0": [[0.33, 0.33, 0.34]] }
-
-// Explicit array
-"facePoints": [{ "faceId": 0, "u": 0.33, "v": 0.33, "w": 0.34 }]
-```
-
-Any point can have `"hidden": true` — numbered in the 1..N sequence but not rendered until the last step / fold animation completes.
-
-### Steps
-
-```json
-"steps": [{ "fold": 0, "pov": "iso" }, { "fold": 100, "pov": "z", "rotation": [0, 0.5, 0] }]
-```
-
-- `pov`: `iso`, `x`/`-x`, `y`/`-y`, `z`/`-z`, or `[x,y,z]` / `"x,y,z"` for continuous directions.
-- `rotation`: Euler XYZ radians. Applied after POV, independent of camera.
-
-### Difficulty tiers
-
-Metadata for dataset labeling. Presets use **static camera + per-step model `rotation`** — the camera never animates across fold steps; rotation on `modelWrapper` drives which faces come into view.
-
-| Tier | Visible front | Hidden front | Hidden back | Motion |
-|------|---|---|---|--------|
-| d1   | 2 | 1–3 | 0   | Constant per-preset rotation (no inter-step motion; tilted fixed pose) |
-| d3   | 2 | 1–3 | 0   | Ramping rotation, crest near final step |
-| d4   | 2 | 1–2 | 1–2 | Monotonically ramping rotation, peak at final step |
-
-Rotation bounds per tier (radians): d1 `{yaw 0.5, pitch 0.15, roll 0.08}`; d3 `{yaw 0.8, pitch 0.5, roll 0.2}`; d4 `{yaw 1.4, pitch 1.3, roll 0.4}`.
-
-For d3/d4, state 1 renders at zero rotation (hero shot — fold=0, flat paper) from the trajectory's static POV; states 2..N apply the chosen rotation. For d1, state 1 keeps the same constant tilt as states 2..N — d1 has no rotation animation, so a hero-shot strip would create a visible "untilt → tilt" jump between state 1 and state 2.
-
-### Validation semantics
-
-`trackingEvalMode` is a **hidden-point semantic only**:
-- Hidden points: required visible only at final step under `finalStepOnly`; every step under `strictAllSteps` (default).
-- Non-hidden points: required visible at **every step**, regardless of mode.
-
-`hidePointsDuringAnimation` is a rendering toggle — no effect on validation.
-
-### Dataset output
-
-`runAll` writes output under `<DATASET_DIR>/` (env var on `server.js`, default `dataset/`). Set `DATASET_DIR=screenshots` for legacy paths. Layout:
-
-- `<DATASET_DIR>/dataset.jsonl` — one line per preset
-- `<DATASET_DIR>/<id>/step_NNNN_current.png` — PNGs (4-digit, 0-based)
-- `<DATASET_DIR>/metadata/<object>_metadata.json` — **per-object consolidated** metadata, keyed by preset name (e.g. all 4 bird presets are top-level keys in `birdBase_metadata.json`). Object name preserves SVG filename case (e.g. `birdBase`).
-- `<DATASET_DIR>/metadata/<object>_summary.json` — per-object summary, same keying scheme.
-- `<DATASET_DIR>/.scan-cache/` — Phase 2 trajectory cache. **Cache migration**: when changing `DATASET_DIR`, copy `screenshots/.scan-cache/*.json` → `<new>/.scan-cache/` to avoid cold-cache penalty.
-
-JSONL paths are relative to `<DATASET_DIR>/`. One line per preset:
-
-```json
-{
-  "id": "origami_point_tracking_difficulty_<d>_<modelStem>_<NN>",
-  "category": ["Order", "origami_static", "point_tracking"],
-  "type": "perception",
-  "question": "[Task] ... {images} ... [Answer Format] {json_answer_value}",
-  "images": ["<id>/step_0000_current.png", "...", "<id>/step_<lastIdx>_current.png"],
-  "gt_answer": ["A", "C"],
-  "meta_info": {
-    "task_name": "origami_static", "config": "metadata/<object>_metadata.json",
-    "difficulty": "easy|medium|hard", "seed": <n>, "repeat_index": 0,
-    "level": "<stem>_difficulty_<d>", "benchmark": "<name>", "object": "birdBase",
-    "total_steps": <N>, "color_mode": "...", "all_labels": [...], "initial_points": [...],
-    "hidden_point_labels": {...}, "front_points": [...], "back_points": [...]
-  }
-}
-```
-
-Difficulty mapping: d1→`easy`, d3→`medium`, d4→`hard`. `gt_answer` is the initial (non-hidden) point labels — letters that correspond to the unmarked dots rendered at step 0. Step 0 renders points as **unmarked dots**; the final step renders them with letters (`revealHiddenPoints` flag in `js/model.js:356-370`).
-
-**Question template** (`JSONL_QUESTION_TEMPLATE` in `js/benchmark.js`) follows the project meta-prompt structure with `[Task]` / `[Rules]` / `[Question]` / `[Answer Format]` sections, includes the line "If this task depends on a specific visual definition: not applicable", places the `{images}` marker inline, and uses `{json_answer_value}` (literal text the model replaces) instead of `<json_answer_value>`. Variables substituted at JSONL build time: `{num_initial}`, `{all_labels}`. `{images}` and `{json_answer_value}` remain literal placeholders.
-
-**Server endpoints**:
-- `POST /api/jsonl-append` — `{ path, line, fresh }`. `fresh: true` truncates (first preset of batch); else append.
-- `POST /api/metadata-merge` — `{ path, key, value }`. Reads existing JSON object at `<DATASET_DIR>/<path>`, sets `merged[key] = value`, writes back. Creates parent dirs. Used by `saveSummary` and `saveMetadataJson` in `js/benchmark.js`.
-
-See `buildJsonlEntry` in `js/benchmark.js`.
-
-### Reverse render pipeline
-
-Runs after the forward dataset to produce a folded → flat variant. `tools/reverse-presets.js` transforms each preset by reversing the `steps` array and stamping `direction: "reverse"` on the config. The reversed presets are then re-rendered with `DATASET_DIR=reverse_dataset`. At JSONL build time, `buildJsonlEntry` selects `JSONL_QUESTION_TEMPLATE_REVERSE` (instead of the default forward template) when `config.direction === "reverse"`, so the question text reflects an unfolding sequence (folded → flat). All other JSONL fields follow the same schema as the forward pass.
-
-## Preset Generation Pipeline
-
-`js/presetGenerator.js` + `tools/generate-presets.js` — headless Chrome via Puppeteer drives the in-page generator and writes validated benchmark JSON. Requires `bun run dev` running.
+## Commands
 
 ```bash
-bun tools/generate-presets.js --model /Bases/boatBase.svg --difficulty 4 \
-  --count 10 --base-name boat-d4 --output new_dataset/boat-d4.json \
-  --trajectory-mode hybrid --build-progressions 24
+bun run dev              # server.js on :3000; env DATASET_DIR (default dataset/), PORT
+bun run test:dataset     # 70 JS + 106 Python tests; no server or WebGL needed
+bun install && bunx puppeteer browsers install chrome   # once, before any tools/*.js run
 ```
 
-### Pipeline stages (per model/difficulty slot, d1/d3/d4 only)
+Run tools from the repository root.
 
-1. **Face-pool discovery** — cached at `assets/facepools/<key>.json`. Sweeps POVs × fold ∈ {0, 70}; records visible face IDs. Front pool = visibility-discovered; back pool = **all face indices `[0, N-1]`**, gated downstream by `getBackSideVisibleFaceIds` at the final step.
-2. **Phase 2 trajectory search** — one `evaluateTrajectoriesLive` run per slot with a generic anchor. Each accepted progression carries a `visibilityTimeline` (per-step `visibleFaceIds`, `backSideVisibleFaceIds`, etc.) and a `finalViewScore`.
-3. **Per-tier point selection** — `selectFacePointsFromTrajectory` emits up to **K** configs per trajectory via `selectFromTrajectoryK(tier)` (see `js/presetGenerator.js` for current K values — typically `K=1` for d1 and larger for d3/d4; tuned for trajectory diversity vs. preset count). Loop tries up to `rankedFronts.length - plan.vF + 1` rank-window shifts until configs fit the tier plan. Visible-front anchors drawn from `alwaysVisible`. Hidden-front from `finalVisible`. Hidden-back from `[0,N-1] ∩ finalBackSideVisible`, stored with `faceId = idx + N` so `isPointVisible`'s `isFront = id < N` path checks the back normal. Enforces 3–6 total points, ≥2 visible non-hidden.
-4. **Barycentric refinement** — `refineFacePointBarycentric` runs on final selections. Drives to final pose with ≥800 ms settle; sweeps 5×5 barycentric grid (`u,v ∈ [0.22, 0.52]`, `w ≥ 0.18`) in two passes.
-5. **Step normalization + hero-shot** — `normalizeStepsForDifficulty` freezes POV across steps (tier motion model); `applyHeroShotStep0` strips `step[0].rotation`.
-6. **Validation** — replay with `Math.max(settle, 800)` ms. Regressions revert to pre-refinement barycentric.
-7. **Fallback** — if no scan progression validates, up to 50 synthetic candidates via legacy fresh-POV path.
+## Docs: read the one that covers your change, and update it in the same change
 
-**d4 back-coverage gate**: the count of back-side-exposed faces at the final step must be ≥ `ranges.hB[0]` or the trajectory is dropped.
+- **Tier rules, dot layout, twins, spin, balancing, legibility gates**: [docs/design.md](docs/design.md). Every rule there names the shortcut it closes; a rule change needs its reason updated too.
+- **Generation stages, preset fields, rendering, server endpoints, visibility tests**: [docs/pipeline.md](docs/pipeline.md)
+- **JSONL schema, question template, scoring, probes**: [docs/dataset.md](docs/dataset.md)
+- **Script options and known tool issues**: [tools/README.md](tools/README.md)
+- **The release build** (generation runs, selection, render, scores): [docs/reproduce.md](docs/reproduce.md), [release/dataset-300b/](release/dataset-300b/)
 
-**`skipBatchValidation`** fires when `!validate || difficulty <= 1` (~`js/presetGenerator.js:3259`). d1 is structurally trivial so per-preset revalidation is sufficient.
+## Code conventions
 
-### Static-POV gotcha
+- **No build step, no modules.** Each `js/*.js` file defines `initX(globals)` and returns a module object. `js/main.js` wires them into the shared `globals` object (`js/globals.js`). Files talk through `globals` or global functions; there is no `import`/`export`.
+- **Vendored libraries.** Three.js, jQuery and numeric.js are vendored in `dependencies/`. Use them from there; `bun install` exists only for Puppeteer.
+- **Shaders.** GLSL lives inline in `index.html` as `<script type="x-shader/x-fragment">` blocks.
+- **Style.** UI is jQuery, jQuery UI, Bootstrap and Flat UI. Use camelCase, with an `init` prefix for module constructors.
+- **Upstream code.** Simulator files (`js/dynamic/`, `pattern.js`, `importer.js`, `curvedFolding.js`, solvers) come from upstream. Benchmark work lives in `js/benchmark.js`, `js/presetGenerator.js`, `js/facePoints.js`, `js/pointAnnotations.js` and `tools/`.
 
-`generateCandidateTrajectories` is static-POV-only, so Phase 2's POV-motion gate sees **0** `endAngle`/`totalAngle`. Custom `scanMode` presets using `buildProgressions` need `minProgressionEndAngle: 0` + `minProgressionTotalAngle: 0`.
+## Invariants
 
-### Refinement scoring
+These hold the dataset's validity. Keep them when editing.
 
-Hard gates (fail → discard): `isPointVisible` passes, `edgeMarginPx ≥ 30`, `minNeighborPx ≥ 30`. Then clearance tier:
-- Tier 1 (passes `hasForwardClearance`): `2.0·min(edge,300) + 1.0·min(minN,250) + 600·min(baryMargin,0.33)`
-- Tier 2 (fails clearance but visible): Tier-1 score − `1e6` penalty, so any Tier-1 beats any Tier-2. Preserves quality on geometries where every placement sits under a hovering layer.
+- **Point order is the answer key.** A dot's letter is its index in `facePoints`, and clustered presets shuffle that array with the job seed. Sorting it, or regrouping it by face, leaks answers.
+- **Legibility floors are fixed.** Generation yields fewer presets rather than easier ones, and never falls back to an easier tier or motion. The floors:
+  - the radius-scaled spacing floor (`clusterMinSeparationPx`);
+  - the per-tier group spread and radius caps (`TIER_LAYOUTS`);
+  - the 0.30 viewing ratio;
+  - footprint clearance (`markerClearanceRadius`);
+  - tracked-dot visibility at every step.
+- **`trackingEvalMode` governs hidden dots only.** Non-hidden dots must be visible at every step in every mode. `hidePointsDuringAnimation` is a rendering switch with no effect on validation.
+- **Mapfold carries no rotation symmetry**, so it cannot be twinned and is refused by the clustered tiers.
+- **`gt_answer` is a JSON-encoded string** (`'["A","C"]'`), not a list.
+- **Refinement score terms are clamped with `min(x, cap)`.** A saturating `clamp01` makes candidates tie and collapses dots onto the first grid cell.
+- **The first refinement pass checks spacing only against placed dots (`isPlaced`).** Checking against unplaced dots deadlocks four-dot groups on narrow bird panels.
+- **Settle times:**
 
-Use clamped (not saturating) terms — saturating `clamp01` causes ties and collapses points to the first grid cell.
+  | Stage | Settle |
+  |---|---|
+  | Trajectory search | 300 ms |
+  | Refinement and in-page validation | ≥ 400 ms |
+  | Clustered tiers, and independent replays (`--settle-ms 800`) | 800 ms |
 
-## Matrix runner (`tools/generate-matrix.js`)
+  Shorter settles leave markers clipped or under the spacing floor on some final poses.
+- **Static-POV search.** `generateCandidateTrajectories` keeps the camera fixed, so the progression filter sees zero `endAngle`/`totalAngle`. A custom `scanMode` preset using `buildProgressions` needs `minProgressionEndAngle: 0` and `minProgressionTotalAngle: 0`.
 
-Runs slots in parallel. Models in `ALL_MODELS`: `simplevertex`, `bird`, `waterbomb`, `pinwheel`, `boat`, `mapfold`, `opensink`, `square` (8 total). `frog` remains dropped (too dense). Several models have known d4-yield caveats (thin back pools, anchor drop-out, fold-collapse) and may need per-model `counts` overrides to hit a uniform target.
+## Operational notes
 
-- `--models <key>[,<key>]` — filter which models from `ALL_MODELS` to run. Default = all 8.
-- `--concurrency` default `min(28, cpus - 4)`. Leaves 4 threads for OS + dev server; saturates 32-thread boxes. SwiftShader Chrome is ~1 core/instance.
-- `--shards-per-slot N` — splits each (model, tier) slot into N sub-shards with distinct seeds (`SEED + shard*1009`) and contiguous start-index ranges. Each shard is a separate `generate-presets.js` process; the worker-pool queue work-steals across shards. File naming: `<model>-d<n>-s<shard>.json` when sharded, `<model>-d<n>.json` when unsharded.
-- `--build-progressions` auto-scales to `max(24, ceil(count * 1.5))` (e.g. count=75 → build=113).
-- `--prewarm` (default ON) — two-phase:
-  1. All models run at d=1 in parallel (each writes its own facepool cache, no contention).
-  2. Remaining (model, d∈{3,4}) slots run parallel up to `--concurrency`.
-
-Total Phase-2 work: 8 models × 2 tiers (d3, d4) × `--shards-per-slot` shards per slot, plus d1 unsharded in Phase 1. (d2 ablated.)
-
-## Render parallelism (`tools/render_dataset_parallel.py`)
-
-Default `--workers = min(28, cpus * 7/8)`. Each worker = one Puppeteer Chromium (~600–800 MB RAM, ~1 core under SwiftShader). `selectPresetFromConfig` skips `importDemoFile` when the requested model is already loaded — saves ~1–2 s per preset on same-model shards.
-
-Skip-existing check looks for the preset name as a key in any `<DATASET_DIR>/metadata/*_metadata.json` (see `metadata_exists` in `render_dataset_parallel.py`). To force re-render of a subset of presets, delete those preset-name keys from the metadata file(s) — PNG deletion alone is not enough.
-
-## Key trade-offs
-
-- **Thin back pools** (e.g. opensink, pinwheel under d4) limit hidden-back diversity — presets within a cell often share hidden-back faces.
-- **Phase 2 settle (300 ms) vs validation settle (≥800 ms)** — Phase 2 accepts can fail validation if paper is mid-transition; fallback picks up slack.
-
-## Important Conventions
-
-- **Do not npm-install** anything already vendored in `dependencies/`.
-- **Shader code lives in `index.html`** as inline `<script>` — not separate `.glsl` files.
-- **No ES modules** — inter-file communication via `globals` or global functions.
-- **camelCase**; init functions use `init` prefix.
-- Simulation loop runs in `requestAnimationFrame`; GPU state in WebGL textures.
+- **Matching directories.** A tool that writes outputs needs the server's `DATASET_DIR` to equal its output or render directory; the Python orchestrators check this.
+- **Moving `DATASET_DIR`.** Copy `.scan-cache/` from the old directory to the new one to avoid a cold trajectory cache.
+- **Lenient flags.** The JS drivers parse options with `strict: false`, so a misspelled flag is silently ignored.
+- **Worker load.** Each Chromium worker uses about one core and 700 MB under SwiftShader. Keep the total across concurrent runs at or below the core count minus four.
+- **Concurrent renders.** Give each concurrent `render_dataset_parallel.py` run a distinct `--run-id`.
+- **Resuming predictions.** `tools/eval-claude.py` resumes from its `--out` file. Delete that file before re-asking a re-rendered dataset.
