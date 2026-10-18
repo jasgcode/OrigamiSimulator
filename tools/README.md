@@ -157,6 +157,8 @@ Start runs at least a second apart, or pass distinct `--run-id`s.
 
 Each replay resets the solver to the flat sheet before applying the preset, even when a worker reuses a loaded base. Re-rendering a preset replaces its JSONL row.
 
+`render-dataset.js --skip-existing`, run on its own, applies the same check against `DATASET_DIR` in its environment.
+
 ## Check and audit
 
 ### check-dataset.py
@@ -256,7 +258,7 @@ Built `eval/` (2026-10-01): 150 medium and 150 expert presets over seven bases, 
 | 4 | `plan` | Makes the final pick and reorders each preset's points, so every answer letter pair is used equally often per tier. `--keep-previous` grows an earlier set while keeping its picks and letters. |
 | 5 | `assemble` | Keeps candidates that passed validation and rendered correctly, then writes `eval/` with `presets.json`, `validation.json` and a `manifest.json` of per-cell spread and audits. |
 
-Its `MODELS` list includes mapfold, which the clustered tiers no longer generate, so a rebuild today leaves the mapfold cells empty.
+Its `MODELS` list includes mapfold, as the 2026-10-01 pools did. `generate-expert-dataset.py` no longer produces mapfold, so with new pools `select` reports the mapfold cells as short, and `plan` and `assemble` stop on them. Pass `--models` without mapfold, or `--allow-short`.
 
 ### uniform-1000 tools
 
@@ -265,6 +267,8 @@ Its `MODELS` list includes mapfold, which the clustered tiers no longer generate
 - one prewarm pass at the first tier, then the rest;
 - `--no-prewarm` to disable it;
 - `--shards-per-slot` to split later tiers' slots.
+
+Both scripts skip mapfold at tiers 3 and 5 with a log line, since those tiers cannot twin it. `assemble-uniform-1000.py --include-expert` reads the expert frame count from `js/presetGenerator.js`.
 
 [docs/uniform-1000.md](../docs/uniform-1000.md) has the commands. Tier 3 is now the clustered medium tier, so regenerating that set needs commit `89f3dee`.
 
@@ -288,16 +292,8 @@ bun run test:dataset
 
 | File | Covers |
 |---|---|
-| `generation.test.js` | Generator and validator logic: viewpoint coverage, rotation precision, cache identity, marker clearance, cluster layouts, twins, spin |
+| `generation.test.js` | Generator and validator logic: viewpoint coverage, rotation precision, cache identity, marker clearance, cluster layouts, twins, spin. Also the matrix's mapfold skip, `render-dataset.js --skip-existing` and `reverse-presets.js` |
 | `output.test.js` | The server's output endpoints, against a temporary server and directory |
 | `test_*.py` | Assembly and balancing, selection, audits, probes, scoring, dataset checks, rebalancing |
 
-`test_expert_trial.py` needs Pillow. None of the tests needs a running server or WebGL; use `validate-presets.js` and a render for those.
-
-## Known issues
-
-- **Mapfold in clustered tiers.** `bun run dataset:expert` (`generate-matrix.js --difficulties 5`) includes mapfold by default, and that slot fails. Pass `--models` without mapfold.
-- **`assemble-uniform-1000.py --include-expert`** expects 10-frame expert presets. Current expert presets have 14 frames, so it drops them all. `generate-uniform-1000.py` also still lists mapfold cells for tiers 3 and 5.
-- **`render-dataset.js --skip-existing`** checks the legacy `screenshots/<name>/metadata.json` layout. Use `render_dataset_parallel.py --skip-existing`, whose check is current. Its help text still mentions `metadata.json`.
-- **Viewing a preset in the browser** needs `model=<path without leading slash>` in the URL. `js/main.js` selects the Examples menu entry by exact path, and preset paths start with `/` ([docs/pipeline.md](../docs/pipeline.md#viewing-an-item-in-the-browser)).
-- **`reverse-presets.js`** default paths point to directories that no longer exist; pass `--input` and `--output`.
+None of the tests needs a running server or WebGL; use `validate-presets.js` and a render for those.

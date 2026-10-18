@@ -6,7 +6,7 @@ Origami Simulator (GPU origami physics, upstream by Ghassaei et al.) extended in
 
 ```bash
 bun run dev              # server.js on :3000; env DATASET_DIR (default dataset/), PORT
-bun run test:dataset     # 70 JS + 106 Python tests; no server or WebGL needed
+bun run test:dataset     # 73 JS + 104 Python tests; no server or WebGL needed
 bun install && bunx puppeteer browsers install chrome   # once, before any tools/*.js run
 ```
 
@@ -17,7 +17,7 @@ Run tools from the repository root.
 - **Tier rules, dot layout, twins, spin, balancing, legibility gates**: [docs/design.md](docs/design.md). Every rule there names the shortcut it closes; a rule change needs its reason updated too.
 - **Generation stages, preset fields, rendering, server endpoints, visibility tests**: [docs/pipeline.md](docs/pipeline.md)
 - **JSONL schema, question template, scoring, probes**: [docs/dataset.md](docs/dataset.md)
-- **Script options and known tool issues**: [tools/README.md](tools/README.md)
+- **Script options**: [tools/README.md](tools/README.md)
 - **The release build** (generation runs, selection, render, scores): [docs/reproduce.md](docs/reproduce.md), [release/dataset-300b/](release/dataset-300b/)
 
 ## Code conventions

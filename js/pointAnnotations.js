@@ -77,7 +77,7 @@ function initPointAnnotations(globals) {
 
         var prev = minY - minGap;
         for (var i = 0; i < items.length; i++) {
-            var y = clamp(items[i].anchorY, minY, maxY);
+            var y = clamp(items[i].anchorY + (items[i].labelShift || 0), minY, maxY);
             y = Math.max(y, prev + minGap);
             items[i].labelY = y;
             prev = y;
@@ -102,6 +102,160 @@ function initPointAnnotations(globals) {
                 items[q].labelY += underflow;
             }
         }
+    }
+
+    // Splits labels into a left and a right lane. Each leader line runs
+    // straight from its lane to its dot, so in a tight group a line can cross
+    // other dots or other lines. Starting from a split at the anchors' centroid, labels
+    // switch lanes or shift up or down (tilting the line) while that reduces
+    // the number of dots crossed.
+    // The capture draws the step caption ("STATE N") over the top-left corner
+    // after the labels (js/threeView.js): 16 CSS px from the top, 48 px text
+    // and 4 px padding above and below. Left-lane labels start below it, or a
+    // label there loses its letter under the caption.
+    var CAPTION_BOTTOM_CSS = 16 + 48 + 8;
+    function captionBottom(w) {
+        var base = globals.threeView && globals.threeView.renderer && globals.threeView.renderer.domElement;
+        return CAPTION_BOTTOM_CSS * (base && base.clientWidth ? w / base.clientWidth : 1);
+    }
+
+    function arrangeLabels(items, w, h, styleScale) {
+        var minGap = 28 * styleScale;
+        var marginY = 24 * styleScale;
+        var leftTop = Math.max(marginY, captionBottom(w) + minGap / 2);
+        var laneInset = 20 * styleScale;
+        var lanePad = 84 * styleScale;
+        // Slightly more than a marker's on-screen radius.
+        var clearPx = 14 * styleScale;
+
+        function initialSides() {
+            if (items.length === 0) return [];
+            var centroidX = 0;
+            for (var ci = 0; ci < items.length; ci++) centroidX += items[ci].anchorX;
+            centroidX /= items.length;
+            // Clamp centroid so we don't put all labels on one extreme edge
+            centroidX = clamp(centroidX, w * 0.25, w * 0.75);
+            var sides = items.map(function (item) { return item.anchorX <= centroidX ? "left" : "right"; });
+            // If all items ended up on one side, split the outermost one to the other
+            var order = items.map(function (_, i) { return i; }).sort(function (a, b) { return items[a].anchorX - items[b].anchorX; });
+            var lefts = sides.filter(function (side) { return side === "left"; }).length;
+            if (lefts === 0 && items.length > 1) sides[order[0]] = "left";
+            else if (lefts === items.length && items.length > 1) sides[order[order.length - 1]] = "right";
+            return sides;
+        }
+
+        // Resolve line crossings within each lane: if two labels' lines cross,
+        // swap their labelY positions to uncross them
+        function uncrossLane(laneItems) {
+            if (laneItems.length < 2) return;
+            var swapped = true;
+            var maxPasses = laneItems.length * laneItems.length;
+            while (swapped && maxPasses-- > 0) {
+                swapped = false;
+                for (var a = 0; a < laneItems.length - 1; a++) {
+                    for (var b = a + 1; b < laneItems.length; b++) {
+                        // Lines cross if label order and anchor order disagree
+                        var labelOrder = laneItems[a].labelY - laneItems[b].labelY;
+                        var anchorOrder = laneItems[a].anchorY - laneItems[b].anchorY;
+                        if (labelOrder * anchorOrder < 0) {
+                            var tmp = laneItems[a].labelY;
+                            laneItems[a].labelY = laneItems[b].labelY;
+                            laneItems[b].labelY = tmp;
+                            swapped = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        function arrange(sides, shifts) {
+            var leftItems = [], rightItems = [];
+            items.forEach(function (item, i) {
+                item.side = sides[i];
+                item.labelShift = shifts[i] * minGap;
+                (sides[i] === "left" ? leftItems : rightItems).push(item);
+            });
+            layoutLane(leftItems, leftTop, h - marginY, minGap);
+            layoutLane(rightItems, marginY, h - marginY, minGap);
+            uncrossLane(leftItems);
+            uncrossLane(rightItems);
+            // Compute lane X positions based on each side's anchors
+            var laneLeftX = laneInset, laneRightX = w - laneInset;
+            if (leftItems.length > 0) {
+                var minLeftAnchor = Math.min.apply(null, leftItems.map(function (item) { return item.anchorX; }));
+                laneLeftX = clamp(minLeftAnchor - lanePad, laneInset, w * 0.48);
+            }
+            if (rightItems.length > 0) {
+                var maxRightAnchor = Math.max.apply(null, rightItems.map(function (item) { return item.anchorX; }));
+                laneRightX = clamp(maxRightAnchor + lanePad, w * 0.52, w - laneInset);
+            }
+            return { leftItems: leftItems, rightItems: rightItems, laneLeftX: laneLeftX, laneRightX: laneRightX };
+        }
+
+        function segmentDistance(px, py, ax, ay, bx, by) {
+            var dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
+            var t = len2 > 0 ? clamp(((px - ax) * dx + (py - ay) * dy) / len2, 0, 1) : 0;
+            return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+        }
+
+        function segmentsIntersect(a, b) {
+            function orient(p, q, r) { return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]); }
+            var d1 = orient(b[0], b[1], a[0]), d2 = orient(b[0], b[1], a[1]);
+            var d3 = orient(a[0], a[1], b[0]), d4 = orient(a[0], a[1], b[1]);
+            return d1 * d2 < 0 && d3 * d4 < 0;
+        }
+
+        // Leader lines that pass over another dot, and pairs of lines that cross.
+        function crossingCounts(layout) {
+            var dots = 0, lines = 0;
+            var segments = items.map(function (item) {
+                var fromX = item.side === "left" ? layout.laneLeftX : layout.laneRightX;
+                return [[fromX, item.labelY], [item.anchorX, item.anchorY]];
+            });
+            items.forEach(function (item, i) {
+                var seg = segments[i];
+                items.forEach(function (other, j) {
+                    if (j === i) return;
+                    if (segmentDistance(other.anchorX, other.anchorY, seg[0][0], seg[0][1], seg[1][0], seg[1][1]) < clearPx) dots++;
+                    if (j > i && segmentsIntersect(seg, segments[j])) lines++;
+                });
+            });
+            return { dots: dots, lines: lines };
+        }
+        function crossings(layout) {
+            var c = crossingCounts(layout);
+            return c.dots + c.lines;
+        }
+
+        var sides = initialSides();
+        var shifts = items.map(function () { return 0; });
+        var best = crossings(arrange(sides, shifts));
+        // Greedy: apply the single move (lane switch or shift of up to two
+        // label gaps) that removes the most crossings.
+        var SHIFTS = [0, -1, 1, -2, 2];
+        for (var round = 0; best > 0 && round < 3 * items.length; round++) {
+            var bestMove = null;
+            for (var f = 0; f < items.length; f++) {
+                var oldSide = sides[f], oldShift = shifts[f];
+                ["left", "right"].forEach(function (side) {
+                    SHIFTS.forEach(function (shift) {
+                        if (side === oldSide && shift === oldShift) return;
+                        sides[f] = side; shifts[f] = shift;
+                        var c = crossings(arrange(sides, shifts));
+                        if (c < best) { best = c; bestMove = { index: f, side: side, shift: shift }; }
+                    });
+                });
+                sides[f] = oldSide; shifts[f] = oldShift;
+            }
+            if (!bestMove) break;
+            sides[bestMove.index] = bestMove.side;
+            shifts[bestMove.index] = bestMove.shift;
+        }
+        var layout = arrange(sides, shifts);
+        var counts = crossingCounts(layout);
+        layout.dotCrossings = counts.dots;
+        layout.lineCrossings = counts.lines;
+        return layout;
     }
 
     function drawArrow(fromX, fromY, toX, toY, styleScale) {
@@ -132,12 +286,10 @@ function initPointAnnotations(globals) {
         overlayCtx.fill();
     }
 
-    function render() {
-        updateSize();
-        clear();
-        if (!isActive()) return;
-        overlayCanvas.style.display = "block";
-
+    // Screen-space label items for the dots render() would draw. Hidden dots
+    // are included when revealed, or when includeHidden asks for the final
+    // frame's dots before the reveal. Returns null when the scene is not ready.
+    function collectItems(w, h, includeHidden) {
         var camera = globals.threeView && globals.threeView.camera;
         var modelWrapper = globals.threeView && globals.threeView.modelWrapper;
         var points = globals.facePoints && globals.facePoints.getPoints ? globals.facePoints.getPoints() : null;
@@ -150,21 +302,12 @@ function initPointAnnotations(globals) {
         var modelWorld = modelWrapper.matrixWorld;
         var POINT_OFFSET = 0.003;
 
-        var w = overlayCanvas.width;
-        var h = overlayCanvas.height;
-        var styleScale = Math.max(0.75, Math.min(1.35, h / 900));
-        var fontSize = Math.round(26 * styleScale);
-        var minGap = 28 * styleScale;
-        var marginY = 24 * styleScale;
-        var laneInset = 20 * styleScale;
-        var connectorGap = 10 * styleScale;
-
         var visibleItems = [];
 
         for (var i = 0; i < points.length; i++) {
             var point = points[i];
             if (!point) continue;
-            if (globals.facePoints.isPointHidden && globals.facePoints.isPointHidden(i) && !globals.revealHiddenPoints) continue;
+            if (globals.facePoints.isPointHidden && globals.facePoints.isPointHidden(i) && !globals.revealHiddenPoints && !includeHidden) continue;
             if (globals.facePoints.isPointVisible && !globals.facePoints.isPointVisible(i)) continue;
 
             var posLocal = globals.facePoints.getPointPosition ? globals.facePoints.getPointPosition(i) : null;
@@ -173,103 +316,96 @@ function initPointAnnotations(globals) {
             var normalLocal = getFaceNormalLocal(triIdx, faces, positions);
             if (!normalLocal) continue;
             var faceDirLocal = point.faceId < totalFaces ? normalLocal : normalLocal.clone().negate();
-            var dotLocal = posLocal.clone().add(faceDirLocal.multiplyScalar(POINT_OFFSET));
-            var posWorld = dotLocal.applyMatrix4(modelWorld);
-            var screen = worldToScreen(posWorld, camera, w, h);
+            var dotLocal = posLocal.clone().add(faceDirLocal.clone().multiplyScalar(POINT_OFFSET));
+            var screen = worldToScreen(dotLocal.clone().applyMatrix4(modelWorld), camera, w, h);
             if (!screen) continue;
+            var endScale = (globals.revealHiddenPoints || includeHidden) && globals.facePoints.pointEndScale
+                ? globals.facePoints.pointEndScale(i) : 1;
 
             visibleItems.push({
                 label: pointLetter(i),
                 anchorX: screen.x,
                 anchorY: screen.y,
-                labelY: screen.y
+                labelY: screen.y,
+                scale: endScale,
+                rim: dotRim(dotLocal, faceDirLocal, modelWorld, camera, w, h, screen, endScale)
             });
         }
+        return visibleItems;
+    }
 
-        // Assign each label to left or right side based on anchor screen position
-        // Use centroid of all anchors as the dividing line
-        var leftItems = [];
-        var rightItems = [];
-        if (visibleItems.length > 0) {
-            var centroidX = 0;
-            for (var ci = 0; ci < visibleItems.length; ci++) centroidX += visibleItems[ci].anchorX;
-            centroidX /= visibleItems.length;
-            // Clamp centroid so we don't put all labels on one extreme edge
-            centroidX = clamp(centroidX, w * 0.25, w * 0.75);
-
-            for (var si = 0; si < visibleItems.length; si++) {
-                if (visibleItems[si].anchorX <= centroidX) {
-                    visibleItems[si].side = "left";
-                    leftItems.push(visibleItems[si]);
-                } else {
-                    visibleItems[si].side = "right";
-                    rightItems.push(visibleItems[si]);
-                }
-            }
-            // If all items ended up on one side, split the outermost one to the other
-            if (leftItems.length === 0 && rightItems.length > 1) {
-                rightItems.sort(function(a, b) { return a.anchorX - b.anchorX; });
-                var moved = rightItems.shift();
-                moved.side = "left";
-                leftItems.push(moved);
-            } else if (rightItems.length === 0 && leftItems.length > 1) {
-                leftItems.sort(function(a, b) { return b.anchorX - a.anchorX; });
-                var moved2 = leftItems.shift();
-                moved2.side = "right";
-                rightItems.push(moved2);
-            }
+    // Screen offsets from the anchor to points on the dot's edge. The dot is a
+    // disc in its panel's plane (js/model.js draws the black circle out to
+    // 28/32 of the disc radius), so a tilted panel shows it as an ellipse.
+    var DOT_FILL = 28 / 32;
+    // `scale` is the dot's size relative to the preset's (its end size in the
+    // last image).
+    function dotRim(centerLocal, normalLocal, modelWorld, camera, w, h, anchor, scale) {
+        var radius = (globals.facePointRadius || 0.025) * DOT_FILL * (scale || 1);
+        var n = normalLocal.clone().normalize();
+        var a = new THREE.Vector3(1, 0, 0);
+        if (Math.abs(n.dot(a)) > 0.9) a.set(0, 1, 0);
+        a.sub(n.clone().multiplyScalar(a.dot(n))).normalize();
+        var b = n.clone().cross(a);
+        var rim = [];
+        for (var k = 0; k < 16; k++) {
+            var t = 2 * Math.PI * k / 16;
+            var edge = centerLocal.clone()
+                .add(a.clone().multiplyScalar(radius * Math.cos(t)))
+                .add(b.clone().multiplyScalar(radius * Math.sin(t)));
+            var s = worldToScreen(edge.applyMatrix4(modelWorld), camera, w, h);
+            if (s) rim.push([s.x - anchor.x, s.y - anchor.y]);
         }
+        return rim;
+    }
 
-        layoutLane(leftItems, marginY, h - marginY, minGap);
-        layoutLane(rightItems, marginY, h - marginY, minGap);
+    // Distance from the anchor at which a leader line heading toward
+    // (dirX, dirY) leaves the dot: the dot's extent along that direction, at
+    // least the overlay disc. Arrows stop a gap past it, so the arrowhead
+    // never covers a small or foreshortened dot.
+    function dotReach(item, dirX, dirY, styleScale) {
+        var reach = 4 * styleScale * (item.scale || 1);
+        (item.rim || []).forEach(function (o) { reach = Math.max(reach, o[0] * dirX + o[1] * dirY); });
+        return reach;
+    }
 
-        // Resolve line crossings within each lane: if two labels' lines cross,
-        // swap their labelY positions to uncross them
-        function uncrossLane(items) {
-            if (items.length < 2) return;
-            var swapped = true;
-            var maxPasses = items.length * items.length;
-            while (swapped && maxPasses-- > 0) {
-                swapped = false;
-                for (var a = 0; a < items.length - 1; a++) {
-                    for (var b = a + 1; b < items.length; b++) {
-                        // Lines cross if label order and anchor order disagree
-                        var labelOrder = items[a].labelY - items[b].labelY;
-                        var anchorOrder = items[a].anchorY - items[b].anchorY;
-                        if (labelOrder * anchorOrder < 0) {
-                            var tmp = items[a].labelY;
-                            items[a].labelY = items[b].labelY;
-                            items[b].labelY = tmp;
-                            swapped = true;
-                        }
-                    }
-                }
-            }
-        }
-        uncrossLane(leftItems);
-        uncrossLane(rightItems);
+    function styleScaleFor(h) {
+        return Math.max(0.75, Math.min(1.35, h / 900));
+    }
 
-        // Compute lane X positions based on each side's anchors
-        var lanePad = 84 * styleScale;
-        var laneLeftX, laneRightX;
-        if (leftItems.length > 0) {
-            var minLeftAnchor = leftItems[0].anchorX;
-            for (var li = 1; li < leftItems.length; li++) {
-                if (leftItems[li].anchorX < minLeftAnchor) minLeftAnchor = leftItems[li].anchorX;
-            }
-            laneLeftX = clamp(minLeftAnchor - lanePad, laneInset, w * 0.48);
-        } else {
-            laneLeftX = laneInset;
-        }
-        if (rightItems.length > 0) {
-            var maxRightAnchor = rightItems[0].anchorX;
-            for (var ri = 1; ri < rightItems.length; ri++) {
-                if (rightItems[ri].anchorX > maxRightAnchor) maxRightAnchor = rightItems[ri].anchorX;
-            }
-            laneRightX = clamp(maxRightAnchor + lanePad, w * 0.52, w - laneInset);
-        } else {
-            laneRightX = w - laneInset;
-        }
+    // Crossings in the label layout of the final frame as it stands now, with
+    // hidden dots revealed: leader lines over another dot, and crossing lines.
+    // Validation rejects clustered presets whose lines pass over a dot.
+    function labelCrossings() {
+        var base = globals.threeView && globals.threeView.renderer && globals.threeView.renderer.domElement;
+        if (overlayCanvas) updateSize();
+        var w = overlayCanvas ? overlayCanvas.width : base && base.width;
+        var h = overlayCanvas ? overlayCanvas.height : base && base.height;
+        var items = w && h ? collectItems(w, h, true) : null;
+        if (!items) return null;
+        var layout = arrangeLabels(items, w, h, styleScaleFor(h));
+        return { dots: layout.dotCrossings, lines: layout.lineCrossings };
+    }
+
+    function render() {
+        updateSize();
+        clear();
+        if (!isActive()) return;
+        overlayCanvas.style.display = "block";
+
+        var w = overlayCanvas.width;
+        var h = overlayCanvas.height;
+        var styleScale = styleScaleFor(h);
+        var fontSize = Math.round(26 * styleScale);
+        var connectorGap = 10 * styleScale;
+        var visibleItems = collectItems(w, h, false);
+        if (!visibleItems) return;
+
+        var arranged = arrangeLabels(visibleItems, w, h, styleScale);
+        var leftItems = arranged.leftItems;
+        var rightItems = arranged.rightItems;
+        var laneLeftX = arranged.laneLeftX;
+        var laneRightX = arranged.laneRightX;
 
         overlayCtx.save();
         overlayCtx.lineWidth = 2 * styleScale;
@@ -295,14 +431,23 @@ function initPointAnnotations(globals) {
             var anchorX = clamp(item.anchorX, 8 * styleScale, w - 8 * styleScale);
             var anchorY = clamp(item.anchorY, 8 * styleScale, h - 8 * styleScale);
 
-            drawArrow(connectorX, item.labelY, anchorX, anchorY, styleScale);
+            var dx = connectorX - anchorX, dy = item.labelY - anchorY;
+            var len = Math.sqrt(dx * dx + dy * dy);
+            if (len > 0.001) {
+                var stop = dotReach(item, dx / len, dy / len, styleScale) + 3 * styleScale;
+                if (len - stop > 10 * styleScale) {
+                    drawArrow(connectorX, item.labelY, anchorX + dx / len * stop, anchorY + dy / len * stop, styleScale);
+                }
+            }
 
             overlayCtx.beginPath();
-            overlayCtx.arc(anchorX, anchorY, 4 * styleScale, 0, Math.PI * 2);
+            overlayCtx.arc(anchorX, anchorY, 4 * styleScale * (item.scale || 1), 0, Math.PI * 2);
             overlayCtx.fill();
 
             overlayCtx.lineWidth = 4 * styleScale;
             overlayCtx.strokeStyle = "#ffffff";
+            // Mitred joins spike past the sharp inner corners of M, V and W.
+            overlayCtx.lineJoin = "round";
             overlayCtx.strokeText(item.label, labelX, item.labelY);
             overlayCtx.lineWidth = 2 * styleScale;
             overlayCtx.strokeStyle = "#111111";
@@ -318,6 +463,7 @@ function initPointAnnotations(globals) {
 
     return {
         render: render,
+        labelCrossings: labelCrossings,
         clear: clear,
         onResize: updateSize,
         isActive: isActive,

@@ -79,6 +79,7 @@ $(function() {
         }
         model = model.replace(/'/g, '');
         globals.loadedModel = model;
-        $(".demo[data-url='"+model+"']").click();
+        // Presets store models as "/Bases/birdBase.svg"; demo links omit the slash.
+        $(".demo[data-url='"+model.replace(/^\/+/, '')+"']").click();
     });
 });

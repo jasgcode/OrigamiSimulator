@@ -8,7 +8,7 @@ This script orchestrates multiple parallel invocations of
 
 It is designed for long runs and resume-friendly execution:
 - uses `multiprocessing` (via ProcessPoolExecutor)
-- supports skip-existing by checking screenshots/<preset>/metadata.json
+- skips existing samples only when config, JSONL, metadata, and images match
 - retries failed shard jobs
 - can split failed shards into smaller jobs to isolate problematic presets
 - writes run logs and a machine-readable report
@@ -98,25 +98,42 @@ def estimate_cost(preset: dict[str, Any]) -> float:
     return max(cost, 1.0)
 
 
-def metadata_exists(preset_name: str) -> bool:
-    # Output dir matches server.js DATASET_DIR (default: dataset/).
-    # Metadata is consolidated per-object at dataset/metadata/<object>_metadata.json,
-    # keyed by benchmark/preset name. PNGs live at dataset/<jsonl_id>/ (a
-    # different, id-slug-based name), so the only reliable per-preset marker
-    # is presence of the preset_name key inside SOME metadata file.
-    out_dir = os.environ.get("DATASET_DIR", "dataset")
-    metadata_dir = ROOT / out_dir / "metadata"
-    if not metadata_dir.is_dir():
-        return False
-    for mfile in metadata_dir.glob("*_metadata.json"):
+def completed_presets(presets: dict[str, Any]) -> set[str]:
+    """Require matching input, metadata, a JSONL row, and every recorded image."""
+    out_dir = ROOT / os.environ.get("DATASET_DIR", "dataset")
+    rows = {}
+    try:
+        with (out_dir / "dataset.jsonl").open(encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                    rows[row["meta_info"]["benchmark"]] = row
+                except (ValueError, KeyError, TypeError):
+                    continue
+    except FileNotFoundError:
+        return set()
+    complete = set()
+    for metadata_file in (out_dir / "metadata").glob("*_metadata.json"):
         try:
-            with mfile.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict) and preset_name in data:
-                return True
-        except (OSError, json.JSONDecodeError):
+            metadata = read_json(metadata_file)
+        except (OSError, ValueError):
             continue
-    return False
+        for name, record in metadata.items():
+            if name not in presets or not isinstance(record, dict):
+                continue
+            if record.get("presetConfig") != presets[name]:
+                continue
+            images = record.get("images", [])
+            row = rows.get(name, {})
+            if not images or row.get("images") != images:
+                continue
+            if len(images) < len(presets[name].get("steps", [])):
+                continue
+            if all(isinstance(image, str) and is_under_root(out_dir / image, out_dir)
+                   and (out_dir / image).is_file() and (out_dir / image).stat().st_size > 0
+                   for image in images):
+                complete.add(name)
+    return complete
 
 
 def check_server(server_url: str, timeout_sec: float = 5.0) -> None:
@@ -310,8 +327,9 @@ def resolve_path(path_str: str) -> Path:
     return p.resolve()
 
 
-def missing_outputs(names: list[str]) -> list[str]:
-    return [n for n in names if not metadata_exists(n)]
+def missing_outputs(names: list[str], presets: dict[str, Any]) -> list[str]:
+    complete = completed_presets(presets)
+    return [n for n in names if n not in complete]
 
 
 def make_shard_file(
@@ -359,7 +377,7 @@ def main() -> int:
         return 0
 
     if args.skip_existing:
-        pending_names = [n for n in all_names if not metadata_exists(n)]
+        pending_names = missing_outputs(all_names, presets)
     else:
         pending_names = list(all_names)
 
@@ -458,7 +476,7 @@ def main() -> int:
 
                 render_missing = []
                 if worker_result["ok"]:
-                    render_missing = missing_outputs(job.names)
+                    render_missing = missing_outputs(job.names, presets)
                     if render_missing:
                         worker_result["ok"] = False
                         worker_result["error"] = (
@@ -534,7 +552,7 @@ def main() -> int:
                     failed_names[n] = reason
 
     elapsed_sec = round(time.time() - start_time, 3)
-    final_missing = [n for n in pending_names if not metadata_exists(n)]
+    final_missing = missing_outputs(pending_names, presets)
     for n in final_missing:
         failed_names.setdefault(n, "missing metadata after run")
 

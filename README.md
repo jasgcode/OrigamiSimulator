@@ -41,7 +41,7 @@ The scorer reports exact set match with a 95% interval and per-item chance, plus
 bun run dev
 ```
 
-Then open <http://localhost:3000/?benchmarks=release/dataset-300b/presets.json&benchmark=bird-d3-001&model=Bases/birdBase.svg&autoRun=true&autoCapture=false>. Set `model` to the preset's base without the leading slash. Without parameters, the page is the interactive simulator.
+Then open <http://localhost:3000/?benchmarks=release/dataset-300b/presets.json&benchmark=bird-d3-001&autoRun=true&autoCapture=false>. Without parameters, the page is the interactive simulator.
 
 **Rebuild the dataset** from its presets, or regenerate it from scratch: see [docs/reproduce.md](docs/reproduce.md).
 
@@ -94,7 +94,7 @@ Each rendering or generation worker uses about one CPU core and 600–800 MB of 
 bun run test:dataset
 ```
 
-This runs 70 JavaScript and 106 Python tests (one Python test needs Pillow). They need no server or GPU.
+This runs 73 JavaScript and 104 Python tests. They need no server or GPU.
 
 ## License and acknowledgements
 

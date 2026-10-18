@@ -98,15 +98,27 @@ function initFacePoints(globals) {
         return points;
     }
 
-    function addPoint(faceId, u, v, w, hidden) {
+    // endScale (optional) sizes the dot in the last image only; see
+    // pointEndScale.
+    function addPoint(faceId, u, v, w, hidden, endScale) {
         if (u === undefined) u = 1 / 3;
         if (v === undefined) v = 1 / 3;
         if (w === undefined) w = 1 / 3;
         var faces = globals.model.getFaces();
         var N = faces ? faces.length : 0;
         if (faceId < 0 || faceId >= N * 2) return -1;
-        points.push({ faceId: faceId, u: u, v: v, w: w, hidden: !!hidden });
+        var point = { faceId: faceId, u: u, v: v, w: w, hidden: !!hidden };
+        if (endScale > 0) point.endScale = endScale;
+        points.push(point);
         return points.length - 1;
+    }
+
+    // Size of a point's dot in the last image, relative to the preset's
+    // pointRadius. Every dot is drawn at 1 before that; presets with
+    // endDotSizes give each dot its own end size (presetGenerator.js).
+    function pointEndScale(index) {
+        var p = points[index];
+        return p && p.endScale > 0 ? p.endScale : 1;
     }
 
     function isPointHidden(index) {
@@ -331,6 +343,61 @@ function initFacePoints(globals) {
         return !isOccluded(originTipLocal, dirToCameraLocal, localDistToCamera, faces, positions);
     }
 
+    // For a flat marker, this is the approximate minor/major axis ratio.
+    // It is independent of visibility: a visible center can still be edge-on.
+    function getPointViewQuality(index) {
+        var point = points[index];
+        if (!point) return 0;
+        var faces = globals.model.getFaces();
+        var position = getPointPosition(index);
+        var normal = getFaceNormal(point.faceId % faces.length);
+        if (!position || !normal) return 0;
+        updateModelMatrices();
+        var camera = globals.threeView.camera;
+        var worldPosition = position.clone().applyMatrix4(_modelWorld);
+        var worldNormal = normal.clone().transformDirection(_modelWorld);
+        var towardCamera = camera instanceof THREE.OrthographicCamera
+            ? camera.getWorldDirection().negate()
+            : camera.position.clone().sub(worldPosition).normalize();
+        var facing = worldNormal.dot(towardCamera);
+        return Math.max(0, point.faceId < faces.length ? facing : -facing);
+    }
+
+    // Check a small disk on the paper around the marker. A center ray can
+    // miss an overlapping panel that clips the edge of the rendered dot.
+    function hasSurfaceClearance(index, radius) {
+        if (!isPointVisible(index)) return false;
+        var faces = globals.model.getFaces();
+        var positions = globals.model.getPositionsArray();
+        var point = points[index];
+        var triIdx = point.faceId % faces.length;
+        var face = faces[triIdx];
+        var center = getPointPosition(index);
+        var normal = getFaceNormal(triIdx);
+        var tangent = new THREE.Vector3(
+            positions[face[1]*3] - positions[face[0]*3],
+            positions[face[1]*3+1] - positions[face[0]*3+1],
+            positions[face[1]*3+2] - positions[face[0]*3+2]).normalize();
+        var bitangent = normal.clone().cross(tangent).normalize();
+        updateModelMatrices();
+        var localCamera = globals.threeView.camera.position.clone().applyMatrix4(_modelInv);
+        for (var sample = 0; sample < 8; sample++) {
+            var angle = sample * Math.PI / 4;
+            var position = center.clone().addScaledVector(tangent, radius * Math.cos(angle))
+                .addScaledVector(bitangent, radius * Math.sin(angle));
+            var bary = worldToBarycentric(triIdx, position);
+            if (!bary || Math.min(bary.u, bary.v, bary.w) < 0) return false;
+            // Match the renderer's 0.003-unit lift on the marked side.
+            position.addScaledVector(normal, point.faceId < faces.length ? 0.003 : -0.003);
+            var towardCamera = localCamera.clone().sub(position).normalize();
+            position.addScaledVector(towardCamera, OCCL_EPSILON);
+            var ray = localCamera.clone().sub(position);
+            var distance = ray.length();
+            if (isOccluded(position, ray.divideScalar(distance), distance, faces, positions)) return false;
+        }
+        return true;
+    }
+
     // Returns points array enriched with world position and camera-facing visibility.
     function getPointsWithVisibility() {
         return points.map(function (p, i) {
@@ -366,7 +433,7 @@ function initFacePoints(globals) {
                 var bary = parseBarycentric(entry);
                 var isHidden = !!entry.hidden;
                 if (bary) {
-                    addPoint(faceId, bary.u, bary.v, bary.w, isHidden);
+                    addPoint(faceId, bary.u, bary.v, bary.w, isHidden, entry.endScale);
                 } else {
                     var count = parseInt(entry.count != null ? entry.count : 1, 10);
                     for (var j = 0; j < count; j++) {
@@ -387,7 +454,7 @@ function initFacePoints(globals) {
                     var bary = parseBarycentric(val[k]);
                     var isHidden = !!(val[k] && val[k].hidden);
                     if (bary) {
-                        addPoint(faceId, bary.u, bary.v, bary.w, isHidden);
+                        addPoint(faceId, bary.u, bary.v, bary.w, isHidden, val[k].endScale);
                     } else {
                         bary = deterministicBarycentric(globalIndex++);
                         addPoint(faceId, bary.u, bary.v, bary.w, isHidden);
@@ -597,12 +664,15 @@ function initFacePoints(globals) {
         initFromConfig: initFromConfig,
         isPointVisible: isPointVisible,
         hasForwardClearance: hasForwardClearance,
+        hasSurfaceClearance: hasSurfaceClearance,
+        getPointViewQuality: getPointViewQuality,
         getPointsWithVisibility: getPointsWithVisibility,
         getVisibleFaceIds: getVisibleFaceIds,
         getBackSideVisibleFaceIds: getBackSideVisibleFaceIds,
         getFaceViewQualities: getFaceViewQualities,
         getFaceBackQualities: getFaceBackQualities,
         isPointHidden: isPointHidden,
+        pointEndScale: pointEndScale,
         getHiddenIndices: getHiddenIndices
     };
 }

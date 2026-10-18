@@ -56,6 +56,7 @@ function initBenchmark(globals) {
     var running = false;
     var currentStep = 0;
     var currentBenchmarkName = null;
+    var sourcePresetConfig = null;
     var stateAccumulator = [];   // collects { fold, pov, visiblePoints } per captured step
     var capturedFiles = [];      // ordered PNG filenames saved this run (for dataset JSON)
     var datasetSampleCounter = 0; // monotonic integer ID across all benchmark runs in session
@@ -251,6 +252,15 @@ function initBenchmark(globals) {
         if (cfg.labelStyle !== undefined) {
             globals.labelStyle = (cfg.labelStyle === "both") ? "circle" : cfg.labelStyle;
             globals.model.updateFaceColors();
+        }
+
+        // Always reset, so a preset without pointRadius does not inherit
+        // the smaller dots of the expert preset before it.
+        var pointRadius = parseFloat(cfg.pointRadius);
+        pointRadius = pointRadius > 0 ? pointRadius : 0.025;
+        if (globals.facePointRadius !== pointRadius) {
+            globals.facePointRadius = pointRadius;
+            if (globals.model && globals.model.updateFaceColors) globals.model.updateFaceColors();
         }
 
         if (cfg.backgroundColor !== undefined && cfg.backgroundColor !== null) {
@@ -481,6 +491,7 @@ function initBenchmark(globals) {
             id:                datasetSampleCounter++,
             images:            images,
             benchmark:         name,
+            presetConfig:      sourcePresetConfig,
             colorMode:         globals.colorMode || null,
             difficulty:        config && config.difficulty != null ? config.difficulty : null,
             totalPoints:       summary.totalPoints,
@@ -914,6 +925,8 @@ function initBenchmark(globals) {
         if (primaryTargetPointIndices) cfg.primaryTargetPointIndices = primaryTargetPointIndices;
         var minPointSeparationPx = getParamFloat("minPointSeparationPx");
         if (minPointSeparationPx !== null) cfg.minPointSeparationPx = minPointSeparationPx;
+        var pointRadius = getParamFloat("pointRadius");
+        if (pointRadius !== null) cfg.pointRadius = pointRadius;
         var minProgressionEndAngle = getParamFloat("minProgressionEndAngle");
         if (minProgressionEndAngle !== null) cfg.minProgressionEndAngle = minProgressionEndAngle;
         var minProgressionTotalAngle = getParamFloat("minProgressionTotalAngle");
@@ -1033,163 +1046,50 @@ function initBenchmark(globals) {
     // (no iso-start lerp). Motion is expressed via object rotation.
     // This keeps phase-2 validation aligned with emitted presets.
     function generateCandidateTrajectories(scanStates, foldSteps, count, opts) {
-        var staticPov = true;
-        var isoVec = [1, 1, 1];
-        function normalize(v) {
-            var mag = Math.sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
-            return mag > 0 ? [v[0]/mag, v[1]/mag, v[2]/mag] : [0, 1, 0];
-        }
-        function lerp3(a, b, t) {
-            return [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t];
-        }
-        function round2(v) {
-            return [Math.round(v[0]*100)/100, Math.round(v[1]*100)/100, Math.round(v[2]*100)/100];
-        }
+        if (!foldSteps.length) return [];
         function angularDist(a, b) {
-            var dot = a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
-            var mA = Math.sqrt(a[0]*a[0]+a[1]*a[1]+a[2]*a[2]);
-            var mB = Math.sqrt(b[0]*b[0]+b[1]*b[1]+b[2]*b[2]);
-            if (mA === 0 || mB === 0) return Math.PI;
-            return Math.acos(Math.max(-1, Math.min(1, dot/(mA*mB))));
+            var dot = a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+            var scale = Math.sqrt(a[0]*a[0] + a[1]*a[1] + a[2]*a[2])
+                * Math.sqrt(b[0]*b[0] + b[1]*b[1] + b[2]*b[2]);
+            return Math.acos(Math.max(-1, Math.min(1, dot / scale)));
         }
-        function endpointFromPov(pov) {
-            var dir = getPOVDirection(pov);
-            if (!dir) return null;
-            var n = dir.normalize();
-            return round2([n.x, n.y, n.z]);
-        }
-
-        // Collect all unique continuous POVs scanned at the last fold step as potential endpoints
-        var lastFold = foldSteps[foldSteps.length - 1];
-        var endpoints = [];
+        function povKey(pov) { return Array.isArray(pov) ? pov.join(",") : String(pov); }
+        var initialVisible = {};
+        scanStates.forEach(function (state) {
+            if (state.fold === foldSteps[0] && state.visibleFaceIds && state.visibleFaceIds.length) {
+                initialVisible[povKey(state.pov)] = true;
+            }
+        });
         var seen = {};
-        // In staticPov mode, the same POV is used at every fold step. POVs that
-        // can't see the tracked face at fold=0 (flat paper, only upper-hemisphere
-        // POVs see the front) will fail validation at step 1. Pre-filter to
-        // endpoints whose fold=0 scan state has at least one visible face.
-        var fold0VisiblePovs = null;
-        if (staticPov) {
-            fold0VisiblePovs = {};
-            var firstFold = foldSteps[0];
-            for (var si0 = 0; si0 < scanStates.length; si0++) {
-                var st0 = scanStates[si0];
-                if (st0.fold !== firstFold) continue;
-                if (!st0.visibleFaceIds || st0.visibleFaceIds.length === 0) continue;
-                var povKey0 = Array.isArray(st0.pov) ? st0.pov.join(",") : String(st0.pov);
-                fold0VisiblePovs[povKey0] = true;
-            }
-        }
-        for (var si = 0; si < scanStates.length; si++) {
-            var st = scanStates[si];
-            if (st.fold !== lastFold) continue;
-            if (staticPov) {
-                var povKey = Array.isArray(st.pov) ? st.pov.join(",") : String(st.pov);
-                if (!fold0VisiblePovs[povKey]) continue;
-            }
-            var endpoint = endpointFromPov(st.pov);
-            if (!endpoint) continue;
-            var k = endpoint.join(",");
-            if (!seen[k]) { seen[k] = true; endpoints.push(endpoint); }
-        }
-
-        // t-curves: control how fast camera moves from iso toward endpoint
-        var tCurves = [
-            function (fi, n) { return fi === 0 ? 0 : 1; },                              // immediate
-            function (fi, n) { return fi / (n - 1); },                                   // linear
-            function (fi, n) { var r = fi/(n-1); return r * r; },                         // slow start
-            function (fi, n) { var r = fi/(n-1); return 1 - (1-r)*(1-r); },              // quick start
-            function (fi, n) { return fi <= 1 ? 0 : (fi - 1) / (n - 2); }               // hold then go
-        ];
-
-        var nIso = normalize(isoVec);
-        var trajectories = [];
-
-        // Sort endpoints for diversity: greedy farthest-first from iso
-        var sorted = endpoints.slice().sort(function (a, b) {
-            return angularDist(b, nIso) - angularDist(a, nIso);
+        var endpoints = [];
+        scanStates.forEach(function (state) {
+            if (state.fold !== foldSteps[foldSteps.length - 1] || !initialVisible[povKey(state.pov)]) return;
+            var dir = getPOVDirection(state.pov);
+            if (!dir) return;
+            dir.normalize();
+            var pov = [dir.x, dir.y, dir.z].map(function (v) { return Math.round(v * 100) / 100; });
+            var key = povKey(pov);
+            if (seen[key]) return;
+            seen[key] = true;
+            endpoints.push({ pov: pov, distance: angularDist(pov, [1, 1, 1]) });
         });
 
-        for (var ei = 0; ei < sorted.length; ei++) {
-            var ep = sorted[ei];
-
-            // Skip endpoints too close to already-used ones. 0.04 rad
-            // (~2.3°) — tight enough to give d4 a rich POV pool for the
-            // back-coverage gate to filter against. Rotation-profile
-            // sweep downstream provides additional diversity.
-            var tooClose = false;
-            for (var ui = 0; ui < trajectories.length; ui++) {
-                var lastStep = trajectories[ui][trajectories[ui].length - 1];
-                if (Array.isArray(lastStep.pov) && angularDist(ep, lastStep.pov) < 0.04) {
-                    tooClose = true; break;
-                }
+        // Greedy farthest-first ordering spreads the *prefix* across views.
+        // Phase 2 truncates this list and stops early, so ordering affects yield.
+        var trajectories = [];
+        while (endpoints.length) {
+            var best = 0;
+            for (var i = 1; i < endpoints.length; i++) {
+                if (endpoints[i].distance > endpoints[best].distance) best = i;
             }
-            if (tooClose) continue;
-
-            if (staticPov) {
-                // One trajectory per endpoint: every step uses the endpoint
-                // POV directly. Rotation-profile sweep in Phase 2 is what
-                // provides motion variety.
-                var staticSteps = [];
-                for (var fsi = 0; fsi < foldSteps.length; fsi++) {
-                    staticSteps.push({ fold: foldSteps[fsi], pov: ep.slice() });
-                }
-                trajectories.push(staticSteps);
-                continue;
-            }
-            for (var ci = 0; ci < tCurves.length; ci++) {
-                var steps = [{ fold: foldSteps[0], pov: "iso" }];
-                for (var fi = 1; fi < foldSteps.length; fi++) {
-                    var t = tCurves[ci](fi, foldSteps.length);
-                    steps.push({ fold: foldSteps[fi], pov: round2(lerp3(nIso, ep, t)) });
-                }
-                trajectories.push(steps);
+            var selected = endpoints.splice(best, 1)[0].pov;
+            trajectories.push(foldSteps.map(function (fold) { return { fold: fold, pov: selected.slice() }; }));
+            for (var j = 0; j < endpoints.length; j++) {
+                var distance = angularDist(endpoints[j].pov, selected);
+                endpoints[j].distance = trajectories.length === 1 ? distance : Math.min(endpoints[j].distance, distance);
             }
         }
-
-        // Also add trajectories using ALL endpoints (no distance filter) if we don't have enough
-        if (trajectories.length < count * 3) {
-            for (var ei2 = 0; ei2 < sorted.length; ei2++) {
-                var ep2 = sorted[ei2];
-                if (staticPov) {
-                    var dupeEp = false;
-                    for (var di0 = 0; di0 < trajectories.length; di0++) {
-                        var la = trajectories[di0][trajectories[di0].length - 1].pov;
-                        if (Array.isArray(la) && la[0] === ep2[0] && la[1] === ep2[1] && la[2] === ep2[2]) {
-                            dupeEp = true; break;
-                        }
-                    }
-                    if (dupeEp) continue;
-                    var staticSteps2 = [];
-                    for (var fsi2 = 0; fsi2 < foldSteps.length; fsi2++) {
-                        staticSteps2.push({ fold: foldSteps[fsi2], pov: ep2.slice() });
-                    }
-                    trajectories.push(staticSteps2);
-                    continue;
-                }
-                for (var ci2 = 0; ci2 < tCurves.length; ci2++) {
-                    var steps2 = [{ fold: foldSteps[0], pov: "iso" }];
-                    for (var fi2 = 1; fi2 < foldSteps.length; fi2++) {
-                        var t2 = tCurves[ci2](fi2, foldSteps.length);
-                        steps2.push({ fold: foldSteps[fi2], pov: round2(lerp3(nIso, ep2, t2)) });
-                    }
-                    // Dedup
-                    var isDupe = false;
-                    for (var di = 0; di < trajectories.length; di++) {
-                        var same = true;
-                        for (var ds = 1; ds < steps2.length; ds++) {
-                            var a = steps2[ds].pov, b = trajectories[di][ds].pov;
-                            if (Array.isArray(a) && Array.isArray(b)) {
-                                if (a[0]!==b[0]||a[1]!==b[1]||a[2]!==b[2]) { same=false; break; }
-                            }
-                        }
-                        if (same) { isDupe = true; break; }
-                    }
-                    if (!isDupe) trajectories.push(steps2);
-                }
-            }
-        }
-
-        console.log("generateCandidateTrajectories: " + endpoints.length + " endpoints → " + trajectories.length + " candidates");
+        console.log("generateCandidateTrajectories: " + trajectories.length + " distinct static viewpoints");
         return trajectories;
     }
 
@@ -1255,13 +1155,17 @@ function initBenchmark(globals) {
     }
 
     // Follows the project's meta-prompt template structure. Placeholders:
-    //   {num_initial}, {all_labels} — substituted per-preset
+    //   {num_initial}, {all_labels}, {dots_shown}, {dot_sizes} — substituted
+    //   per-preset ({dots_shown} says intermediate images carry no points,
+    //   unless the preset sets hidePointsDuringAnimation: false; {dot_sizes}
+    //   says the last image draws dots at other sizes, for presets with
+    //   endDotSizes)
     //   {images} — rendered marker for the eval harness to insert images
     //   {json_answer_value} — literal placeholder kept in output (model replaces)
     var JSONL_QUESTION_TEMPLATE = [
         "[Task]",
         "You are solving origami point tracking.",
-        "In this task, you must identify which labeled points on a folded piece of paper correspond to the unmarked dots placed on the original flat (unfolded) paper. The first image shows the flat paper with {num_initial} unmarked dot(s) printed on it. The following images show the same paper being folded step by step, ending with the fully folded result where every visible point is labeled using the letters {all_labels}. Paper is opaque: points on the back side may be hidden by overlying layers, and the same physical dot may appear in different positions across steps as the paper folds. If there's rotating in the process, it's rotating slowly. You must track each unmarked dot through the fold sequence and report the letter(s) in the final image that correspond to the original unmarked dot(s).",
+        "In this task, you must identify which labeled points on a folded piece of paper correspond to the unmarked dots placed on the original flat (unfolded) paper. The first image shows the flat paper with {num_initial} unmarked dot(s) printed on it. The following images show the same paper being folded step by step, ending with the fully folded result where every visible point is labeled using the letters {all_labels}. Paper is opaque: points on the back side may be hidden by overlying layers, and the same physical dot may appear in different positions across steps as the paper folds. The camera stays fixed, but the paper may rotate between images, sometimes by a large angle.{dots_shown}{dot_sizes} You must track each unmarked dot through the fold sequence and report the letter(s) in the final image that correspond to the original unmarked dot(s).",
         "If this task depends on a specific visual definition, use this definition exactly: not applicable",
         "The visual evidence for this question is provided below.",
         "{images}",
@@ -1279,13 +1183,17 @@ function initBenchmark(globals) {
         "Replace {json_answer_value} with the single answer for this task, formatted according to a JSON array of uppercase letters chosen from [{all_labels}], with no duplicates, e.g. [\"A\", \"C\"]."
     ].join("\n");
 
+    // {dot_sizes}: each dot's last-image size is drawn at random, so size
+    // carries no identity; the question says so rather than let it mislead.
+    var JSONL_DOT_SIZES = " In the last image the dots are drawn at different sizes than before; a dot's size does not show which dot it is.";
+
     // Reverse-direction template: trajectories played folded → flat. Fired when
     // preset.direction === "reverse" (or config.direction). State 1 = folded
     // image with all letters; final state = flat paper with the unmarked dots.
     var JSONL_QUESTION_TEMPLATE_REVERSE = [
         "[Task]",
         "You are solving origami reverse point tracking.",
-        "In this task, you must identify which labeled points on a folded piece of paper will end up at the location of the unmarked dot(s) once the paper is unfolded back to flat. The first image shows the fully folded paper with every visible point labeled using the letters {all_labels}. The following images show the paper being reversed (unfolded) step by step. The final image shows the flat, unfolded paper with {num_initial} unmarked dot(s) printed on it. Paper is opaque: in the folded state, points on the back side may be hidden by overlying layers, and the same physical point may appear in different positions across steps as the paper unfolds. If there's rotating in the process, it's rotating slowly. You must track each labeled point back through the unfold sequence and report which letter(s) land on the unmarked dot(s) in the flat image.",
+        "In this task, you must identify which labeled points on a folded piece of paper will end up at the location of the unmarked dot(s) once the paper is unfolded back to flat. The first image shows the fully folded paper with every visible point labeled using the letters {all_labels}. The following images show the paper being reversed (unfolded) step by step. The final image shows the flat, unfolded paper with {num_initial} unmarked dot(s) printed on it. Paper is opaque: in the folded state, points on the back side may be hidden by overlying layers, and the same physical point may appear in different positions across steps as the paper unfolds. The camera stays fixed, but the paper may rotate between images, sometimes by a large angle.{dots_shown}{dot_sizes} You must track each labeled point back through the unfold sequence and report which letter(s) land on the unmarked dot(s) in the flat image.",
         "If this task depends on a specific visual definition, use this definition exactly: not applicable",
         "The visual evidence for this question is provided below.",
         "{images}",
@@ -1305,6 +1213,7 @@ function initBenchmark(globals) {
 
     function difficultyLabelForTier(d) {
         if (d <= 1) return "easy";
+        if (d >= 5) return "expert";
         if (d >= 4) return "hard";
         return "medium";
     }
@@ -1370,10 +1279,13 @@ function initBenchmark(globals) {
             ? JSONL_QUESTION_TEMPLATE_REVERSE
             : JSONL_QUESTION_TEMPLATE;
         var question = questionTemplate
+            .replace(/\{dots_shown\}/g, config && config.hidePointsDuringAnimation === false ? ""
+                : " Points are drawn only in the first and last images; the images in between show the paper without points.")
+            .replace(/\{dot_sizes\}/g, config && config.endDotSizes ? JSONL_DOT_SIZES : "")
             .replace(/\{num_initial\}/g, String(initialPoints.length))
             .replace(/\{all_labels\}/g, allLabels.join(", "));
 
-        return {
+        var entry = {
             id: id,
             category: ["Order", "origami_static", "point_tracking"],
             type: "perception",
@@ -1401,6 +1313,10 @@ function initBenchmark(globals) {
                 back_points: backPoints
             }
         };
+        // Sampled clustered presets record their alpha and drawn layout, so
+        // results can be sliced by them. Older presets have none.
+        if (config && config.clusterPlacement) entry.meta_info.placement = config.clusterPlacement;
+        return entry;
     }
 
     function postJsonlEntry(entry) {
@@ -1511,7 +1427,7 @@ function initBenchmark(globals) {
         var d = parseInt(difficulty, 10);
         if (isNaN(d)) return null;
         if (d < 1) return 1;
-        if (d > 4) return 4;
+        if (d > 5) return 5;
         return d;
     }
 
@@ -1522,6 +1438,7 @@ function initBenchmark(globals) {
         // and propagated via cfg.rotationYawMax/Pitch/Roll, not here.)
         if (tier === 1) return { yaw: 0, pitch: 0, roll: 0 };
         if (tier === 3) return { yaw: 0.5, pitch: 0.15, roll: 0.08 };
+        if (tier === 5) return { yaw: 1.8, pitch: 1.5, roll: 0.7 };
         if (tier === 4) return { yaw: 1.0, pitch: 1.0, roll: 0.25 };
         // Fallback for custom/manual scan configs without a difficulty.
         return { yaw: 1.0, pitch: 1.0, roll: 0.25 };
@@ -1529,6 +1446,7 @@ function initBenchmark(globals) {
 
     function getRotationMotionThresholdsForDifficulty(difficulty) {
         var tier = normalizeDifficultyTier(difficulty);
+        if (tier === 5) return { end: 1.3, total: 1.3 };
         if (tier === 4) return { end: 0.45, total: 0.95 };
         if (tier === 3) return { end: 0.20, total: 0.45 };
         // d1: static, no motion gate.
@@ -1759,31 +1677,31 @@ function initBenchmark(globals) {
         });
     }
 
-    // Bumped whenever Phase 2 evaluation semantics change. Acts as a
-    // manual code-hash gate for the per-trajectory eval cache below — when
-    // this constant changes, cached entries are treated as cold misses
-    // and re-evaluated. Bump if you change: gate logic in evaluateTrajectoriesLive,
-    // recordStepVisibility output shape, faceStats accumulation, or anything
-    // else that affects whether a (traj, profile) accepts/rejects.
-    // v4: cache key now includes minFaceQuality (and any other field
-    // that affects scan POV filtering) because traj_idx is positional
-    // within the scan's trajectory list — different scan filters →
-    // different traj at the same index → cache poisoning.
-    //
-    // Symptom: Pass 1 with minFaceQuality=0.6 cached traj_idx=0 as
-    // accepted with visibility_timeline T1 (for POV P1). Pass 2 with
-    // minFaceQuality=0.05 has a different scan (more lenient → more
-    // POVs) where traj_idx=0 is POV P2. Eval cache returns Pass 1's
-    // (accepted, T1) → preset built with P2's steps but P1's timeline
-    // → K-expansion picks faces visible at P1, but preset renders at
-    // P2 → 100% validation failure.
-    //
-    // v3 fixed grid-size collisions; v4 fixes scan-filter collisions.
-    var PHASE2_CACHE_VERSION = 4;
+    // v5 keys evaluations by actual trajectory/profile content and includes
+    // all acceptance settings. Older positional cache entries cannot be reused.
+    // 6: clustered tiers skip the placeholder-dot gates and probe the final
+    // frame first, so cached rejections from version 5 no longer apply.
+    var PHASE2_CACHE_VERSION = 6;
 
     // Load Phase 2 evaluation cache. Reuses the /api/scan-cache server
     // endpoint with key prefix "eval_" to avoid colliding with the existing
     // POV-scan cache. Returns {} on miss / version mismatch / network error.
+    function buildEvaluationCacheKey(cfg, targetFaces, minQuality, settleMs) {
+        var settings = Object.assign({}, cfg || {});
+        // Budgets only limit how many evaluations run. All acceptance inputs,
+        // including anchor placement, fold steps and settle time, belong here.
+        // Explicit rotation profiles are a budget too: each cached evaluation
+        // is keyed by its own steps and rotations.
+        ["rotationProfiles", "rotationProfileCount", "buildProgressions", "maxTrajectoryCandidates",
+            "maxScanCandidates", "phase2EarlyStopCount", "phase2MaxPerTrajectory", "phase2ShuffleSeed", "phase2LogEveryMs",
+            "phase2StallWarnMs", "phase2VerboseRejects"].forEach(function (key) { delete settings[key]; });
+        // Pinned (re-pointed) trajectories skip the final-frame probe
+        // (evaluateTrajectoriesLive), so they cannot reuse results that probed.
+        if (Array.isArray(settings.pinnedTrajectories) && settings.pinnedTrajectories.length) settings.finalProbe = false;
+        return "eval_" + hashString(stableStringify({ version: PHASE2_CACHE_VERSION,
+            settings: settings, targetFaces: targetFaces, minQuality: minQuality, settleMs: settleMs }));
+    }
+
     function loadEvalCache(cacheKey, callback) {
         var done = false;
         var timer = setTimeout(function () {
@@ -2317,6 +2235,60 @@ function initBenchmark(globals) {
         return sorted.slice(0, cap);
     }
 
+    // Disjoint (seed face, twin face) pairs under one rotation's face table,
+    // both faces in `readable`; with `anchors`, the seed face must be in it.
+    // Mirrors twinPairs in js/presetGenerator.js, which places the twins.
+    // With bothAnchors, the twin panel must meet the anchor rule too
+    // (symmetric twins: either panel could hold the tracked dot).
+    function twinPairs(table, readable, anchors, bothAnchors) {
+        var used = {}, pairs = [];
+        table.forEach(function (twin, face) {
+            if (twin < 0 || twin === face || used[face] || used[twin] || !readable[face] || !readable[twin]) return;
+            if (anchors && (!anchors[face] || (bothAnchors && !anchors[twin]))) return;
+            used[face] = used[twin] = true;
+            pairs.push([face, twin]);
+        });
+        return pairs;
+    }
+
+    function asSet(ids) {
+        var set = {};
+        ids.forEach(function (id) { set[id] = true; });
+        return set;
+    }
+
+    // Whether some rotation the folded model carries (required.twins) shows
+    // enough readable panel and twin-panel pairs in the final frame. A twin
+    // hidden behind the model gives frame matching nothing to confuse.
+    function hasTwinPairs(required, front, back, anchors) {
+        if (!required || !required.twins) return true;
+        var readableFront = asSet(front), readableBack = asSet(back), anchorSet = anchors ? asSet(anchors) : null;
+        return required.twins.some(function (rotation) {
+            return twinPairs(rotation.faces, readableFront).length >= (required.twinFrontPairs || 0)
+                && twinPairs(rotation.faces, readableBack).length >= (required.twinBackPairs || 0)
+                && (!anchorSet || twinPairs(rotation.faces, readableFront, anchorSet, required.symmetricTwins).length >= (required.twinAnchorPairs || 0));
+        });
+    }
+
+    function hasRequiredPointPools(timeline, required) {
+        if (!required) return true;
+        if (!timeline.length) return false;
+        var final = timeline[timeline.length - 1];
+        var front = final.visibleFaceIds.filter(function (face) {
+            return (final.qualities[face] || 0) >= required.minQuality;
+        });
+        var back = (final.backSideVisibleFaceIds || []).filter(function (face) {
+            return ((final.backQualities || {})[face] || 0) >= required.minQuality;
+        });
+        var anchors = front.filter(function (face) {
+            return timeline.every(function (step) {
+                return step.visibleFaceIds.indexOf(face) >= 0 && (step.qualities[face] || 0) >= required.minQuality;
+            });
+        });
+        return front.length >= required.finalFront && back.length >= required.finalBack && anchors.length >= required.visibleFront
+            && hasTwinPairs(required, front, back, anchors);
+    }
+
     function evaluateTrajectoriesLive(candidates, targetFaces, minQuality, maxCount, settleMs, cfg, callback) {
         var validProgressions = [];
         var targetPointIndices = getTargetPointIndicesForCfg(cfg || {});
@@ -2330,6 +2302,25 @@ function initBenchmark(globals) {
         // beginning.
         var enforceInitialTrackedVisible = !(cfg && cfg.enforceInitialTrackedVisible === false);
         var trackingEvalMode = normalizeTrackingEvalMode(cfg && cfg.trackingEvalMode);
+        // Clustered tiers (medium, expert) declare the panels they need via
+        // requiredPointPools. For them the placeholder anchor dot, which
+        // always sits on the first front-pool face, is not a real
+        // requirement: gating on it discarded most trajectories on models
+        // other than bird and made face 0 a tracked panel in 71% of presets.
+        // hasRequiredPointPools decides instead.
+        var requiredPools = cfg && cfg.requiredPointPools;
+        var placeholderGates = !requiredPools;
+        // Most (trajectory, profile) pairs fail at the final frame. For
+        // clustered tiers, settle the final pose first and replay the whole
+        // sequence only when its panels can pass the final-frame checks.
+        // Jumping straight to the final fold can settle differently from the
+        // step-by-step walk, so this probe can only reject; survivors are
+        // replayed in full. A pinned (re-pointed) trajectory already passed a
+        // full replay, so the probe could only discard it wrongly; skip it.
+        var pinned = !!(cfg && Array.isArray(cfg.pinnedTrajectories) && cfg.pinnedTrajectories.length);
+        var finalProbe = !!requiredPools && !pinned;
+        var finalProbeSettleMs = 800;
+        var probedPair = null;
         // d4 back-exposure gate: when set, Phase 2 rejects trajectories whose
         // final step does NOT expose at least N back-side faces. Combines with
         // the existing front-anchor visibility gate so accepted trajectories
@@ -2384,42 +2375,53 @@ function initBenchmark(globals) {
             ? (cfg.phase2EarlyStopCount | 0)
             : Math.min(Math.max(3, maxCount | 0), 5);
         var rotationProfiles = buildAutoRotationProfiles(candidates[0] || [], cfg || {});
+        // Candidate views come from a fixed grid in a fixed order, and the
+        // early-stop budget can fill from the first view alone: medium
+        // accepted 15 profiles of one view before trying another, in every
+        // job. phase2ShuffleSeed orders views and profiles per job, and
+        // phase2MaxPerTrajectory caps accepts per view. Cache entries are
+        // keyed by content, so neither changes a cached result.
+        if (cfg && cfg.phase2ShuffleSeed != null) {
+            var orderState = (parseInt(cfg.phase2ShuffleSeed, 10) | 0) ^ 0x5bd1e995;
+            var orderRand = function () {
+                orderState = (orderState + 0x6D2B79F5) | 0;
+                var t = Math.imul(orderState ^ (orderState >>> 15), 1 | orderState);
+                t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+                return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+            };
+            var shuffled = function (items) {
+                var out = items.slice();
+                for (var si = out.length - 1; si > 0; si--) {
+                    var sj = Math.floor(orderRand() * (si + 1));
+                    var tmp = out[si]; out[si] = out[sj]; out[sj] = tmp;
+                }
+                return out;
+            };
+            candidates = shuffled(candidates);
+            rotationProfiles = shuffled(rotationProfiles);
+        }
+        var maxPerTrajectory = (cfg && cfg.phase2MaxPerTrajectory) | 0;
+        var acceptedByTrajectory = {};
 
         // ── Phase 2 evaluation cache ───────────────────────────────────
-        // Per-(traj_idx, profile_idx) memo. On a continuation pass with a
-        // larger trajectory budget, cache hits replay accept/reject results
-        // without running the simulator. Cache key includes seed + difficulty
-        // + model so different seeds / tiers don't collide.
-        var evalCacheKey = (function () {
-            var modelId = (cfg && cfg.model)
-                ? String(cfg.model).replace(/^\/+/, "").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 60)
-                : "unknown";
-            var seedPart = (cfg && cfg.rngSeed != null) ? String(cfg.rngSeed | 0) : "0";
-            var diffPart = (cfg && cfg.difficulty != null) ? String(parseInt(cfg.difficulty, 10) | 0) : "x";
-            // (traj_idx, profile_idx) is positional within the scan's
-            // trajectory list. povGridSize and minFaceQuality both affect
-            // scan POV filtering → must be in key or cross-filter cache
-            // hits return wrong (POV-mismatched) timelines. profileCount
-            // is NOT in key (v3): profile templates are appended
-            // deterministically, so profile_idx replay is safe.
-            var gridPart = (cfg && cfg.povGridSize != null) ? String(cfg.povGridSize | 0) : "x";
-            // Encode minFaceQuality as a 3-digit fraction so it survives
-            // filename safety (no dots).
-            var mfqRaw = (cfg && cfg.minFaceQuality != null) ? cfg.minFaceQuality : 0.05;
-            var mfqPart = String(Math.round(mfqRaw * 1000) | 0);
-            return "eval_" + modelId + "_d" + diffPart + "_s" + seedPart
-                + "_g" + gridPart + "_q" + mfqPart;
-        })();
+        // Continuation passes replay cached results for unchanged inputs.
+        var evalCacheKey = buildEvaluationCacheKey(cfg, targetFaces, minQuality, settleMs);
+        // Content keys remain correct if endpoint order or profile budgets change.
+        var evaluationKeys = candidates.map(function (steps) {
+            return rotationProfiles.map(function (profile) {
+                return hashString(stableStringify({ steps: steps, rotations: profile.rotations }));
+            });
+        });
         var evalCache = {};                     // populated post-load
         var evalCacheReady = false;             // gate: evaluateNext waits for load
         var evalCacheDirty = {};                // accumulated this run; flushed at end
         function cacheLookup(trajIdx, profileIdx) {
             if (!evalCacheReady) return null;
-            var k = trajIdx + "_" + profileIdx;
+            var k = evaluationKeys[trajIdx][profileIdx];
             return evalCache[k] || null;
         }
         function cacheStore(trajIdx, profileIdx, entry) {
-            var k = trajIdx + "_" + profileIdx;
+            var k = evaluationKeys[trajIdx][profileIdx];
             evalCache[k] = entry;
             evalCacheDirty[k] = entry;
         }
@@ -2705,6 +2707,57 @@ function initBenchmark(globals) {
             return (0.35 * meanScore) + (0.45 * sideGeom) + (0.20 * balanceRatio);
         }
 
+        // Settle the pair's final pose and apply the final-frame parts of
+        // the back-exposure and point-pool gates. Rejects the pair, or
+        // resumes the normal step-by-step replay from step 0.
+        function probeFinalFrame() {
+            var steps = candidates[currentTraj];
+            var last = steps[steps.length - 1];
+            var profile = rotationProfiles[Math.min(currentProfile, rotationProfiles.length - 1)] || { rotations: [] };
+            var rot = profile.rotations && profile.rotations[steps.length - 1];
+            globals.setCreasePercent(last.fold / 100);
+            globals.shouldChangeCreasePercent = true;
+            setPOV(last.pov);
+            if (rot) globals.threeView.setModelRotation(rot.x, rot.y, rot.z);
+            else globals.threeView.resetModel();
+            globals.model.step();
+            setTimeout(function () {
+                try {
+                    var fp = globals.facePoints;
+                    var frontIds = fp && fp.getVisibleFaceIds ? fp.getVisibleFaceIds() : [];
+                    var frontQ = fp && fp.getFaceViewQualities ? fp.getFaceViewQualities(frontIds) : {};
+                    var backIds = fp && fp.getBackSideVisibleFaceIds ? fp.getBackSideVisibleFaceIds() : [];
+                    var backQ = fp && fp.getFaceBackQualities ? fp.getFaceBackQualities(backIds) : null;
+                    var minQ = requiredPools.minQuality || 0;
+                    var readableFront = frontIds.filter(function (f) { return (frontQ[f] || 0) >= minQ; }).length;
+                    var readableBack = backQ
+                        ? backIds.filter(function (f) { return (backQ[f] || 0) >= minQ; }).length
+                        : backIds.length;
+                    var frontOk = readableFront >= Math.max(requiredPools.finalFront || 0, requiredPools.visibleFront || 0);
+                    var backOk = readableBack >= (requiredPools.finalBack || 0) && backIds.length >= requireFinalBackExposure;
+                    var twinsOk = hasTwinPairs(requiredPools,
+                        frontIds.filter(function (f) { return (frontQ[f] || 0) >= minQ; }),
+                        backQ ? backIds.filter(function (f) { return (backQ[f] || 0) >= minQ; }) : backIds);
+                    var ok = frontOk && backOk && twinsOk;
+                    if (!ok) {
+                        evaluationStats.rejectedByFinalProbe = (evaluationStats.rejectedByFinalProbe || 0) + 1;
+                        // Which final-frame requirement failed, by readable back panels:
+                        // shows whether a model's poses can show back panels and
+                        // twin pairs together.
+                        var probeKey = (frontOk ? "front" : "noFront") + "/back" + Math.min(readableBack, 3) + "/" + (twinsOk ? "twins" : "noTwins");
+                        evaluationStats.finalProbeFailures = evaluationStats.finalProbeFailures || {};
+                        evaluationStats.finalProbeFailures[probeKey] = (evaluationStats.finalProbeFailures[probeKey] || 0) + 1;
+                        currentStep = steps.length - 1;  // recorded as a final-step reject
+                        skipCurrentTrajectoryProfile("finalProbe");
+                    }
+                } catch (err) {
+                    // A probe failure must not reject the pair; replay it.
+                    console.warn("benchmark: final-frame probe error; replaying pair", err);
+                }
+                evaluateNext();
+            }, finalProbeSettleMs);
+        }
+
         function evaluateNext() {
             // CACHE: replay back-to-back cached (traj, profile) results
             // until we hit one that needs live evaluation. Without this
@@ -2736,7 +2789,13 @@ function initBenchmark(globals) {
             }
             // Skip to next trajectory if current one has been fully evaluated or invalidated
             while (currentTraj < candidates.length && currentStep >= candidates[currentTraj].length) {
-                // Trajectory fully evaluated — compute consistentFaces and accept
+                // Count only trajectories that can support the requested
+                // point layout toward the early-stop budget.
+                if (!hasRequiredPointPools(currentVisibilityTimeline, cfg && cfg.requiredPointPools)) {
+                    skipCurrentTrajectoryProfile("pointPools");
+                    evaluateNext();
+                    return;
+                }
                 var traj = candidates[currentTraj];
                 var consistentFaces = {};
                 var totalSteps = traj.length;
@@ -2811,7 +2870,18 @@ function initBenchmark(globals) {
                     });
                 }
 
+                var acceptedTraj = currentTraj;
+                if (meetsPovMotion && meetsRotationMotion) {
+                    acceptedByTrajectory[acceptedTraj] = (acceptedByTrajectory[acceptedTraj] || 0) + 1;
+                }
                 skipCurrentTrajectoryProfile();
+                if (maxPerTrajectory > 0 && currentTraj === acceptedTraj
+                    && acceptedByTrajectory[acceptedTraj] >= maxPerTrajectory) {
+                    console.log("benchmark: phase2 view cap — " + maxPerTrajectory + " accepted from trajectory " +
+                        (acceptedTraj + 1) + ", moving to the next view");
+                    currentProfile = 0;
+                    currentTraj++;
+                }
 
                 // Early-stop: if we have enough valid progressions from
                 // this face-pair, skip remaining trajectories. Jump
@@ -2842,10 +2912,18 @@ function initBenchmark(globals) {
                 evaluationStats.validBeforeDiversity = validProgressions.length;
                 evaluationStats.selectedAfterDiversity = selected.length;
                 emitPhase2Heartbeat();
-                console.log("evaluateTrajectoriesLive: " + validProgressions.length + " valid candidates out of " + candidates.length + ", selected " + selected.length);
+                console.log("benchmark: evaluateTrajectoriesLive: " + validProgressions.length + " valid candidates out of " + candidates.length + ", selected " + selected.length
+                    + (evaluationStats.finalProbeFailures ? "; final-frame failures " + JSON.stringify(evaluationStats.finalProbeFailures) : ""));
                 // CACHE: flush dirty entries to disk (single batched POST).
                 flushEvalCache();
                 callback(selected, evaluationStats);
+                return;
+            }
+
+            var pairKey = currentTraj + "_" + currentProfile;
+            if (finalProbe && currentStep === 0 && probedPair !== pairKey) {
+                probedPair = pairKey;
+                probeFinalFrame();
                 return;
             }
 
@@ -2915,18 +2993,18 @@ function initBenchmark(globals) {
                             }
                             faceQualities = reFaceQualities;
                             var recheckTracked = evaluateTrackedPoints(targetPointIndices, currentStep, candidates[currentTraj].length, minPointSeparation, trackingEvalMode, enforceSeparationAllSteps);
-                            if (!recheckTracked.ok) {
+                            if (placeholderGates && !recheckTracked.ok) {
                                 skipCurrentTrajectoryProfile("tracked");
                                 evaluateNext();
                                 return;
                             }
                             var recheckPrimary = evaluateTrackedPoints(primaryTargetPointIndices, currentStep, candidates[currentTraj].length, minPointSeparation, trackingEvalMode, enforceSeparationAllSteps);
-                            if (!recheckPrimary.ok) {
+                            if (placeholderGates && !recheckPrimary.ok) {
                                 skipCurrentTrajectoryProfile("primaryTracked");
                                 evaluateNext();
                                 return;
                             }
-                            if (enforceInitialTrackedVisible && currentStep === 0) {
+                            if (placeholderGates && enforceInitialTrackedVisible && currentStep === 0) {
                                 var recheckInitialTracked = evaluateTrackedPoints(initialTargetPointIndices, currentStep, candidates[currentTraj].length, minPointSeparation, "strictAllSteps", enforceSeparationAllSteps);
                                 if (!recheckInitialTracked.ok) {
                                     skipCurrentTrajectoryProfile("initialTracked");
@@ -2984,20 +3062,20 @@ function initBenchmark(globals) {
                 }
 
                 var trackedEval = evaluateTrackedPoints(targetPointIndices, currentStep, candidates[currentTraj].length, minPointSeparation, trackingEvalMode, enforceSeparationAllSteps);
-                if (!trackedEval.ok) {
+                if (placeholderGates && !trackedEval.ok) {
                     skipCurrentTrajectoryProfile("tracked");
                     evaluateNext();
                     return;
                 }
 
                 var primaryTrackedEval = evaluateTrackedPoints(primaryTargetPointIndices, currentStep, candidates[currentTraj].length, minPointSeparation, trackingEvalMode, enforceSeparationAllSteps);
-                if (!primaryTrackedEval.ok) {
+                if (placeholderGates && !primaryTrackedEval.ok) {
                     skipCurrentTrajectoryProfile("primaryTracked");
                     evaluateNext();
                     return;
                 }
 
-                if (enforceInitialTrackedVisible && currentStep === 0) {
+                if (placeholderGates && enforceInitialTrackedVisible && currentStep === 0) {
                     var initialTrackedEval = evaluateTrackedPoints(initialTargetPointIndices, currentStep, candidates[currentTraj].length, minPointSeparation, "strictAllSteps", enforceSeparationAllSteps);
                     if (!initialTrackedEval.ok) {
                         skipCurrentTrajectoryProfile("initialTracked");
@@ -3294,9 +3372,15 @@ function initBenchmark(globals) {
                         console.log("benchmark: Phase 2: capped targetFaces from [" + beforeCap.join(",") + "] to [" + targetFaces.join(",") + "] (phase2MaxTargetFaces=" + maxTargetFaces + ")");
                     }
                     var progCount = typeof cfg.buildProgressions === "number" ? cfg.buildProgressions : 20;
-                    var candidates = generateCandidateTrajectories(scanStates, foldSteps, progCount, {
-                        staticPov: true
-                    });
+                    // pinnedTrajectories replaces the generated candidate set with
+                    // caller-supplied trajectories (the re-point pass hands back a
+                    // single already-validated one). Pairs with cfg.rotationProfiles
+                    // so exactly one (trajectory, profile) combination is evaluated.
+                    var candidates = (Array.isArray(cfg.pinnedTrajectories) && cfg.pinnedTrajectories.length > 0)
+                        ? cfg.pinnedTrajectories
+                        : generateCandidateTrajectories(scanStates, foldSteps, progCount, {
+                            staticPov: true
+                        });
                     if (!isNaN(maxTrajectoryCandidates) && maxTrajectoryCandidates > 0 && candidates.length > maxTrajectoryCandidates) {
                         console.log("benchmark: capping phase 2 trajectories from " + candidates.length + " to " + maxTrajectoryCandidates);
                         candidates = candidates.slice(0, maxTrajectoryCandidates);
@@ -3471,6 +3555,12 @@ function initBenchmark(globals) {
             runScan(cfg, onComplete);
             return;
         }
+        // Match generation and validation: every replay starts from flat
+        // solver textures, including when the previous model is reused.
+        globals.setCreasePercent(0);
+        globals.shouldChangeCreasePercent = true;
+        globals.model.reset();
+        globals.threeView.resetModel();
         stateAccumulator = [];
         capturedFiles = [];
         jsonlStepIndex = 0;
@@ -3655,11 +3745,11 @@ function initBenchmark(globals) {
     // Model cache: if the requested model is already loaded (same path AND
     // mesh faces present), skip importDemoFile and just apply settings.
     // Saves ~1-2s per preset on shards that share a model, which is the
-    // common case in dataset rendering (e.g. a 50-preset birdBase shard
-    // re-parses the SVG 50 times today). run() resets fold + rotation on
-    // its first call, so simulation state from the previous preset doesn't
-    // leak through.
+    // common case in dataset rendering. run() resets solver textures,
+    // fold, and rotation before each replay so model reuse cannot carry
+    // the previous preset's deformed geometry into the next sequence.
     function selectPresetFromConfig(name, cfg, callback) {
+        sourcePresetConfig = JSON.parse(JSON.stringify(cfg));
         currentBenchmarkName = name;
         config = cfg;
         // Compute a question id for this preset so captureScreenshot writes
@@ -3835,6 +3925,7 @@ function initBenchmark(globals) {
         run: run,
         runAll: runAll,
         runScan: runScan,
+        buildAutoRotationProfiles: buildAutoRotationProfiles,
         loadJson: loadJson,
         startWatching: startWatching,
         selectPreset: selectPreset,

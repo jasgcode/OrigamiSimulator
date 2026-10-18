@@ -114,7 +114,9 @@ function initGlobals(){
         showFaceIds: false,
         hideFacePointsDuringAnimation: false,
         revealHiddenPoints: false,
-        labelStyle: "circle"
+        labelStyle: "circle",
+        // Face-point dot radius in model units. Expert presets use smaller dots.
+        facePointRadius: 0.025
     };
 
     function setCreasePercent(percent){

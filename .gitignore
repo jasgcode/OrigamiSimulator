@@ -9,11 +9,17 @@ todo.rtf
 
 # Dependencies and caches
 node_modules
+.venv/
 __pycache__/
+*.pyc
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
 /wandb/
 test_suite/wandb/
+# Per-model face pools and trajectory caches; rebuilt on the first run
+assets/facepools/
+.scan-cache/
 
 # Generated data. The released dataset is hosted separately; its exact
 # presets are tracked in release/.

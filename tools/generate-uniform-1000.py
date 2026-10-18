@@ -1,30 +1,16 @@
 #!/usr/bin/env python3
 """
-One-command orchestrator for the uniform-1000 (1008-preset) dataset.
+Generate a uniform bank of 1008 presets across 24 model/difficulty cells.
+Mapfold cells at the clustered tiers (3 and 5) are skipped, so a run with
+the current code fills 23 cells (see docs/uniform-1000.md).
 
-24 cells (8 models × 3 difficulty tiers) × 42 presets each = 1008.
+Existing shards resume automatically. Use --fresh to clear generated
+outputs while preserving the trajectory scan cache. Continuation passes
+fill short cells, assembly removes duplicate examples, and rendering
+skips only complete outputs matching the current preset configuration.
 
-Pipeline:
-  1. Wipe `new_dataset/uniform-1000{,-logs,-render}/`. Preserves
-     `new_dataset/uniform-1000-render/.scan-cache/` (Phase 2 cache) so
-     re-runs are cache-warm.
-  2. Pass 1: full matrix via `generate-matrix.js` with the tier-default
-     rotation profile counts (d1=20, d3=6, d4=30). Handles prewarm +
-     parallelism + per-shard seed derivation. Targets 42 per cell.
-  3. Pass 2+ (continuation): for cells short of 42, re-run those cells
-     with progressively higher `--rotation-profile-count`. The (traj,
-     profile) pair count is the binding knob on Phase 2 acceptance for
-     low-yield cells (opensink, pinwheel-d4) — bumping it gives Phase 2
-     more chances to fill the earlyStop cap. Per-shard seed identical to
-     Pass 1, so files are SUPERSETS (cache hits replay; new accepts only
-     come from the additional profiles). Same filename = atomic rewrite
-     with strictly more presets.
-  4. Final assemble (`assemble-uniform-1000.py`) and parallel render to
-     `new_dataset/uniform-1000-render/`.
-
-Usage:
-  DATASET_DIR=new_dataset/uniform-1000-render bun run dev   # in another terminal
-  python3 tools/generate-uniform-1000.py
+Start the server with DATASET_DIR=new_dataset/uniform-1000-render bun run dev,
+then run python3 tools/generate-uniform-1000.py. See tools/README.md.
 """
 import argparse
 import json
@@ -48,6 +34,7 @@ CANONICAL_SEED = 12345  # the canonical first-pass seed (do not change)
 # overwriting it). See README "Second-seed top-up".
 BASE_SEED = 12345
 DEV_SERVER = "http://localhost:3000"
+MIN_POINT_VIEW_QUALITY = 0.3
 # Render output + scan-cache home. The dev server's DATASET_DIR env must
 # match this path or its /api/jsonl-append, /api/metadata-merge, and
 # /api/scan-cache endpoints will write to the wrong filesystem location.
@@ -98,6 +85,12 @@ CELLS = [
     ("opensink-d4",     "/Bases/openSinkBase.svg",       4, True,  15),
     ("square-d4",       "/Bases/squareBase.svg",         4, True,  15),
 ]
+EXPERT_CELLS = [(name.replace("-d4", "-d5"), model, 5, sharded, count)
+                for name, model, difficulty, sharded, count in CELLS if difficulty == 4]
+# Folded mapfold carries no rotation, so the clustered tiers, whose decoys are
+# rotation twins, refuse it. generate-matrix.js skips the same slots.
+CLUSTERED_TIERS = {3, 5}
+UNTWINNABLE_MODELS = {"mapfold"}
 SHARDS_PER_SLOT = 4
 PER_CELL_TOTAL = 60  # oversample target (assembler caps at TARGET=42)
 BUILD = 300
@@ -111,8 +104,8 @@ MAX_TRAJ = 1200
 MAX_SCAN = 60
 
 # Pass 1 is `generate-matrix.js` with these baseline profile counts.
-PROFILE_INITIAL = {"d1": 20, "d3": 6, "d4": 30}
-PROFILE_CEILING = {"d1": 200, "d3": 6, "d4": 200}
+PROFILE_INITIAL = {"d1": 20, "d3": 6, "d4": 30, "d5": 30}
+PROFILE_CEILING = {"d1": 200, "d3": 6, "d4": 200, "d5": 200}
 
 # Multi-stage adaptive continuation. Each stage targets a DIFFERENT
 # failure mode and increases knob aggressiveness based on remaining
@@ -180,6 +173,7 @@ def stage_profiles(stage_idx, max_deficit):
         "d1": min(PROFILE_INITIAL["d1"] * mult, PROFILE_CEILING["d1"]),
         "d3": PROFILE_INITIAL["d3"],  # never bumped
         "d4": min(PROFILE_INITIAL["d4"] * mult, PROFILE_CEILING["d4"]),
+        "d5": min(PROFILE_INITIAL["d5"] * mult, PROFILE_CEILING["d5"]),
     }
 
 
@@ -272,8 +266,12 @@ def run_matrix_pass1():
     cmd = [
         "bun", "tools/generate-matrix.js",
         "--count", str(PER_CELL_TOTAL),
+        "--difficulties", ",".join(str(d) for d in sorted({c[2] for c in CELLS})),
         "--shards-per-slot", str(SHARDS_PER_SLOT),
         "--seed", str(BASE_SEED),
+        "--server-url", DEV_SERVER,
+        "--min-point-view-quality", str(MIN_POINT_VIEW_QUALITY),
+        "--concurrency", str(WORKERS),
         "--build-progressions", str(BUILD),
         "--max-trajectory-candidates", str(MAX_TRAJ),
         "--max-scan-candidates", str(MAX_SCAN),
@@ -281,7 +279,7 @@ def run_matrix_pass1():
         "--log-dir", "new_dataset/uniform-1000-logs",
     ]
     print(f"[pass 1] {' '.join(cmd)}", flush=True)
-    # Tolerate partial failures: a model that returns no presets (e.g. mapfold-d3/d4
+    # Tolerate partial failures: a model that returns no presets (e.g. mapfold-d4
     # under known anchor-dropout pathology) makes generate-matrix.js exit non-zero,
     # but the continuation passes are designed to backfill those exact deficits.
     # Crashing here would abandon the 100+ minutes of Phase 2 work already on disk.
@@ -342,6 +340,8 @@ def run_one_shard(cell, shard, profile_count, min_sep_px, min_face_q, pass_idx):
     args = [
         "bun", "tools/generate-presets.js",
         "--model", model_path,
+        "--server-url", DEV_SERVER,
+        "--min-point-view-quality", str(MIN_POINT_VIEW_QUALITY),
         "--difficulty", str(difficulty),
         "--count", str(count),
         "--base-name", cell_name,
@@ -393,19 +393,27 @@ def run_continuation(deficit_cells, stage, stage_idx, max_deficit, pass_idx):
 
 def assemble_and_count():
     res = subprocess.run(
-        ["python3", "tools/assemble-uniform-1000.py"],
+        ["python3", "tools/assemble-uniform-1000.py"] + (["--include-expert"] if any(c[2] == 5 for c in CELLS) else []),
         cwd=ROOT, check=True, capture_output=True, text=True,
     )
     counts = {}
     cell_names = {c[0] for c in CELLS}
     for line in res.stdout.splitlines():
         parts = line.split()
-        if len(parts) >= 2 and parts[0] in cell_names:
+        if len(parts) >= 3 and parts[0] in cell_names:
             try:
-                counts[parts[0]] = int(parts[1])
+                counts[parts[0]] = int(parts[2])
             except ValueError:
                 continue
     return counts
+
+
+def drop_untwinnable_cells(cells):
+    skipped = [c[0] for c in cells if c[2] in CLUSTERED_TIERS and c[0].split("-")[0] in UNTWINNABLE_MODELS]
+    if skipped:
+        print(f"[cells] skipping {', '.join(skipped)}: mapfold carries no rotation symmetry, "
+              "so the clustered tiers cannot twin it", flush=True)
+    return [c for c in cells if c[0] not in skipped]
 
 
 def deficit_cells_from(counts):
@@ -413,8 +421,10 @@ def deficit_cells_from(counts):
 
 
 def main():
+    global BASE_SEED, WORKERS, DEV_SERVER, MIN_POINT_VIEW_QUALITY, CELLS
     parser = argparse.ArgumentParser(description="Uniform-1000 dataset orchestrator.")
-    parser.add_argument(
+    run_mode = parser.add_mutually_exclusive_group()
+    run_mode.add_argument(
         "--resume", action="store_true",
         help="Skip wipe_outputs() and run_matrix_pass1(); start from the "
              "current contents of new_dataset/uniform-1000/ and go straight "
@@ -432,9 +442,26 @@ def main():
              "+1000 so the new presets MERGE with — never overwrite — the "
              "canonical-seed batch. Repeatable with further distinct seeds.",
     )
+    run_mode.add_argument("--fresh", action="store_true",
+                         help="Delete preset and render outputs before generating; preserve the scan cache.")
+    parser.add_argument("--skip-render", action="store_true", help="Generate and assemble without rendering PNGs.")
+    parser.add_argument("--workers", type=int, default=WORKERS, help="Generation worker limit.")
+    parser.add_argument("--render-workers", type=int, default=12, help="Render worker limit.")
+    parser.add_argument("--server-url", default=DEV_SERVER)
+    parser.add_argument("--min-point-view-quality", type=float, default=0.3,
+                        help="Minimum projected marker viewing ratio for new presets, between 0 and 1.")
+    parser.add_argument("--include-expert", action="store_true",
+                        help="Include tier 5: 30 cells and 1260 examples at 42 per cell (mapfold is skipped at tiers 3 and 5).")
     args = parser.parse_args()
+    CELLS = drop_untwinnable_cells([cell for cell in CELLS if cell[2] != 5] + (EXPERT_CELLS if args.include_expert else []))
+    if args.workers < 1 or args.render_workers < 1:
+        parser.error("worker counts must be positive")
+    if not 0 <= args.min_point_view_quality <= 1:
+        parser.error("--min-point-view-quality must be between 0 and 1")
+    MIN_POINT_VIEW_QUALITY = args.min_point_view_quality
+    WORKERS = args.workers
+    DEV_SERVER = args.server_url.rstrip("/")
 
-    global BASE_SEED
     BASE_SEED = args.base_seed
     if BASE_SEED != CANONICAL_SEED:
         print(f"[seed] second-seed top-up: BASE_SEED={BASE_SEED} "
@@ -445,13 +472,18 @@ def main():
 
     started = time.time()
 
+    bank_dir = ROOT / "new_dataset/uniform-1000"
+    existing_shards = [p for p in bank_dir.glob("*.json") if p.name != "assembled.json"]
+    args.resume = args.resume or (bool(existing_shards) and not args.fresh)
+    for folder in (bank_dir, ROOT / "new_dataset/uniform-1000-logs"):
+        folder.mkdir(parents=True, exist_ok=True)
+    if args.fresh:
+        wipe_outputs()
     if args.resume:
         existing = sorted((ROOT / "new_dataset/uniform-1000").glob("*.json"))
         print(f"[resume] skipping wipe + Pass 1; found {len(existing)} existing "
               f"shard JSONs in new_dataset/uniform-1000/", flush=True)
     else:
-        wipe_outputs()
-
         # Pass 1: full matrix run with tier-default rotationProfileCount.
         print("\n[pass 1] full matrix run with defaults", flush=True)
         pass_started = time.time()
@@ -469,14 +501,14 @@ def main():
     no_progress_streak = 0
     NO_PROGRESS_LIMIT = 2  # bail after 2 consecutive zero-progress stages
     for stage_idx, stage in enumerate(STAGES):
-        deficits = {c: TARGET - n for c, n in final_counts.items() if n < TARGET}
+        deficits = {c[0]: TARGET - final_counts.get(c[0], 0)
+                    for c in deficit_cells_from(final_counts)}
         if not deficits:
             print(f"[ok] hit target after {pass_idx} pass(es) — total {time.time() - started:.0f}s", flush=True)
             break
 
         prior_total = sum(final_counts.values())
         max_deficit = max(deficits.values())
-        last_yields = dict(final_counts)
         pass_idx += 1
         cells_to_run = deficit_cells_from(final_counts)
         print(f"\n[pass {pass_idx}/{len(STAGES) + 1}] stage={stage['name']} on {len(cells_to_run)} deficit cell(s)", flush=True)
@@ -499,32 +531,37 @@ def main():
             no_progress_streak = 0
     else:
         # for/else: ran every stage without break.
-        deficits = {c: TARGET - n for c, n in final_counts.items() if n < TARGET}
+        deficits = {c[0]: TARGET - final_counts.get(c[0], 0)
+                    for c in deficit_cells_from(final_counts)}
         if deficits:
             print(f"[warn] all {len(STAGES) + 1} passes exhausted; final deficits: {deficits}", flush=True)
 
     # Final assemble (idempotent) and render.
     print("\n[final] re-assemble", flush=True)
     subprocess.run(
-        ["python3", "tools/assemble-uniform-1000.py"],
+        ["python3", "tools/assemble-uniform-1000.py"] + (["--include-expert"] if any(c[2] == 5 for c in CELLS) else []),
         cwd=ROOT, check=True,
     )
-    print(f"\n[render] launching parallel render of assembled.json into {RENDER_DIR}/", flush=True)
-    render_env = dict(os.environ)
-    render_env["DATASET_DIR"] = RENDER_DIR
-    subprocess.run([
-        "python3", "tools/render_dataset_parallel.py",
-        "--dataset", "new_dataset/uniform-1000/assembled.json",
-        "--workers", "12",
-        "--server-url", DEV_SERVER,
-        "--skip-existing",
-    ], cwd=ROOT, env=render_env, check=True)
+    if not args.skip_render:
+        print(f"\n[render] launching parallel render of assembled.json into {RENDER_DIR}/", flush=True)
+        render_env = dict(os.environ)
+        render_env["DATASET_DIR"] = RENDER_DIR
+        subprocess.run([
+            "python3", "tools/render_dataset_parallel.py",
+            "--dataset", "new_dataset/uniform-1000/assembled.json",
+            "--workers", str(args.render_workers),
+            "--server-url", DEV_SERVER,
+            "--skip-existing",
+        ], cwd=ROOT, env=render_env, check=True)
 
     total = time.time() - started
     print(f"\n[done] total wall time: {total:.0f}s ({total/60:.1f} min)", flush=True)
     print("Final per-cell counts:", flush=True)
     for cell in CELLS:
         print(f"  {cell[0]:<16} {final_counts.get(cell[0], 0)}", flush=True)
+    if deficit_cells_from(final_counts):
+        print("[incomplete] Some cells remain below target. Outputs are preserved; resume with a new --base-seed.", file=sys.stderr)
+        return 1
     return 0
 
 

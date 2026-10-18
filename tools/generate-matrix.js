@@ -2,13 +2,15 @@
 /**
  * Run tools/generate-presets.js for each (model, difficulty) slot.
  *
- * Default: 3 models × difficulties 1–5 × --count presets per slot.
+ * Default: 8 models × difficulties 1, 3, 4 × --count presets per slot.
  * Requires: bun run dev (localhost:3000)
  *
  *   bun tools/generate-matrix.js --out-dir new_dataset/matrix-gen-0423
  *   bun tools/generate-matrix.js --out-dir new_dataset/matrix-gen-0423 --concurrency 12
  *
- * Tiers: d1-d4 (d5 dropped per user spec).
+ * Use --difficulties 5 for expert, or --difficulties 1,3,4,5 for all tiers.
+ * Mapfold slots at the clustered tiers (3 and 5) are skipped: mapfold
+ * carries no rotation symmetry, so those tiers cannot twin its dots.
  *
  * Parallelism model:
  *   Phase 1 (pre-warm): for each model, run d=1 in parallel. Each model
@@ -36,6 +38,7 @@ const { values: args } = parseArgs({
         count: { type: "string", default: "2" },
         seed: { type: "string", default: "12345" },
         "server-url": { type: "string", default: "http://localhost:3000" },
+        "min-point-view-quality": { type: "string", default: "0.3" },
         "build-progressions": { type: "string", default: "24" },
         "max-trajectory-candidates": { type: "string", default: "40" },
         "pov-grid-size": { type: "string", default: "" },
@@ -43,6 +46,7 @@ const { values: args } = parseArgs({
         concurrency: { type: "string", default: "" },
         "shards-per-slot": { type: "string", default: "1" },
         "models": { type: "string", default: "" },
+        "difficulties": { type: "string", default: "1,3,4" },
         "log-dir": { type: "string", default: "" },
         "no-prewarm": { type: "boolean", default: false },
     },
@@ -60,6 +64,10 @@ const OUT_DIR = String(args["out-dir"] || "new_dataset/matrix-gen");
 const COUNT = parseInt(String(args.count || "2"), 10) || 2;
 const SEED = parseInt(String(args.seed || "42"), 10) || 42;
 const SERVER_URL = String(args["server-url"] || "http://localhost:3000");
+const MIN_POINT_VIEW_QUALITY = Number(args["min-point-view-quality"]);
+if (!Number.isFinite(MIN_POINT_VIEW_QUALITY) || MIN_POINT_VIEW_QUALITY < 0 || MIN_POINT_VIEW_QUALITY > 1) {
+    throw new Error("--min-point-view-quality must be between 0 and 1");
+}
 // Brute-force defaults: bumped for the eval-cache-driven continuation
 // orchestrator. Bigger trajectory pool → more chances of accepting back-
 // exposing trajectories for hard d4 cells. Phase 2 evaluation cache makes
@@ -85,6 +93,10 @@ const SHARDS_PER_SLOT = Math.max(1, parseInt(String(args["shards-per-slot"] || "
 const MODELS_FILTER = String(args["models"] || "").trim();
 const LOG_DIR = String(args["log-dir"] || "");
 const PREWARM = !args["no-prewarm"];
+const DIFFICULTIES = [...new Set(String(args.difficulties).split(",").map(value => Number(value.trim())))].sort((a,b) => a-b);
+if (!DIFFICULTIES.length || DIFFICULTIES.some(d => ![1,3,4,5].includes(d))) {
+    throw new Error("--difficulties must be a comma-separated list of 1, 3, 4, or 5");
+}
 
 const ALL_MODELS = [
     // 8-model matrix. The four previously-dropped models (boat, square,
@@ -120,6 +132,20 @@ const MODELS = MODELS_FILTER
         return filtered;
     })()
     : ALL_MODELS;
+
+// Folded mapfold carries no rotation, so the clustered tiers, whose decoys
+// are rotation twins, refuse it (docs/design.md, Twin decoys).
+const CLUSTERED_TIERS = new Set([3, 5]);
+const UNTWINNABLE_MODELS = new Set(["mapfold"]);
+const tiersFor = (model) => DIFFICULTIES.filter((d) => !(CLUSTERED_TIERS.has(d) && UNTWINNABLE_MODELS.has(model.key)));
+const skippedSlots = MODELS.flatMap((m) => DIFFICULTIES.filter((d) => !tiersFor(m).includes(d)).map((d) => `${m.key}-d${d}`));
+if (skippedSlots.length) {
+    console.log(`[matrix] skipping ${skippedSlots.join(", ")}: mapfold carries no rotation symmetry, so the clustered tiers cannot twin it`);
+}
+if (MODELS.every((m) => tiersFor(m).length === 0)) {
+    console.error("[matrix] no runnable (model, difficulty) slots");
+    process.exit(1);
+}
 
 await mkdir(join(ROOT, OUT_DIR), { recursive: true });
 if (LOG_DIR) await mkdir(join(ROOT, LOG_DIR), { recursive: true });
@@ -208,6 +234,7 @@ async function runSlot(model, difficulty, shard = 0, totalShards = 1) {
         "--max-trajectory-candidates", MAX_TRAJ,
         "--max-scan-candidates", MAX_SCAN,
         "--server-url", SERVER_URL,
+        "--min-point-view-quality", String(MIN_POINT_VIEW_QUALITY),
     ];
     if (POV_GRID_SIZE) {
         procArgs.push("--pov-grid-size", POV_GRID_SIZE);
@@ -272,25 +299,21 @@ async function runQueue(queue, limit, label) {
 console.log(`[matrix] cpus=${CPU_COUNT}, concurrency=${CONCURRENCY}, prewarm=${PREWARM}, models=${MODELS.length}, shards=${SHARDS_PER_SLOT}, count=${COUNT} (per-shard ${Math.ceil(COUNT/SHARDS_PER_SLOT)}), build-floor=${BUILD_RAW}, out=${OUT_DIR}`);
 
 if (PREWARM) {
-    // Phase 1: one slot per model in parallel. Each model writes its own
-    // assets/facepools/<key>.json so there's no cache contention. Use d=1
-    // because it's the cheapest tier and is sufficient to populate the
-    // facepool for that model. d=1 is never sharded — it's fast and the
-    // facepool write must happen exactly once per model.
-    const phase1 = MODELS.map((m) => ({ model: m, d: 1 }));
-    await runQueue(phase1, Math.min(CONCURRENCY, MODELS.length), "phase 1 (prewarm d=1)");
+    // Each model's first requested tier warms its facepool before fan-out.
+    // An expert-only run generates only expert presets.
+    const warmModels = MODELS.filter((m) => tiersFor(m).length > 0);
+    const phase1 = warmModels.map((m) => ({ model: m, d: tiersFor(m)[0] }));
+    await runQueue(phase1, Math.min(CONCURRENCY, phase1.length), "phase 1 (first tier)");
 
-    // Phase 2: run d3 and d4 slots in parallel, optionally split into
-    // SHARDS_PER_SLOT sub-shards each.
     const phase2 = [];
-    for (const m of MODELS) {
-        for (const d of [3, 4]) {
+    for (const m of warmModels) {
+        for (const d of tiersFor(m).slice(1)) {
             for (let s = 0; s < SHARDS_PER_SLOT; s++) {
                 phase2.push({ model: m, d, shard: s, totalShards: SHARDS_PER_SLOT });
             }
         }
     }
-    await runQueue(phase2, CONCURRENCY, "phase 2 (d3, d4)");
+    await runQueue(phase2, CONCURRENCY, "phase 2 (remaining tiers)");
 } else {
     // Legacy: model groups in parallel, difficulties within a model
     // serial. Caps at modelCount slots concurrent regardless of
@@ -301,9 +324,7 @@ if (PREWARM) {
             const i = cursor++;
             if (i >= MODELS.length) return;
             const m = MODELS[i];
-            await runSlot(m, 1);
-            await runSlot(m, 3);
-            await runSlot(m, 4);
+            for (const d of tiersFor(m)) await runSlot(m, d);
         }
     }
     const limit = Math.min(CONCURRENCY, MODELS.length);

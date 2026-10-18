@@ -62,13 +62,10 @@ bun run dev
 Then open:
 
 ```
-http://localhost:3000/?benchmarks=release/dataset-300b/presets.json&benchmark=bird-d3-001&model=Bases/birdBase.svg&autoRun=true&autoCapture=false
+http://localhost:3000/?benchmarks=release/dataset-300b/presets.json&benchmark=bird-d3-001&autoRun=true&autoCapture=false
 ```
 
-This plays the preset in the interactive simulator: the flat sheet with its dots, the folding sequence, and the lettered final pose.
-
-- **`model`.** Set it to the preset's `model` without its leading slash, for example `Bases/pinwheelBase.svg` for a `pinwheel-d5-…` preset. The page loads a base by clicking its entry in the Examples menu, whose paths have no leading slash. Without the parameter, a preset whose path starts with `/` never loads, and `autoRun` fails. The headless tools load bases directly and are not affected.
-- **`autoCapture=false`.** Keep it; otherwise the page writes PNGs into the server's `DATASET_DIR`.
+This plays the preset in the interactive simulator: the flat sheet with its dots, the folding sequence, and the lettered final pose. Keep `autoCapture=false`; otherwise the page writes PNGs into the server's `DATASET_DIR`.
 
 Without `?benchmarks=`, the page is the plain interactive simulator.
 

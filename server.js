@@ -10,16 +10,35 @@
  *   PORT=3001 bun run dev                    (different port)
  */
 
-import { join } from "path";
-import { mkdir, appendFile, writeFile, readFile } from "fs/promises";
+import { join, resolve } from "path";
+import { mkdir, appendFile, writeFile, readFile, rename } from "fs/promises";
 
 const ROOT = import.meta.dir;
-const SCREENSHOTS_DIR = join(ROOT, process.env.DATASET_DIR || "dataset");
+const SCREENSHOTS_DIR = resolve(ROOT, process.env.DATASET_DIR || "dataset");
 const SCAN_CACHE_DIR = join(SCREENSHOTS_DIR, ".scan-cache");
 const PORT = (() => {
     const n = parseInt(process.env.PORT ?? "", 10);
     return Number.isFinite(n) && n > 0 && n <= 65535 ? n : 3000;
 })();
+
+// Each output file has one writer. Separate files remain concurrent.
+const outputWrites = new Map();
+async function updateOutputFile(path, update) {
+    const prior = outputWrites.get(path) || Promise.resolve();
+    const write = prior.catch(() => {}).then(update);
+    outputWrites.set(path, write);
+    try { return await write; }
+    finally { if (outputWrites.get(path) === write) outputWrites.delete(path); }
+}
+async function readOutputFile(path, fallback) {
+    try { return await readFile(path, "utf8"); }
+    catch (error) { if (error.code === "ENOENT") return fallback; throw error; }
+}
+async function replaceOutputFile(path, data) {
+    const temporary = path + ".tmp";
+    await writeFile(temporary, data, "utf8");
+    await rename(temporary, path);
+}
 
 // Ensure screenshots directory exists
 await mkdir(SCREENSHOTS_DIR, { recursive: true });
@@ -78,7 +97,10 @@ Bun.serve({
                 await mkdir(dir, { recursive: true });
                 const safeName = file.name.replace(/[/\\]/g, "_");
                 const dest = join(dir, safeName);
-                await Bun.write(dest, file);
+                await updateOutputFile(dest, async () => {
+                    await Bun.write(dest + ".tmp", file);
+                    await rename(dest + ".tmp", dest);
+                });
                 console.log("  saved:", dest);
                 return new Response(JSON.stringify({ ok: true, path: dest }), {
                     headers: { "Content-Type": "application/json" },
@@ -113,13 +135,23 @@ Bun.serve({
                     return new Response("invalid path", { status: 400 });
                 }
                 const filePath = join(SCREENSHOTS_DIR, safeRel);
-                await mkdir(SCREENSHOTS_DIR, { recursive: true });
-                const data = (line.endsWith("\n") ? line : line + "\n");
-                if (fresh) {
-                    await writeFile(filePath, data, "utf8");
-                } else {
-                    await appendFile(filePath, data, "utf8");
-                }
+                await mkdir(filePath.substring(0, filePath.lastIndexOf("/")), { recursive: true });
+                const entry = JSON.parse(line);
+                const data = line.trimEnd() + "\n";
+                await updateOutputFile(filePath, async () => {
+                    if (fresh) {
+                        await replaceOutputFile(filePath, data);
+                    } else if (entry.id != null) {
+                        // A rerender replaces the row with the same sample ID.
+                        const existing = await readOutputFile(filePath, "");
+                        const rows = existing.split("\n").filter(row => row.trim());
+                        const retained = rows.filter(row => JSON.parse(row).id !== entry.id);
+                        retained.push(line.trimEnd());
+                        await replaceOutputFile(filePath, retained.join("\n") + "\n");
+                    } else {
+                        await appendFile(filePath, data, "utf8");
+                    }
+                });
                 return new Response(JSON.stringify({ ok: true, path: filePath }), {
                     headers: { "Content-Type": "application/json" },
                 });
@@ -161,17 +193,15 @@ Bun.serve({
                 const fileDir = filePath.substring(0, filePath.lastIndexOf("/"));
                 await mkdir(fileDir, { recursive: true });
 
-                let merged = {};
-                try {
-                    const existing = await readFile(filePath, "utf8");
-                    const parsed = JSON.parse(existing);
-                    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-                        merged = parsed;
+                const merged = await updateOutputFile(filePath, async () => {
+                    const current = JSON.parse(await readOutputFile(filePath, "{}"));
+                    if (!current || typeof current !== "object" || Array.isArray(current)) {
+                        throw new Error("Expected a metadata object");
                     }
-                } catch (_) { /* missing or invalid — start fresh */ }
-
-                merged[key] = value;
-                await writeFile(filePath, JSON.stringify(merged, null, 2), "utf8");
+                    current[key] = value;
+                    await replaceOutputFile(filePath, JSON.stringify(current, null, 2));
+                    return current;
+                });
                 return new Response(JSON.stringify({ ok: true, path: filePath, keys: Object.keys(merged).length }), {
                     headers: { "Content-Type": "application/json" },
                 });

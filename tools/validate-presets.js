@@ -19,6 +19,10 @@
  *
  *   # Or use --glob to expand a pattern:
  *   bun tools/validate-presets.js --glob "new_dataset/*.json"
+ *
+ *   # --trace records every point's visibility, viewing ratio and screen
+ *   # position at every step instead of validating (tools/rebalance-anchors.py):
+ *   bun tools/validate-presets.js --inputs bank.json --settle-ms 800 --trace --report trace.json
  */
 
 import puppeteer from "puppeteer";
@@ -35,9 +39,21 @@ const { values: args } = parseArgs({
         "settle-ms":  { type: "string", default: "300" },
         "server-url": { type: "string", default: "http://localhost:3000" },
         "max-per-slot": { type: "string", default: "0" },
+        report: { type: "string", default: "" },
+        "min-point-view-quality": { type: "string" },
+        trace: { type: "boolean", default: false },
+        // Dot totals the bank was generated with (generate-presets.js --cluster-points).
+        "cluster-points": { type: "string", default: "" },
+        "cluster-scatter": { type: "string", default: "" },
+        "cluster-group-size": { type: "string", default: "" },
+        "cluster-back-groups": { type: "string", default: "" },
     },
     strict: false,
 });
+
+if (args["min-point-view-quality"] != null && (!Number.isFinite(Number(args["min-point-view-quality"])) || Number(args["min-point-view-quality"]) < 0 || Number(args["min-point-view-quality"]) > 1)) {
+    throw new Error("--min-point-view-quality must be between 0 and 1");
+}
 
 const SETTLE_MS = parseInt(args["settle-ms"]) || 300;
 const SERVER_URL = args["server-url"];
@@ -81,8 +97,7 @@ for (const f of files) {
     const abs = isAbsolute(f) ? f : join(ROOT, f);
     let data;
     try { data = JSON.parse(readFileSync(abs, "utf8")); } catch (e) {
-        console.error(`Skip ${f}: parse error — ${e.message}`);
-        continue;
+        throw new Error(`Cannot read preset bank ${f}: ${e.message}`);
     }
     let keys = Object.keys(data).filter((k) => {
         const v = data[k];
@@ -156,15 +171,6 @@ async function validateModelGroup(modelPath, presets) {
             },
             { timeout: 45000, polling: 500 },
         );
-        await page.waitForFunction(
-            () => {
-                try {
-                    var p = window.globals.benchmark.getPresets();
-                    return p && Object.keys(p).length > 0;
-                } catch (e) { return false; }
-            },
-            { timeout: 15000, polling: 500 },
-        );
         // Warm-up: cycle the model through a full fold and back so the
         // physics simulation is "trained" before validation. This matches
         // generator state where Phase 2 has been cycling for some time.
@@ -179,15 +185,45 @@ async function validateModelGroup(modelPath, presets) {
             if (globals.threeView && globals.threeView.resetModel) globals.threeView.resetModel();
         });
         await new Promise((r) => setTimeout(r, 1500));
+        if (args["cluster-points"]) {
+            await page.evaluate((range) => globals.presetGenerator.setClusterPoints(range),
+                args["cluster-points"].split(",").map(Number));
+        }
+        if (args["cluster-scatter"]) {
+            await page.evaluate((range) => globals.presetGenerator.setClusterScatter(range),
+                args["cluster-scatter"].split(",").map(Number));
+        }
+        if (args["cluster-group-size"]) {
+            await page.evaluate((range) => globals.presetGenerator.setClusterGroupSize(range),
+                args["cluster-group-size"].split(",").map(Number));
+        }
+        if (args["cluster-back-groups"]) {
+            await page.evaluate((range) => globals.presetGenerator.setClusterBackGroups(range),
+                args["cluster-back-groups"].split(",").map(Number));
+        }
 
         for (const { sourceFile, name, preset } of presets) {
+            if (args.trace) {
+                const t = await page.evaluate(
+                    ({ preset, settleMs }) => new Promise((resolve) => {
+                        globals.presetGenerator.tracePoints(preset, settleMs, resolve);
+                    }),
+                    { preset, settleMs: SETTLE_MS },
+                );
+                const ok = !!(t && t.steps && t.steps.length === preset.steps.length);
+                console.log(`  [${ok ? "TRACED" : "FAIL"}] ${sourceFile}::${name}`);
+                results.push({ sourceFile, name, valid: ok, trace: t && t.steps, error: t && t.error });
+                continue;
+            }
+            const evaluatedPreset = args["min-point-view-quality"] == null ? preset
+                : { ...preset, minPointViewQuality: Number(args["min-point-view-quality"]) };
             const r = await page.evaluate(
                 ({ preset, settleMs }) => {
                     return new Promise((resolve) => {
                         globals.presetGenerator.validatePreset(preset, settleMs, resolve);
                     });
                 },
-                { preset, settleMs: SETTLE_MS },
+                { preset: evaluatedPreset, settleMs: SETTLE_MS },
             );
             const ok = r && r.valid === true;
             console.log(
@@ -200,12 +236,17 @@ async function validateModelGroup(modelPath, presets) {
                 }
                 if (r.failures.length > show.length) console.log(`         … (${r.failures.length - show.length} more)`);
             }
-            results.push({ sourceFile, name, valid: ok, failures: r && r.failures ? r.failures.length : null });
+            results.push({ sourceFile, name, valid: ok, failures: r && r.failures ? r.failures.length : null, details: r && r.failures, quality: r && r.quality, expertMotion: r && r.expertMotion });
         }
     } finally {
         try { await browser.close(); } catch (e) {}
     }
     return results;
+}
+
+if (presetsByModel.size === 0) {
+    console.error("No renderable presets found in the supplied files.");
+    process.exit(1);
 }
 
 // ── Main ─────────────────────────────────────────────────────────
@@ -228,5 +269,8 @@ if (failed > 0) {
     for (const r of allResults.filter((r) => !r.valid)) {
         console.log(`    - ${r.sourceFile}::${r.name} (failures=${r.failures})`);
     }
+}
+if (args.report) {
+    await Bun.write(isAbsolute(args.report) ? args.report : join(ROOT, args.report), JSON.stringify({ total: allResults.length, passed, failed, results: allResults }, null, 2));
 }
 process.exit(failed > 0 ? 1 : 0);

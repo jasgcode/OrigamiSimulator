@@ -14,7 +14,6 @@ All commands run from the repository root. The files for levels 2 and 3 are in [
 |---|---|
 | Everything | Linux or macOS, [Bun](https://bun.sh) ≥ 1.3 (1.3.8 was used), Python ≥ 3.10 (3.12 was used; the tools use only the standard library) |
 | Rendering, generation | `bun install` (installs Puppeteer), then `bunx puppeteer browsers install chrome` |
-| `bun run test:dataset` | Pillow (`pip install pillow`), for one trial tool's tests |
 | Reference scores | The [Claude Code](https://claude.com/claude-code) CLI, logged in |
 
 **The simulator itself needs no install.** Its JavaScript dependencies are vendored in `dependencies/`.
@@ -148,9 +147,9 @@ This answers every row of `dataset.jsonl` and of `probe_first_last_reworded.json
 bun run test:dataset
 ```
 
-This runs 70 JavaScript tests (generator logic, validation, and the server's output endpoints) and 106 Python tests (assembly, selection balancing, audits, probes, scoring, dataset checks). None of them needs a running server or a browser. Use the render and validation commands above for WebGL checks.
+This runs 73 JavaScript tests (generator logic, validation, and the server's output endpoints) and 104 Python tests (assembly, selection balancing, audits, probes, scoring, dataset checks). None of them needs a running server or a browser. Use the render and validation commands above for WebGL checks.
 
 ## Earlier datasets
 
 - **uniform-1000** (tiers 1, 3, 4) was generated with the code at commit `89f3dee`. Tier 3 has since been replaced by the clustered medium tier, so regenerating that set needs that commit. See [uniform-1000.md](uniform-1000.md).
-- **`eval/`** (2026-10-01) was built with `tools/build-eval.py` from banks that included mapfold. The current clustered tiers exclude mapfold, so a rebuild today leaves the mapfold cells empty.
+- **`eval/`** (2026-10-01) was built with `tools/build-eval.py` from banks that included mapfold. The current clustered tiers exclude mapfold, so with new banks `build-eval.py` stops on the empty mapfold cells unless it gets `--models` without mapfold or `--allow-short`.

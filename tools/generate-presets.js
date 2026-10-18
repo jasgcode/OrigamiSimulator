@@ -27,7 +27,9 @@
  */
 
 import puppeteer from "puppeteer";
-import { join } from "path";
+import { join, resolve } from "path";
+import { readFileSync } from "fs";
+import { rename } from "fs/promises";
 import { parseArgs } from "util";
 
 const ROOT = join(import.meta.dir, "..");
@@ -53,11 +55,27 @@ const { values: args } = parseArgs({
         "target-selection-mode": { type: "string", default: "all" },
         "include-initial-visible-tracked-point": { type: "boolean", default: false },
         "initial-visible-tracked-point-count": { type: "string", default: "1" },
-        "min-point-separation-px": { type: "string", default: "70" },
+        // Unset: 50 px for clustered tiers (medium, expert), 70 px otherwise.
+        "min-point-separation-px": { type: "string" },
         "min-face-quality": { type: "string", default: "0.6" },
+        "min-point-view-quality": { type: "string", default: "0.3" },
         "build-progressions": { type: "string", default: "0" },
         "rotation-profile-count": { type: "string", default: "0" },
+        "expert-motion-style": { type: "string", default: "" },
+        // Dot totals for clustered tiers, "lo,hi", in place of the tier's range.
+        "cluster-points": { type: "string", default: "" },
+        // Scatter dots around the groups, "lo,hi" before twins (off by default).
+        "cluster-scatter": { type: "string", default: "" },
+        "cluster-group-size": { type: "string", default: "" },
+        "cluster-back-groups": { type: "string", default: "" },
+        // Last-image dot sizes relative to pointRadius, e.g. 0.75,1.25.
+        "cluster-end-sizes": { type: "string", default: "" },
+        // Medium spin in turns either way (default 0.5).
+        "cluster-spin-turns": { type: "string", default: "" },
+        // Tracked dots' twins meet the tracked dots' rules in every frame.
+        "symmetric-twins": { type: "boolean", default: false },
         "pov-grid-size": { type: "string", default: "0" },
+        "final-fold": { type: "string", default: "0" },
         "scan-settle-ms": { type: "string", default: "300" },
         "enforce-separation-all-steps": { type: "boolean", default: false },
         "max-scan-candidates": { type: "string", default: "0" },
@@ -70,12 +88,34 @@ const { values: args } = parseArgs({
         "retry-delay-ms": { type: "string", default: "2000" },
         "auto-degrade-on-retry": { type: "boolean", default: true },
         "dumpio": { type: "boolean", default: false },
+        // Re-point pass: mine one already-validated trajectory from a bank for
+        // additional face-point placements instead of searching for new
+        // trajectories. --repoint-name selects the preset; default is the first.
+        "repoint": { type: "string", default: "" },
+        "repoint-name": { type: "string", default: "" },
+        "configs-per-trajectory": { type: "string", default: "0" },
     },
     strict: false,
 });
 
 const MODEL = args.model;
-const DIFFICULTY = parseInt(args.difficulty);
+const DIFFICULTY = Number(args.difficulty);
+if (![1, 2, 3, 4, 5].includes(DIFFICULTY)) throw new Error("--difficulty must be an integer from 1 to 5");
+for (const flag of ["cluster-points", "cluster-scatter", "cluster-group-size", "cluster-back-groups"]) {
+    if (!args[flag]) continue;
+    const [lo, hi] = args[flag].split(",").map(Number);
+    if (!(Number.isInteger(lo) && Number.isInteger(hi) && lo >= 0 && lo <= hi)) throw new Error(`--${flag} must be lo,hi integers`);
+    if (![3, 5].includes(DIFFICULTY)) throw new Error(`--${flag} applies to clustered tiers (3, 5) only`);
+}
+const CLUSTER_SPIN_TURNS = args["cluster-spin-turns"] ? Number(args["cluster-spin-turns"]) : undefined;
+if (CLUSTER_SPIN_TURNS !== undefined && !(CLUSTER_SPIN_TURNS > 0 && DIFFICULTY === 3)) {
+    throw new Error("--cluster-spin-turns takes a positive number of turns, for medium (3) only");
+}
+const CLUSTER_END_SIZES = args["cluster-end-sizes"] ? args["cluster-end-sizes"].split(",").map(Number) : undefined;
+if (CLUSTER_END_SIZES && !(CLUSTER_END_SIZES.length === 2 && CLUSTER_END_SIZES[0] > 0 && CLUSTER_END_SIZES[0] <= CLUSTER_END_SIZES[1]
+        && [3, 5].includes(DIFFICULTY))) {
+    throw new Error("--cluster-end-sizes takes lo,hi with 0 < lo <= hi, for clustered tiers (3, 5) only");
+}
 const COUNT = parseInt(args.count);
 const BASE_NAME = args["base-name"];
 const START_INDEX = parseInt(args["start-index"]);
@@ -91,7 +131,12 @@ const TRACKING_EVAL_MODE = args["tracking-eval-mode"] || "strictAllSteps";
 const TARGET_SELECTION_MODE = args["target-selection-mode"] || "all";
 const INCLUDE_INITIAL_VISIBLE_TRACKED_POINT = !!args["include-initial-visible-tracked-point"];
 const INITIAL_VISIBLE_TRACKED_POINT_COUNT = parseInt(args["initial-visible-tracked-point-count"]);
-const MIN_POINT_SEPARATION_PX = parseFloat(args["min-point-separation-px"]);
+// Clustered tiers use smaller markers and a matching 50 px floor, set in the
+// page. An explicit 70 here used to override it for every tier.
+const CLUSTERED_TIERS = [3, 5];
+const MIN_POINT_SEPARATION_PX = args["min-point-separation-px"] != null
+    ? parseFloat(args["min-point-separation-px"])
+    : (CLUSTERED_TIERS.includes(Number(args.difficulty)) ? undefined : 70);
 const MIN_FACE_QUALITY = parseFloat(args["min-face-quality"]);
 const BUILD_PROGRESSIONS = parseInt(args["build-progressions"]);
 const ROTATION_PROFILE_COUNT = parseInt(args["rotation-profile-count"]);
@@ -109,6 +154,28 @@ const MAX_ATTEMPTS = parseInt(args["max-attempts"]);
 const RETRY_DELAY_MS = parseInt(args["retry-delay-ms"]);
 const AUTO_DEGRADE_ON_RETRY = args["auto-degrade-on-retry"] !== false;
 const DUMPIO = !!args.dumpio;
+const REPOINT = args.repoint;
+const REPOINT_NAME = args["repoint-name"];
+const CONFIGS_PER_TRAJECTORY = parseInt(args["configs-per-trajectory"]);
+
+// Load the banked trajectory up front so a bad path or name fails before a
+// browser is launched.
+const repointSteps = (() => {
+    if (!REPOINT) return undefined;
+    const bank = JSON.parse(readFileSync(resolve(ROOT, REPOINT), "utf8"));
+    const name = REPOINT_NAME || Object.keys(bank)[0];
+    const preset = bank[name];
+    if (!preset) throw new Error(`--repoint-name '${name}' not found in ${REPOINT}`);
+    if (!Array.isArray(preset.steps) || preset.steps.length === 0) {
+        throw new Error(`preset '${name}' in ${REPOINT} has no steps to re-point`);
+    }
+    console.log(`[host] re-pointing trajectory from ${name} (${preset.steps.length} steps, pov ${JSON.stringify(preset.steps[0].pov)})`);
+    return preset.steps;
+})();
+
+if (!Number.isFinite(Number(args["min-point-view-quality"])) || Number(args["min-point-view-quality"]) < 0 || Number(args["min-point-view-quality"]) > 1) {
+    throw new Error("--min-point-view-quality must be between 0 and 1");
+}
 
 console.log("Preset Generator (headless)");
 console.log("  Model:", MODEL);
@@ -179,10 +246,20 @@ function buildEvalOptions(attemptIndex) {
         targetSelectionMode: TARGET_SELECTION_MODE,
         includeInitialVisibleTrackedPoint: INCLUDE_INITIAL_VISIBLE_TRACKED_POINT,
         initialVisibleTrackedPointCount: isNaN(INITIAL_VISIBLE_TRACKED_POINT_COUNT) ? 1 : INITIAL_VISIBLE_TRACKED_POINT_COUNT,
-        minPointSeparationPx: isNaN(MIN_POINT_SEPARATION_PX) ? 70 : MIN_POINT_SEPARATION_PX,
+        minPointSeparationPx: MIN_POINT_SEPARATION_PX === undefined ? undefined
+            : (isNaN(MIN_POINT_SEPARATION_PX) ? 70 : MIN_POINT_SEPARATION_PX),
+        minPointViewQuality: Number(args["min-point-view-quality"]),
         minFaceQuality: isNaN(MIN_FACE_QUALITY) ? 0.6 : MIN_FACE_QUALITY,
         buildProgressions: isNaN(BUILD_PROGRESSIONS) || BUILD_PROGRESSIONS <= 0 ? undefined : BUILD_PROGRESSIONS,
         rotationProfileCount: isNaN(ROTATION_PROFILE_COUNT) || ROTATION_PROFILE_COUNT <= 0 ? undefined : ROTATION_PROFILE_COUNT,
+        expertMotionStyle: args["expert-motion-style"] || undefined,
+        clusterPoints: args["cluster-points"] ? args["cluster-points"].split(",").map(Number) : undefined,
+        clusterScatter: args["cluster-scatter"] ? args["cluster-scatter"].split(",").map(Number) : undefined,
+        clusterGroupSize: args["cluster-group-size"] ? args["cluster-group-size"].split(",").map(Number) : undefined,
+        clusterBackGroups: args["cluster-back-groups"] ? args["cluster-back-groups"].split(",").map(Number) : undefined,
+        clusterEndSizes: CLUSTER_END_SIZES,
+        clusterSpinTurns: CLUSTER_SPIN_TURNS,
+        symmetricTwins: !!args["symmetric-twins"],
         finalFold: isNaN(FINAL_FOLD) || FINAL_FOLD <= 0 ? undefined : FINAL_FOLD,
         povGridSize: isNaN(POV_GRID_SIZE) || POV_GRID_SIZE <= 0 ? undefined : POV_GRID_SIZE,
         scanSettleMs: isNaN(SCAN_SETTLE_MS) ? 300 : SCAN_SETTLE_MS,
@@ -191,6 +268,9 @@ function buildEvalOptions(attemptIndex) {
         maxTrajectoryCandidates: isNaN(MAX_TRAJECTORY_CANDIDATES) || MAX_TRAJECTORY_CANDIDATES <= 0 ? undefined : MAX_TRAJECTORY_CANDIDATES,
         phase2LogEveryMs: isNaN(PHASE2_LOG_EVERY_MS) ? 5000 : PHASE2_LOG_EVERY_MS,
         phase2StallWarnMs: isNaN(PHASE2_STALL_WARN_MS) ? 30000 : PHASE2_STALL_WARN_MS,
+        repointSteps: repointSteps,
+        configsPerTrajectory: isNaN(CONFIGS_PER_TRAJECTORY) || CONFIGS_PER_TRAJECTORY <= 0
+            ? undefined : CONFIGS_PER_TRAJECTORY,
     };
 
     if (!AUTO_DEGRADE_ON_RETRY || attemptIndex <= 1) return base;
@@ -199,12 +279,13 @@ function buildEvalOptions(attemptIndex) {
     // and more progression candidates to find trajectories with both front and
     // back points visible, so their floors are higher than lower tiers.
     const diff = isNaN(DIFFICULTY) ? 3 : DIFFICULTY;
-    // Tiers: d1-d4 only (d5 dropped per user spec).
+    // Search-budget floors preserve enough coverage for each tier.
     const FLOORS = {
         1: { build: 12, grid: 32,  scan: 6,  traj: 20 },
         2: { build: 16, grid: 48,  scan: 8,  traj: 28 },
         3: { build: 20, grid: 64,  scan: 10, traj: 36 },
         4: { build: 28, grid: 80,  scan: 12, traj: 48 },
+        5: { build: 40, grid: 110, scan: 16, traj: 60 },
     };
     const floor = FLOORS[diff] || FLOORS[3];
 
@@ -400,14 +481,16 @@ const names = Object.keys(generated);
 console.log("\nGenerated " + names.length + " presets:");
 for (const name of names) {
     const p = generated[name];
-    const faceIds = Object.keys(p.facePoints).join(",");
+    const faceIds = (Array.isArray(p.facePoints)
+        ? [...new Set(p.facePoints.map(point => point.faceId))] : Object.keys(p.facePoints)).join(",");
     console.log(`  ${name}: ${p.steps.length} steps, faces=[${faceIds}], ${p.colorMode}`);
 }
 
 // Write to output file
 if (OUTPUT) {
     const outputPath = OUTPUT.startsWith("/") ? OUTPUT : join(ROOT, OUTPUT);
-    await Bun.write(outputPath, JSON.stringify(generated, null, 4));
+    await Bun.write(outputPath + ".tmp", JSON.stringify(generated, null, 4));
+    await rename(outputPath + ".tmp", outputPath);
     console.log("\nWritten to:", outputPath);
 }
 

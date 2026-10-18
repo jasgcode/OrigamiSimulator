@@ -23,14 +23,18 @@ import { readFile, writeFile } from "fs/promises";
 
 const { values: args } = parseArgs({
     options: {
-        input:  { type: "string", default: "new_dataset/matrix-gen/_combined.json" },
-        output: { type: "string", default: "new_dataset/matrix-gen/_combined_reverse.json" },
+        input:  { type: "string" },
+        output: { type: "string" },
     },
     strict: false,
 });
 
-const inputPath = String(args.input);
-const outputPath = String(args.output);
+if (typeof args.input !== "string" || typeof args.output !== "string") {
+    console.error("Usage: bun tools/reverse-presets.js --input <bank.json> --output <reversed.json>");
+    process.exit(1);
+}
+const inputPath = args.input;
+const outputPath = args.output;
 
 const raw = await readFile(inputPath, "utf8");
 const presets = JSON.parse(raw);

@@ -78,7 +78,9 @@ function initModel(globals){
 
     // Pool of 2D point discs (horizontal, locked orientation) and textures
     var MAX_POINT_SPRITES = 50;
-    var pointDiscGeo = new THREE.CircleGeometry(0.025, 16);
+    // Discs are built at the default radius and scaled to globals.facePointRadius.
+    var POINT_DISC_RADIUS = 0.025;
+    var pointDiscGeo = new THREE.CircleGeometry(POINT_DISC_RADIUS, 16);
     var pointDiscs = [];
     var pointDiscNumberedMaps = [];
     var pointDiscLetterMaps = [];
@@ -353,6 +355,7 @@ function initModel(globals){
             }
             var use3D = globals.facePoints3D === true;
             var showNums = globals.showFacePointNumbers !== false;
+            var pointScale = (globals.facePointRadius || POINT_DISC_RADIUS) / POINT_DISC_RADIUS;
             // Before reveal: visible (non-hidden) points show as blank dots (no label).
             // After reveal (last step): ALL points get letter labels (A,B,C,...).
             // In arrow mode, labels are drawn in screen-space overlay (not on dots).
@@ -402,12 +405,17 @@ function initModel(globals){
 
                     if (use3D){
                         pointSpheres[pi].position.copy(ptPos);
+                        pointSpheres[pi].scale.setScalar(pointScale);
                         pointSpheres[pi].visible = visible;
                     } else {
                         // In arrow mode, labels/arrows are drawn by pointAnnotations overlay.
                         // Here we only draw face dots.
                         pointDiscs[pi].position.copy(ptPos);
                         pointDiscs[pi].quaternion.setFromRotationMatrix(faceBasis);
+                        // The last image draws each dot at its own end size.
+                        var endScale = globals.revealHiddenPoints && globals.facePoints.pointEndScale
+                            ? globals.facePoints.pointEndScale(pi) : 1;
+                        pointDiscs[pi].scale.setScalar(pointScale * endScale);
                         pointDiscs[pi].visible = visible;
                     }
                 }
