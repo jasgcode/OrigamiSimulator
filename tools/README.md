@@ -270,7 +270,7 @@ Its `MODELS` list includes mapfold, as the 2026-10-01 pools did. `generate-exper
 
 Both scripts skip mapfold at tiers 3 and 5 with a log line, since those tiers cannot twin it. `assemble-uniform-1000.py --include-expert` reads the expert frame count from `js/presetGenerator.js`.
 
-[docs/uniform-1000.md](../docs/uniform-1000.md) has the commands. Tier 3 is now the clustered medium tier, so regenerating that set needs commit `89f3dee`.
+[docs/uniform-1000.md](../docs/uniform-1000.md) has the commands. Tier 3 is now the clustered medium tier, so regenerating that set needs commit `eaadafe`.
 
 `reverse-presets.js --input bank.json --output reversed.json` reverses every preset's steps and sets `direction: "reverse"`, giving folded → flat variants. Rows rendered from reversed presets use the reverse question template.
 

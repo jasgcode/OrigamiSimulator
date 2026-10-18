@@ -26,10 +26,10 @@ In all three tiers:
 
 ## Regenerating it
 
-The set was generated with the code at commit `89f3dee` (2026-05-15). Tier 3 has since become the clustered medium tier, which cannot use mapfold. Running the current orchestrator therefore does two things: it generates new-style tier 3 items, and it skips the mapfold tier 3 cell, which the clustered tier cannot use. To regenerate the original set, check out that commit:
+The set was generated with the code at commit `eaadafe` (2026-05-15). Tier 3 has since become the clustered medium tier, which cannot use mapfold. Running the current orchestrator therefore does two things: it generates new-style tier 3 items, and it skips the mapfold tier 3 cell, which the clustered tier cannot use. To regenerate the original set, check out that commit:
 
 ```bash
-git checkout 89f3dee
+git checkout eaadafe
 DATASET_DIR=new_dataset/uniform-1000-render bun run dev     # terminal 1
 python3 tools/generate-uniform-1000.py                      # terminal 2
 ```

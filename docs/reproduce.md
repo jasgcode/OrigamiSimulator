@@ -151,5 +151,5 @@ This runs 73 JavaScript tests (generator logic, validation, and the server's out
 
 ## Earlier datasets
 
-- **uniform-1000** (tiers 1, 3, 4) was generated with the code at commit `89f3dee`. Tier 3 has since been replaced by the clustered medium tier, so regenerating that set needs that commit. See [uniform-1000.md](uniform-1000.md).
+- **uniform-1000** (tiers 1, 3, 4) was generated with the code at commit `eaadafe`. Tier 3 has since been replaced by the clustered medium tier, so regenerating that set needs that commit. See [uniform-1000.md](uniform-1000.md).
 - **`eval/`** (2026-10-01) was built with `tools/build-eval.py` from banks that included mapfold. The current clustered tiers exclude mapfold, so with new banks `build-eval.py` stops on the empty mapfold cells unless it gets `--models` without mapfold or `--allow-short`.
